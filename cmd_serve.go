@@ -9,6 +9,7 @@ import (
 	"github.com/syft8/burnban/internal/pricing"
 	"github.com/syft8/burnban/internal/proxy"
 	"github.com/syft8/burnban/internal/store"
+	"github.com/syft8/burnban/internal/web"
 )
 
 func cmdServe(args []string) error {
@@ -48,6 +49,8 @@ func cmdServe(args []string) error {
 
 	fmt.Printf(`🔥 burnban %s — the meter is running
 
+   dashboard   %s
+
    point your agents here:
      anthropic   ANTHROPIC_BASE_URL=%s/anthropic
      openai      OPENAI_BASE_URL=%s/openai/v1
@@ -56,10 +59,13 @@ func cmdServe(args []string) error {
    db    %s
    cap   %s
 %s
-   watch it live:  burnban top
+   watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, *dbPath, capState, banState)
+`, version, base, base, base, base, *dbPath, capState, banState)
 
-	srv := &http.Server{Addr: addr, Handler: p.Handler()}
+	mux := http.NewServeMux()
+	mux.Handle("/", p.Handler())
+	web.Register(mux, s, version)
+	srv := &http.Server{Addr: addr, Handler: mux}
 	return srv.ListenAndServe()
 }

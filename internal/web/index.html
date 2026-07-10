@@ -1,0 +1,311 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>burnban — the meter is running</title>
+<style>
+  :root {
+    --bg: #0b0806;
+    --panel: #141009;
+    --panel-2: #17120a;
+    --line: rgba(255, 140, 60, .13);
+    --line-soft: rgba(255, 255, 255, .06);
+    --text: #e8dfd0;
+    --dim: #96876f;
+    --faint: #5f5546;
+    --ember: #ff7a2f;
+    --ember-hi: #ffc38a;
+    --ember-deep: #d94f14;
+    --ok: #9dc76c;
+    --warn: #f0b34e;
+    --hot: #ff4d3d;
+    --mono: ui-monospace, "SF Mono", "Cascadia Mono", Menlo, Consolas, monospace;
+    --cond: "Futura", "Avenir Next Condensed", "HelveticaNeue-CondensedBold", "Arial Narrow", "Roboto Condensed", sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html { color-scheme: dark; }
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: var(--mono);
+    font-size: 14px;
+    line-height: 1.5;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+  /* atmosphere: ember glow bleeding down from the top of the unit */
+  body::before {
+    content: ""; position: fixed; inset: 0; pointer-events: none; z-index: 0;
+    background:
+      radial-gradient(1100px 460px at 50% -12%, rgba(255, 110, 40, .16), transparent 62%),
+      radial-gradient(700px 300px at 82% -8%, rgba(255, 170, 60, .05), transparent 60%);
+  }
+  .scan {
+    position: fixed; inset: 0; pointer-events: none; z-index: 3; opacity: .35;
+    background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
+  }
+  main { position: relative; z-index: 1; max-width: 1060px; margin: 0 auto; padding: 28px 22px 48px; }
+
+  .label {
+    font-family: var(--cond);
+    font-size: 11px; letter-spacing: .18em; text-transform: uppercase;
+    color: var(--dim); font-weight: 600;
+  }
+
+  /* ── header: equipment nameplate ─────────────────────────── */
+  header {
+    display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
+    padding-bottom: 14px; border-bottom: 1px solid var(--line);
+  }
+  .brand { font-family: var(--cond); font-size: 20px; letter-spacing: .22em; font-weight: 700; }
+  .brand em { font-style: normal; color: var(--ember); }
+  .brand .tag { font-size: 11px; letter-spacing: .18em; color: var(--faint); font-weight: 600; margin-left: 12px; }
+  .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); white-space: nowrap; }
+  .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.6s ease-in-out infinite; }
+  .dot.off { background: #6b6257; box-shadow: none; animation: none; }
+  @keyframes pulse { 50% { opacity: .35; } }
+
+  /* ── lockout banner ──────────────────────────────────────── */
+  .ban {
+    margin-top: 18px; padding: 13px 18px;
+    font-family: var(--cond); letter-spacing: .16em; font-weight: 700; font-size: 13px;
+    color: #ff8a7a; text-transform: uppercase;
+    border: 1px solid rgba(255, 77, 61, .45);
+    background: repeating-linear-gradient(-45deg, rgba(255,77,61,.14) 0 16px, rgba(255,77,61,.03) 16px 32px);
+  }
+  .ban .dim { color: #b06a5c; letter-spacing: .1em; font-weight: 400; text-transform: none; margin-left: 10px; }
+  .hidden { display: none; }
+
+  /* ── hero readout ────────────────────────────────────────── */
+  .hero {
+    display: flex; justify-content: space-between; align-items: flex-end; gap: 28px;
+    padding: 34px 0 30px; flex-wrap: wrap;
+  }
+  .big {
+    font-size: clamp(64px, 12vw, 132px); font-weight: 700; line-height: .95;
+    letter-spacing: -.02em; font-variant-numeric: tabular-nums;
+    background: linear-gradient(180deg, var(--ember-hi) 0%, var(--ember) 55%, var(--ember-deep) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent;
+    filter: drop-shadow(0 0 22px rgba(255, 122, 47, .22));
+  }
+  .big.hot {
+    background: linear-gradient(180deg, #ffb0a0, var(--hot) 60%, #b31f12);
+    -webkit-background-clip: text; background-clip: text;
+    filter: drop-shadow(0 0 26px rgba(255, 77, 61, .35));
+  }
+  .stats { display: flex; gap: 34px; padding-bottom: 10px; }
+  .stat .val { font-size: 24px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
+
+  /* ── fuse bar (budget) ───────────────────────────────────── */
+  .fuse-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
+  .fuse-head .right { color: var(--text); }
+  .track {
+    position: relative; height: 26px; border: 1px solid var(--line);
+    background: #120d08; overflow: hidden;
+  }
+  .track::after { /* meter tick marks */
+    content: ""; position: absolute; inset: 0; pointer-events: none;
+    background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 1px), rgba(255,255,255,.08) calc(10% - 1px) 10%);
+  }
+  .fill { height: 100%; width: 0%; transition: width .6s ease, background .4s; }
+  .fill.ok   { background: linear-gradient(90deg, #55742f, var(--ok)); }
+  .fill.warm { background: linear-gradient(90deg, #8a6420, var(--warn)); }
+  .fill.hot  { background: linear-gradient(90deg, #8a2318, var(--hot)); animation: heat 1.2s ease-in-out infinite; }
+  @keyframes heat { 50% { filter: brightness(1.25); } }
+
+  /* ── panels ──────────────────────────────────────────────── */
+  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 26px; }
+  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } .hero { align-items: flex-start; flex-direction: column; } }
+  .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 10px; }
+  .panel h2 {
+    font-family: var(--cond); font-size: 11px; letter-spacing: .18em; font-weight: 700;
+    color: var(--dim); padding-bottom: 10px; border-bottom: 1px solid var(--line-soft);
+  }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th {
+    font-family: var(--cond); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
+    color: var(--faint); font-weight: 600; text-align: right; padding: 9px 0 5px 12px;
+  }
+  th:first-child, td:first-child { text-align: left; padding-left: 0; }
+  td { padding: 7px 0 7px 12px; text-align: right; border-top: 1px solid var(--line-soft); font-size: 13px; }
+  td.cost { color: var(--ember); font-weight: 700; }
+  td.name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+  tr.empty td { color: var(--faint); text-align: left; padding: 14px 0; border-top: none; }
+
+  /* ── waste receipt ───────────────────────────────────────── */
+  .receipt {
+    margin-top: 14px; background: var(--panel-2);
+    border: 1.5px dashed rgba(255, 190, 120, .28); padding: 16px 18px;
+  }
+  .receipt h2 {
+    font-family: var(--cond); font-size: 11px; letter-spacing: .18em; font-weight: 700; color: var(--dim);
+    display: flex; justify-content: space-between;
+  }
+  .receipt h2 span { color: var(--faint); letter-spacing: .08em; }
+  .receipt ul { list-style: none; margin-top: 10px; }
+  .receipt li { padding: 5px 0; color: var(--text); }
+  .receipt li::before { content: "· "; color: var(--ember); font-weight: 700; }
+  .receipt li em { color: var(--ember); font-style: normal; font-weight: 700; }
+  .receipt li.clean { color: var(--ok); }
+  .receipt li.clean::before { color: var(--ok); }
+
+  footer { margin-top: 26px; color: var(--faint); font-size: 12px; text-align: center; letter-spacing: .04em; }
+
+  /* ── load + update motion ────────────────────────────────── */
+  .reveal { opacity: 0; transform: translateY(10px); animation: rise .55s cubic-bezier(.2,.7,.2,1) forwards; }
+  .d1 { animation-delay: .06s } .d2 { animation-delay: .12s } .d3 { animation-delay: .18s }
+  .d4 { animation-delay: .24s } .d5 { animation-delay: .30s }
+  @keyframes rise { to { opacity: 1; transform: none; } }
+  .flash { animation: flash .45s ease-out; }
+  @keyframes flash { 0% { color: var(--ember-hi); } }
+  @media (prefers-reduced-motion: reduce) { .reveal { animation: none; opacity: 1; transform: none; } .dot { animation: none; } }
+</style>
+</head>
+<body>
+<div class="scan" aria-hidden="true"></div>
+<main>
+  <header class="reveal">
+    <div class="brand">🔥 BURN<em>BAN</em><span class="tag">MODEL SPEND METER</span></div>
+    <div class="status"><span id="dot" class="dot"></span><span id="statusText">LIVE</span>&nbsp;·&nbsp;<span id="clock">—</span></div>
+  </header>
+
+  <section id="banBanner" class="ban hidden">🚫 Burn ban in effect — all agent spend paused<span class="dim">lift with: burnban lift</span></section>
+
+  <section class="hero reveal d1">
+    <div>
+      <div class="label">Burned today</div>
+      <div id="total" class="big" aria-live="polite">$0.0000</div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="label">Rate / hr</div><div id="rate" class="val">$0.0000</div></div>
+      <div class="stat"><div class="label">Requests</div><div id="reqs" class="val">0</div></div>
+      <div class="stat"><div class="label">Cache hit</div><div id="cache" class="val">–</div></div>
+    </div>
+  </section>
+
+  <section class="reveal d2">
+    <div class="fuse-head"><span class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
+    <div class="track"><div id="fill" class="fill ok"></div></div>
+  </section>
+
+  <section class="grid reveal d3">
+    <div class="panel">
+      <h2>By model — today</h2>
+      <table>
+        <thead><tr><th>model</th><th>req</th><th>in</th><th>out</th><th>cache r/w</th><th>cost</th></tr></thead>
+        <tbody id="models"></tbody>
+      </table>
+    </div>
+    <div class="panel">
+      <h2>By agent — today</h2>
+      <table>
+        <thead><tr><th>agent</th><th>req</th><th>cost</th></tr></thead>
+        <tbody id="agents"></tbody>
+      </table>
+    </div>
+  </section>
+
+  <section class="receipt reveal d4">
+    <h2>Waste receipts<span>keep them</span></h2>
+    <ul id="receipts"></ul>
+  </section>
+
+  <footer class="reveal d5">localhost only · zero telemetry · keys pass through, never stored · <span id="ver">burnban</span></footer>
+</main>
+
+<script>
+  const $ = id => document.getElementById(id);
+  const fmt$ = v => "$" + (v >= 10 ? v.toFixed(2) : v.toFixed(4));
+  const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
+  const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+
+  function setText(id, v) {
+    const el = $(id);
+    if (el.textContent !== v) {
+      el.textContent = v;
+      el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+    }
+  }
+
+  function online(ok) {
+    $("dot").className = "dot" + (ok ? "" : " off");
+    $("statusText").textContent = ok ? "LIVE" : "METER OFFLINE";
+  }
+
+  function renderModels(models) {
+    const tb = $("models");
+    if (!models.length) {
+      tb.innerHTML = '<tr class="empty"><td colspan="6">no traffic yet — point an agent at the meter</td></tr>';
+      return;
+    }
+    tb.innerHTML = models.map(m =>
+      `<tr><td class="name">${esc(m.model)}</td><td>${m.requests}</td><td>${fmtTok(m.in_tokens)}</td><td>${fmtTok(m.out_tokens)}</td><td>${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td><td class="cost">${fmt$(m.cost_usd)}</td></tr>`
+    ).join("");
+  }
+
+  function renderAgents(agents) {
+    const tb = $("agents");
+    if (!agents.length) {
+      tb.innerHTML = '<tr class="empty"><td colspan="3">nobody is burning</td></tr>';
+      return;
+    }
+    tb.innerHTML = agents.map(a =>
+      `<tr><td class="name">${esc(a.agent)}</td><td>${a.requests}</td><td class="cost">${fmt$(a.cost_usd)}</td></tr>`
+    ).join("");
+  }
+
+  function renderReceipts(d) {
+    const items = [];
+    if (d.dup_groups > 0)
+      items.push(`${d.dup_groups} duplicate request group(s) — <em>${fmt$(d.dup_wasted_usd)}</em> burned on identical calls`);
+    if (d.has_traffic && d.cache_hit_pct < 50 && d.requests >= 20)
+      items.push(`cache hit rate ${d.cache_hit_pct.toFixed(0)}% — paying full price for context the provider re-serves at a 90% discount`);
+    if (d.unpriced > 0)
+      items.push(`${d.unpriced} request(s) hit models with unknown pricing — recorded at $0, add them to ~/.burnban/pricing.json`);
+    if (d.estimated > 0)
+      items.push(`${d.estimated} response(s) carried no usage frame — output tokens estimated`);
+    $("receipts").innerHTML = items.length
+      ? items.map(i => `<li>${i}</li>`).join("")
+      : '<li class="clean">none — clean burn 🔥</li>';
+  }
+
+  async function tick() {
+    try {
+      const r = await fetch("/api/summary");
+      if (!r.ok) throw new Error(r.status);
+      const d = await r.json();
+      online(true);
+      setText("total", fmt$(d.total_cost));
+      setText("rate", fmt$(d.last_hour_cost));
+      setText("reqs", String(d.requests));
+      setText("cache", d.has_traffic ? d.cache_hit_pct.toFixed(0) + "%" : "–");
+      $("clock").textContent = new Date().toLocaleTimeString();
+      $("ver").textContent = "burnban " + d.version;
+      $("banBanner").classList.toggle("hidden", !d.ban_active);
+
+      const fill = $("fill"), ftext = $("fuseText"), big = $("total");
+      if (d.has_cap && d.cap_daily_usd > 0) {
+        const frac = Math.min(1, d.total_cost / d.cap_daily_usd);
+        fill.style.width = (frac * 100).toFixed(1) + "%";
+        fill.className = "fill " + (frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok");
+        ftext.textContent = fmt$(d.total_cost) + " / " + fmt$(d.cap_daily_usd) + (d.override_today ? " · overridden today" : "");
+        big.classList.toggle("hot", frac >= .9);
+      } else {
+        fill.style.width = "0%";
+        ftext.textContent = "no cap set — burnban cap --daily 10";
+        big.classList.remove("hot");
+      }
+      renderModels(d.models);
+      renderAgents(d.agents);
+      renderReceipts(d);
+    } catch (e) {
+      online(false);
+    }
+  }
+
+  tick();
+  setInterval(tick, 2000);
+</script>
+</body>
+</html>

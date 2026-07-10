@@ -17,7 +17,8 @@ export ANTHROPIC_BASE_URL=http://localhost:4141/anthropic
 export OPENAI_BASE_URL=http://localhost:4141/openai/v1
 
 # 3. watch the burn
-burnban top
+burnban top                      # in the terminal, or
+open http://localhost:4141       # the live dashboard
 ```
 
 Set a budget and forget about surprise bills:
@@ -30,7 +31,8 @@ burnban lift --today       # resume, overriding today's cap
 
 ## What you get
 
-- **`burnban top`** — live per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
+- **Live dashboard** at `http://localhost:4141` — the burn total glowing ember, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
+- **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
 - **`burnban report`** — spend for any window, plus **waste receipts**: duplicate requests that burned money twice, and cache hit rates that mean you're paying full price for context the provider would re-serve at a 90% discount.
 - **Budget enforcement** — a daily dollar cap enforced in the request path with a clear 402 your agent surfaces verbatim, and a manual **burn ban** kill switch.
 - **Honest numbers** — usage comes from provider usage frames, priced per model including cache read/write economics. Unknown models are recorded as unpriced, never guessed. Estimated counts are flagged as estimates.
