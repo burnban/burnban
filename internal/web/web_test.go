@@ -2,6 +2,7 @@ package web_test
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -58,7 +59,12 @@ func TestMetrics(t *testing.T) {
 }
 
 func TestWithAuth(t *testing.T) {
-	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("x-burnban-token") != "" {
+			t.Error("burnban token reached inner handler")
+		}
+		fmt.Fprintf(w, "%s|%s", r.Header.Get("Authorization"), r.URL.RawQuery)
+	})
 	srv := httptest.NewServer(web.WithAuth("sekret", inner))
 	t.Cleanup(srv.Close)
 
@@ -82,13 +88,46 @@ func TestWithAuth(t *testing.T) {
 		t.Fatalf("with token: status = %d, want 200", resp.StatusCode)
 	}
 
-	resp, err = http.Get(srv.URL + "/x?token=sekret")
+	resp, err = http.Get(srv.URL + "/api/x?token=sekret&provider=value")
 	if err != nil {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("query token: status = %d, want 200", resp.StatusCode)
+	}
+	resp, err = http.Get(srv.URL + "/openai/v1/models?token=sekret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("provider query token status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/openai/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer provider-key")
+	req.Header.Set("x-burnban-token", "sekret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "Bearer provider-key") {
+		t.Fatalf("provider authorization was consumed: %s", body)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, srv.URL+"/api/summary", nil)
+	req.Header.Set("Authorization", "Bearer sekret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ = io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK || strings.Contains(string(body), "sekret") {
+		t.Fatalf("dashboard bearer auth status=%d body=%q", resp.StatusCode, body)
 	}
 }
 

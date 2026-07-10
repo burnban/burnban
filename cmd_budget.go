@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -30,9 +31,15 @@ func cmdCap(args []string) error {
 	// Sub-cent caps would round to $0.00 in display and read as
 	// "cap everything"; refuse them instead of storing a footgun.
 	for _, usd := range []float64{*daily, *weekly, *monthly} {
+		if math.IsNaN(usd) || math.IsInf(usd, 0) {
+			return fmt.Errorf("caps must be finite dollar amounts")
+		}
 		if usd != 0 && usd < 0.01 {
 			return fmt.Errorf("caps below $0.01 are not enforceable — use `burnban ban` to stop all spend")
 		}
+	}
+	if math.IsNaN(*warn) || math.IsInf(*warn, 0) {
+		return fmt.Errorf("--warn must be a finite percentage")
 	}
 
 	if *agent != "" {
@@ -48,7 +55,7 @@ func cmdCap(args []string) error {
 				return err
 			}
 		}
-		fmt.Println("all global caps removed (per-agent caps and the --warn threshold kept)")
+		fmt.Println("all local global caps removed (external policy, per-agent caps, and --warn kept)")
 		return nil
 	}
 
@@ -69,7 +76,7 @@ func cmdCap(args []string) error {
 				if err := budget.ClearMarks(s, w.Name); err != nil {
 					return err
 				}
-				fmt.Printf("%s cap removed\n", w.Name)
+				fmt.Printf("local %s cap removed\n", w.Name)
 				set = true
 			}
 			continue
@@ -82,7 +89,7 @@ func cmdCap(args []string) error {
 		if err := budget.ClearMarks(s, w.Name); err != nil {
 			return err
 		}
-		fmt.Printf("%s cap set: $%.2f — the proxy returns 402 once it is reached\n", w.Name, usd)
+		fmt.Printf("local %s cap set: $%.2f — the proxy returns 402 once it is reached\n", w.Name, usd)
 		set = true
 	}
 	if *warn >= 0 {
@@ -156,7 +163,7 @@ func printCapStatus(s *store.Store) error {
 		if !st.Set {
 			continue
 		}
-		fmt.Printf("%-8s $%.2f of $%.2f (%.0f%%, resets %s)\n", st.Name, st.Spent, st.CapUSD, st.Pct(), st.Reset)
+		fmt.Printf("%-8s $%.2f of $%.2f (%.0f%%, %s, resets %s)\n", st.Name, st.Spent, st.CapUSD, st.Pct(), st.Source, st.Reset)
 		shown = true
 	}
 	if !shown {
@@ -193,7 +200,7 @@ func cmdBan(args []string) error {
 	if err := s.SetSetting(budget.KeyBanActive, "1"); err != nil {
 		return err
 	}
-	fmt.Println("🚫 burn ban in effect — all agent spend is paused until `burnban lift`")
+	fmt.Println("🚫 local burn ban in effect — all agent spend is paused until `burnban lift`")
 	return nil
 }
 
@@ -212,12 +219,17 @@ func cmdLift(args []string) error {
 	if err := s.DeleteSetting(budget.KeyBanActive); err != nil {
 		return err
 	}
-	msg := "burn ban lifted"
+	msg := "local burn ban lifted"
 	if *today {
 		if err := s.SetSetting(budget.KeyOverrideDay, time.Now().Format("2006-01-02")); err != nil {
 			return err
 		}
-		msg += " — caps overridden for the rest of today"
+		msg += " — local caps overridden for the rest of today"
+	}
+	if _, external, err := budget.BanStatus(s); err != nil {
+		return err
+	} else if external {
+		msg += "; organization burn ban remains in effect"
 	}
 	fmt.Println(msg)
 	return nil

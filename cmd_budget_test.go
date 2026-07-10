@@ -17,6 +17,14 @@ func TestCapRejectsSubCent(t *testing.T) {
 	if err := cmdCap([]string{"--warn", "150", "--db", db}); err == nil {
 		t.Fatal("warn threshold above 100% accepted")
 	}
+	for _, value := range []string{"NaN", "+Inf", "-Inf"} {
+		if err := cmdCap([]string{"--daily", value, "--db", db}); err == nil {
+			t.Errorf("non-finite cap %q accepted", value)
+		}
+	}
+	if err := cmdCap([]string{"--warn", "NaN", "--db", db}); err == nil {
+		t.Fatal("non-finite warning threshold accepted")
+	}
 }
 
 func TestCapExplicitZeroRemovesOneWindow(t *testing.T) {

@@ -73,6 +73,9 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Prox
 		if err != nil {
 			return nil, fmt.Errorf("upstream %s: %w", name, err)
 		}
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return nil, fmt.Errorf("upstream %s: URL must use http or https and include a host", name)
+		}
 		shape := up.Shape
 		if shape == "" {
 			shape = "openai"
@@ -88,10 +91,14 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Prox
 		Guard:     &budget.Guard{S: s},
 		Logf:      log.Printf,
 		upstreams: us,
-		client: &http.Client{Transport: &http.Transport{
-			ResponseHeaderTimeout: 120 * time.Second,
-			MaxIdleConnsPerHost:   32,
-		}},
+		client: &http.Client{
+			// A proxy must relay redirects, not follow them with credentials.
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse },
+			Transport: &http.Transport{
+				ResponseHeaderTimeout: 120 * time.Second,
+				MaxIdleConnsPerHost:   32,
+			},
+		},
 	}, nil
 }
 
@@ -160,7 +167,14 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	up := p.upstreams[provider].url
 	outURL := *up
 	outURL.Path = strings.TrimRight(up.Path, "/") + r.URL.Path
-	outURL.RawQuery = r.URL.RawQuery
+	switch {
+	case up.RawQuery == "":
+		outURL.RawQuery = r.URL.RawQuery
+	case r.URL.RawQuery == "":
+		outURL.RawQuery = up.RawQuery
+	default:
+		outURL.RawQuery = up.RawQuery + "&" + r.URL.RawQuery
+	}
 
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(reqBody))
 	if err != nil {
@@ -208,12 +222,21 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		rec.Streamed = true
 		usage = p.streamThrough(w, resp.Body, shape)
 	} else {
-		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
+		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 		if err != nil {
 			p.Logf("burnban: reading upstream body: %v", err)
 		}
-		_, _ = w.Write(body)
-		if resp.StatusCode < 300 {
+		_, writeErr := w.Write(body)
+		if len(body) > maxBodyBytes {
+			// Large non-streamed responses still pass through in full. They are
+			// not parsed because keeping an unbounded copy would be a memory DoS.
+			if writeErr == nil {
+				if _, err := io.Copy(w, resp.Body); err != nil {
+					p.Logf("burnban: forwarding oversized upstream body: %v", err)
+				}
+			}
+			p.Logf("burnban: upstream response exceeded %dMB; forwarded without metering", maxBodyBytes>>20)
+		} else if resp.StatusCode < 300 {
 			usage = parseJSON(shape, body)
 		}
 	}
@@ -293,6 +316,9 @@ func parseJSON(shape string, body []byte) meter.Usage {
 var hopHeaders = []string{
 	"Connection", "Keep-Alive", "Proxy-Authenticate", "Proxy-Authorization",
 	"Te", "Trailer", "Trailers", "Transfer-Encoding", "Upgrade", "Accept-Encoding",
+	// Burnban control and attribution metadata is consumed locally. Forwarding
+	// any of it would disclose the gateway token and internal agent names.
+	"X-Burnban-Token", "X-Burnban-Agent", "X-Burnban-Session",
 }
 
 func copyHeaders(dst, src http.Header) {

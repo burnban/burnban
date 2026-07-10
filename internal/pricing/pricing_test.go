@@ -53,6 +53,21 @@ func TestCost(t *testing.T) {
 	}
 }
 
+func TestCostLongContextAndCacheWrite(t *testing.T) {
+	p := Price{
+		InputPerMTok: 5, OutputPerMTok: 30, CacheReadMult: 0.1, CacheWriteMult: 1.25,
+		LongContextThreshold: 272_000, LongInputMult: 2, LongOutputMult: 1.5,
+	}
+	got := Cost(p, 200_000, 10_000, 50_000, 30_000)
+	want := (200_000*5.0*2 + 10_000*30.0*1.5 + 50_000*5.0*0.1*2 + 30_000*5.0*1.25*2) / 1e6
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("long-context cost = %v, want %v", got, want)
+	}
+	if got := Cost(p, -100, -100, -100, -100); got != 0 {
+		t.Fatalf("negative token counts reduced cost: %v", got)
+	}
+}
+
 func TestReprice(t *testing.T) {
 	opus := testTable().Models["claude-opus-4-7"]
 	// With cache tiers present, Reprice matches Cost exactly.
@@ -67,6 +82,11 @@ func TestReprice(t *testing.T) {
 	if math.Abs(got-want) > 1e-12 {
 		t.Fatalf("reprice cache-write fallback = %v, want %v", got, want)
 	}
+	// Aggregate what-if totals must not trigger a per-request long-context tier.
+	long := Price{InputPerMTok: 1, OutputPerMTok: 2, LongContextThreshold: 10, LongInputMult: 2, LongOutputMult: 1.5}
+	if got, want := Reprice(long, 100, 100, 0, 0), 300.0/1e6; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("aggregate reprice applied request tier: %v, want %v", got, want)
+	}
 }
 
 func TestEmbeddedTableParses(t *testing.T) {
@@ -76,5 +96,17 @@ func TestEmbeddedTableParses(t *testing.T) {
 	}
 	if len(tb.Models) == 0 {
 		t.Fatal("embedded table is empty")
+	}
+}
+
+func TestValidateModelsRejectsUnsafeRates(t *testing.T) {
+	for name, price := range map[string]Price{
+		"negative rate":       {InputPerMTok: -1},
+		"negative multiplier": {InputPerMTok: 1, CacheReadMult: -0.1},
+		"incomplete long tier": {InputPerMTok: 1, LongContextThreshold: 100, LongInputMult: 2},
+	} {
+		if err := validateModels(map[string]Price{"bad": price}); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
 	}
 }

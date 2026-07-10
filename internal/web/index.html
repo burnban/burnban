@@ -224,11 +224,16 @@
 
 <script>
   const $ = id => document.getElementById(id);
-  const TOKEN = (() => {
-    const q = new URLSearchParams(location.search).get("token");
-    if (q) sessionStorage.setItem("bb_token", q);
-    return q || sessionStorage.getItem("bb_token") || "";
-  })();
+	  const TOKEN = (() => {
+	    const q = new URLSearchParams(location.search).get("token");
+	    if (q) {
+	      sessionStorage.setItem("bb_token", q);
+	      const clean = new URL(location.href);
+	      clean.searchParams.delete("token");
+	      history.replaceState(null, "", clean.pathname + clean.search + clean.hash);
+	    }
+	    return q || sessionStorage.getItem("bb_token") || "";
+	  })();
   const fmt$ = v => "$" + (v >= 10 ? v.toFixed(2) : v.toFixed(4));
   const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
   const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -301,7 +306,7 @@
       // The fuse shows the tightest configured window, so a weekly- or
       // monthly-only budget never reads as "no cap set" while it enforces.
       const fuse =
-        d.cap_daily_usd > 0   ? {label: "Daily budget",   spent: d.total_cost, cap: d.cap_daily_usd} :
+	        d.cap_daily_usd > 0   ? {label: "Daily budget",   spent: d.cap_daily_cost, cap: d.cap_daily_usd} :
         d.cap_weekly_usd > 0  ? {label: "Weekly budget",  spent: d.week_cost,  cap: d.cap_weekly_usd} :
         d.cap_monthly_usd > 0 ? {label: "Monthly budget", spent: d.month_cost, cap: d.cap_monthly_usd} : null;
       if (fuse) {
@@ -309,7 +314,7 @@
         $("fuseLabel").textContent = fuse.label;
         fill.style.width = (frac * 100).toFixed(1) + "%";
         fill.className = "fill " + (frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok");
-        ftext.textContent = fmt$(fuse.spent) + " / " + fmt$(fuse.cap) + (d.override_today ? " · overridden today" : "");
+        ftext.textContent = fmt$(fuse.spent) + " / " + fmt$(fuse.cap) + (d.override_today ? " · local caps overridden" : "") + (d.external_policy ? " · org policy" : "");
         big.classList.toggle("hot", frac >= .9);
       } else {
         $("fuseLabel").textContent = "Daily budget";

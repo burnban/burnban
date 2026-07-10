@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-const version = "0.4.0-dev"
+var version = "0.4.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -71,7 +71,7 @@ usage: burnban <command> [flags]
   subsidy  price your Claude Code / Codex subscription logs at API rates — no proxy needed
   cap      set budgets (--daily 10 --weekly 40 --monthly 120 [--agent NAME] [--warn 80] | --off)
   ban      pause ALL agent spend immediately
-  lift     lift the ban (--today also overrides today's caps)
+  lift     lift the local ban (--today also overrides local caps)
   mcp      MCP server over stdio — plug burnban into Claude Code, Cursor, etc.
   export   dump raw request rows for finance (--since 7d --format csv|json)
   alert    webhook for cap alerts and 80% warnings (--webhook URL | --off)

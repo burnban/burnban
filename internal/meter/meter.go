@@ -10,7 +10,7 @@ import (
 
 // Usage is normalized: In and Out are full-price tokens, CacheRead tokens
 // were billed at the provider's cached-input discount, and CacheWrite
-// tokens at its cache-write premium (Anthropic only). Estimated marks
+// tokens at its cache-write premium. Estimated marks
 // output counts derived from character heuristics rather than a usage
 // frame, so reports never present a guess as a measurement.
 type Usage struct {
@@ -54,18 +54,20 @@ type openAIUsage struct {
 	PromptTokens        int64 `json:"prompt_tokens"`
 	CompletionTokens    int64 `json:"completion_tokens"`
 	PromptTokensDetails struct {
-		CachedTokens int64 `json:"cached_tokens"`
+		CachedTokens     int64 `json:"cached_tokens"`
+		CacheWriteTokens int64 `json:"cache_write_tokens"`
 	} `json:"prompt_tokens_details"`
 	InputTokens        int64 `json:"input_tokens"`
 	OutputTokens       int64 `json:"output_tokens"`
 	InputTokensDetails struct {
-		CachedTokens int64 `json:"cached_tokens"`
+		CachedTokens     int64 `json:"cached_tokens"`
+		CacheWriteTokens int64 `json:"cache_write_tokens"`
 	} `json:"input_tokens_details"`
 }
 
 // ParseOpenAIJSON reads usage from Chat Completions (prompt_tokens) or
 // Responses API (input_tokens) bodies. OpenAI's prompt count includes the
-// cached subset, so cached tokens are subtracted out of the full-price In.
+// cached and cache-write subsets, so both are subtracted from full-price In.
 func ParseOpenAIJSON(body []byte) Usage {
 	var v struct {
 		Model string      `json:"model"`
@@ -74,14 +76,33 @@ func ParseOpenAIJSON(body []byte) Usage {
 	if json.Unmarshal(body, &v) != nil {
 		return Usage{}
 	}
-	in, out, cached := v.Usage.PromptTokens, v.Usage.CompletionTokens, v.Usage.PromptTokensDetails.CachedTokens
-	if in == 0 && v.Usage.InputTokens > 0 {
-		in, out, cached = v.Usage.InputTokens, v.Usage.OutputTokens, v.Usage.InputTokensDetails.CachedTokens
-	}
-	if in == 0 && out == 0 {
+	in, out, cached, writes, ok := normalizeOpenAIUsage(v.Usage)
+	if !ok {
 		return Usage{}
 	}
-	return Usage{Model: v.Model, In: in - cached, Out: out, CacheRead: cached, Found: true}
+	return Usage{Model: v.Model, In: in, Out: out, CacheRead: cached, CacheWrite: writes, Found: true}
+}
+
+func normalizeOpenAIUsage(u openAIUsage) (in, out, cached, writes int64, ok bool) {
+	if u.PromptTokens != 0 || u.CompletionTokens != 0 ||
+		u.PromptTokensDetails.CachedTokens != 0 || u.PromptTokensDetails.CacheWriteTokens != 0 {
+		in, out = u.PromptTokens, u.CompletionTokens
+		cached = u.PromptTokensDetails.CachedTokens
+		writes = u.PromptTokensDetails.CacheWriteTokens
+	} else {
+		in, out = u.InputTokens, u.OutputTokens
+		cached = u.InputTokensDetails.CachedTokens
+		writes = u.InputTokensDetails.CacheWriteTokens
+	}
+	if in == 0 && out == 0 && cached == 0 && writes == 0 {
+		return 0, 0, 0, 0, false
+	}
+	in, out = max(in, 0), max(out, 0)
+	cached, writes = max(cached, 0), max(writes, 0)
+	// Provider totals include both subsets. Clamp inconsistent upstream data
+	// rather than allowing a negative full-price count to reduce spend.
+	in = max(in-cached-writes, 0)
+	return in, out, cached, writes, true
 }
 
 type geminiUsage struct {
@@ -175,12 +196,13 @@ func (t *AnthropicSSE) Feed(line []byte) {
 
 func (t *AnthropicSSE) Usage() Usage { return t.u }
 
-// OpenAISSE tracks a Chat Completions stream. When the client requested
-// stream_options.include_usage the final frame carries exact counts;
-// otherwise output is estimated from streamed characters and flagged.
+// OpenAISSE tracks Chat Completions and Responses API streams. An exact
+// final usage frame wins; otherwise output is estimated from streamed
+// characters and flagged.
 type OpenAISSE struct {
 	u     Usage
 	chars int64
+	exact bool
 }
 
 func (t *OpenAISSE) Feed(line []byte) {
@@ -189,8 +211,13 @@ func (t *OpenAISSE) Feed(line []byte) {
 		return
 	}
 	var v struct {
-		Model   string       `json:"model"`
-		Usage   *openAIUsage `json:"usage"`
+		Model    string       `json:"model"`
+		Usage    *openAIUsage `json:"usage"`
+		Delta    string       `json:"delta"`
+		Response *struct {
+			Model string       `json:"model"`
+			Usage *openAIUsage `json:"usage"`
+		} `json:"response"`
 		Choices []struct {
 			Delta struct {
 				Content string `json:"content"`
@@ -204,22 +231,37 @@ func (t *OpenAISSE) Feed(line []byte) {
 		t.u.Model = v.Model
 		t.u.Found = true
 	}
+	if v.Response != nil && v.Response.Model != "" {
+		t.u.Model = v.Response.Model
+		t.u.Found = true
+	}
+	t.chars += int64(len(v.Delta))
 	for _, c := range v.Choices {
 		t.chars += int64(len(c.Delta.Content))
 	}
-	if v.Usage != nil && (v.Usage.PromptTokens > 0 || v.Usage.CompletionTokens > 0) {
-		cached := v.Usage.PromptTokensDetails.CachedTokens
-		t.u.In = v.Usage.PromptTokens - cached
-		t.u.Out = v.Usage.CompletionTokens
-		t.u.CacheRead = cached
-		t.u.Estimated = false
-		t.u.Found = true
+	if v.Usage != nil {
+		t.setExact(*v.Usage)
 	}
+	if v.Response != nil && v.Response.Usage != nil {
+		t.setExact(*v.Response.Usage)
+	}
+}
+
+func (t *OpenAISSE) setExact(raw openAIUsage) {
+	in, out, cached, writes, ok := normalizeOpenAIUsage(raw)
+	if !ok {
+		return
+	}
+	t.u.In, t.u.Out = in, out
+	t.u.CacheRead, t.u.CacheWrite = cached, writes
+	t.u.Estimated = false
+	t.u.Found = true
+	t.exact = true
 }
 
 func (t *OpenAISSE) Usage() Usage {
 	u := t.u
-	if u.Out == 0 && t.chars > 0 {
+	if !t.exact && u.Out == 0 && t.chars > 0 {
 		// No usage frame: estimate at ~4 chars/token and say so.
 		u.Out = t.chars / 4
 		u.Estimated = true

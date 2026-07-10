@@ -9,11 +9,11 @@ import (
 // or register a wildcard must die at flag parsing, not at startup.
 func TestUpstreamFlagRejectsUnsafeNames(t *testing.T) {
 	for _, bad := range []string{
-		"x{y=http://localhost:1",  // unclosed brace: mux panics
-		"{x}=http://localhost:1",  // wildcard: swallows arbitrary paths
-		"a/b=http://localhost:1",  // slash: nested route
-		"a b=http://localhost:1",  // space
-		"api=http://localhost:1",  // reserved for the dashboard
+		"x{y=http://localhost:1", // unclosed brace: mux panics
+		"{x}=http://localhost:1", // wildcard: swallows arbitrary paths
+		"a/b=http://localhost:1", // slash: nested route
+		"a b=http://localhost:1", // space
+		"api=http://localhost:1", // reserved for the dashboard
 		"metrics=http://localhost:1",
 		"health=http://localhost:1",
 		"=http://localhost:1",
@@ -50,5 +50,22 @@ func TestUpstreamFlagShapes(t *testing.T) {
 	}
 	if s := u.String(); !strings.Contains(s, "corp=") || !strings.Contains(s, "groq=") {
 		t.Fatalf("String() = %q", s)
+	}
+}
+
+func TestLoopbackAndURLRedaction(t *testing.T) {
+	for _, host := range []string{"localhost", "127.0.0.1", "127.42.0.9", "::1", "[::1]"} {
+		if !isLoopbackHost(host) {
+			t.Errorf("%q should be loopback", host)
+		}
+	}
+	for _, host := range []string{"0.0.0.0", "192.168.1.4", "example.com", ""} {
+		if isLoopbackHost(host) {
+			t.Errorf("%q should not be loopback", host)
+		}
+	}
+	got := redactURL("https://user:password@example.com/v1?api_key=secret")
+	if strings.Contains(got, "user") || strings.Contains(got, "password") || strings.Contains(got, "secret") {
+		t.Fatalf("redactURL leaked credentials: %q", got)
 	}
 }

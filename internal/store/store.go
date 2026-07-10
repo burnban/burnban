@@ -49,14 +49,29 @@ type Store struct {
 
 func Open(path string) (*Store, error) {
 	if dir := filepath.Dir(path); dir != "." {
-		if err := os.MkdirAll(dir, 0o755); err != nil {
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			return nil, err
+		}
+	}
+	// The ledger includes agent/session names and may contain webhook URLs.
+	// Pre-create and re-mode it so the process umask cannot make that data
+	// readable by other local users. SQLite gives WAL/SHM files the DB mode.
+	if !strings.HasPrefix(path, "file:") && path != ":memory:" {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+		if err != nil {
+			return nil, err
+		}
+		if err := f.Close(); err != nil {
+			return nil, err
+		}
+		if err := os.Chmod(path, 0o600); err != nil {
 			return nil, err
 		}
 	}
 	// WAL + synchronous=NORMAL: commits append to the log without an fsync
 	// each — the standard WAL setup. Worst case on an OS crash is losing
 	// the final moments of the ledger, never corrupting it.
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
+	db, err := sql.Open("sqlite", sqliteDSN(path, "_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)"))
 	if err != nil {
 		return nil, err
 	}
@@ -65,6 +80,14 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	return &Store{db: db}, nil
+}
+
+func sqliteDSN(path, query string) string {
+	separator := "?"
+	if strings.HasPrefix(path, "file:") && strings.Contains(path, "?") {
+		separator = "&"
+	}
+	return path + separator + query
 }
 
 func (s *Store) Close() error { return s.db.Close() }

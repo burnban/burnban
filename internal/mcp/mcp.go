@@ -219,7 +219,7 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if err := s.S.SetSetting(budget.KeyBanActive, "1"); err != nil {
 			return "", err
 		}
-		return "🚫 burn ban in effect — all agent spend is paused until lifted", nil
+		return "🚫 local burn ban in effect — all agent spend is paused until lifted", nil
 	case "lift_burn_ban":
 		var a struct {
 			TodayOverride bool `json:"today_override"`
@@ -232,12 +232,17 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if err := s.S.DeleteSetting(budget.KeyBanActive); err != nil {
 			return "", err
 		}
-		msg := "burn ban lifted — spend can resume"
+		msg := "local burn ban lifted — spend can resume unless external policy blocks it"
 		if a.TodayOverride {
 			if err := s.S.SetSetting(budget.KeyOverrideDay, time.Now().Format("2006-01-02")); err != nil {
 				return "", err
 			}
-			msg += " (all caps overridden for the rest of today)"
+			msg += " (local caps overridden for the rest of today)"
+		}
+		if _, external, err := budget.BanStatus(s.S); err != nil {
+			return "", err
+		} else if external {
+			msg += "; organization burn ban remains active"
 		}
 		return msg, nil
 	default:
@@ -319,10 +324,14 @@ func (s *Server) burnStatus() (string, error) {
 		"ban_active":          false,
 		"has_cap":             false,
 	}
-	if ban, err := s.S.GetSetting(budget.KeyBanActive); err != nil {
+	localBan, externalBan, err := budget.BanStatus(s.S)
+	if err != nil {
 		return "", err
-	} else if ban == "1" {
+	} else if localBan || externalBan {
 		out["ban_active"] = true
+	}
+	if externalBan {
+		out["external_ban_active"] = true
 	}
 	// Per-window state, so an agent can pace itself against what's left.
 	states, err := budget.Status(s.S, now)
@@ -339,6 +348,7 @@ func (s *Server) burnStatus() (string, error) {
 			"spent_usd":     st.Spent,
 			"remaining_usd": max(0, st.CapUSD-st.Spent),
 			"resets":        st.Reset,
+			"source":        st.Source,
 		}
 		out["has_cap"] = true
 		if st.Name == "daily" {

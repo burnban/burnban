@@ -6,6 +6,7 @@ package budget
 
 import (
 	"fmt"
+	"math"
 	"strconv"
 	"time"
 
@@ -20,6 +21,15 @@ const (
 	KeyBanActive     = "ban_active"
 	KeyOverrideDay   = "cap_override_day"
 	KeyWebhookURL    = "webhook_url"
+	// External policy is a local SQLite contract for optional sidecars. The
+	// MIT binary reads these keys but contains no sync client or remote URL.
+	KeyExternalDailyCapUSD   = "external_cap_daily_usd"
+	KeyExternalWeeklyCapUSD  = "external_cap_weekly_usd"
+	KeyExternalMonthlyCapUSD = "external_cap_monthly_usd"
+	KeyExternalBanActive     = "external_ban_active"
+	KeyExternalPolicyVersion = "external_policy_version"
+	KeyExternalPolicySource  = "external_policy_source"
+	KeyExternalPolicyAt      = "external_policy_updated_at"
 	// KeyWarnPct holds the early-warning threshold as a percentage of any
 	// window's cap. Empty means DefaultWarnPct; "0" disables warnings.
 	KeyWarnPct = "warn_pct"
@@ -39,10 +49,11 @@ const DefaultWarnPct = 80.0
 // Window is one budget enforcement window. Starts are computed in local
 // time, matching how people read their bills.
 type Window struct {
-	Name  string // "daily", "weekly", "monthly" — also the cap flag name
-	Key   string // settings key holding the cap
-	Start func(now time.Time) time.Time
-	Reset string // when the window rolls over, for human-facing copy
+	Name        string // "daily", "weekly", "monthly" — also the cap flag name
+	Key         string // settings key holding the user's local cap
+	ExternalKey string // optional sidecar-managed allocation
+	Start       func(now time.Time) time.Time
+	Reset       string // when the window rolls over, for human-facing copy
 }
 
 // Windows lists the enforced budget windows, tightest first. It is the
@@ -50,9 +61,9 @@ type Window struct {
 // their window vocabulary from it.
 func Windows() []Window {
 	return []Window{
-		{"daily", KeyDailyCapUSD, DayStart, "at midnight"},
-		{"weekly", KeyWeeklyCapUSD, WeekStart, "Monday"},
-		{"monthly", KeyMonthlyCapUSD, MonthStart, "on the 1st"},
+		{"daily", KeyDailyCapUSD, KeyExternalDailyCapUSD, DayStart, "at midnight"},
+		{"weekly", KeyWeeklyCapUSD, KeyExternalWeeklyCapUSD, WeekStart, "Monday"},
+		{"monthly", KeyMonthlyCapUSD, KeyExternalMonthlyCapUSD, MonthStart, "on the 1st"},
 	}
 }
 
@@ -112,11 +123,16 @@ func (d *Denial) AlertMark() string {
 // WindowState is one window's live budget position, shared by the CLI
 // status view, dashboard, metrics, and MCP so they can never disagree.
 type WindowState struct {
-	Window            // embedded definition (Name, Key, Start, Reset)
-	CapUSD  float64   // 0 when unset
-	Set     bool      // a valid cap is configured
-	Spent   float64   // spend since the window opened
-	StartAt time.Time // when the window opened, at the queried instant
+	Window                   // embedded definition (Name, Key, Start, Reset)
+	CapUSD         float64   // effective (stricter) cap; 0 when unset
+	LocalCapUSD    float64   // user-managed local cap; 0 when unset
+	ExternalCapUSD float64   // sidecar-managed allocation; 0 when unset
+	LocalSpent     float64   // spend in the machine-local calendar window
+	ExternalSpent  float64   // spend in the organization UTC calendar window
+	Source         string    // "local", "external", or "both"
+	Set            bool      // a valid effective cap is configured
+	Spent          float64   // spend since the window opened
+	StartAt        time.Time // when the window opened, at the queried instant
 }
 
 // Pct is spend as a percentage of the cap; 0 when no cap is set.
@@ -131,11 +147,11 @@ func (w WindowState) Pct() float64 {
 // and one ledger scan.
 func Status(s *store.Store, now time.Time) ([]WindowState, error) {
 	wins := Windows()
-	keys := make([]string, len(wins))
-	starts := make([]time.Time, len(wins))
-	for i, w := range wins {
-		keys[i] = w.Key
-		starts[i] = w.Start(now)
+	keys := make([]string, 0, len(wins)*2)
+	starts := make([]time.Time, 0, len(wins)*2)
+	for _, w := range wins {
+		keys = append(keys, w.Key, w.ExternalKey)
+		starts = append(starts, w.Start(now), externalStart(w, now))
 	}
 	vals, err := s.GetSettings(keys...)
 	if err != nil {
@@ -147,12 +163,21 @@ func Status(s *store.Store, now time.Time) ([]WindowState, error) {
 	}
 	out := make([]WindowState, len(wins))
 	for i, w := range wins {
-		st := WindowState{Window: w, Spent: spents[i], StartAt: starts[i]}
-		if cap, ok, err := parseCap(w.Key, vals[w.Key]); err != nil {
-			return nil, err
-		} else if ok {
-			st.CapUSD, st.Set = cap, true
+		localStart, externalStartAt := starts[i*2], starts[i*2+1]
+		st := WindowState{
+			Window: w, LocalSpent: spents[i*2], ExternalSpent: spents[i*2+1],
+			Spent: spents[i*2], StartAt: localStart,
 		}
+		local, localSet, err := parseCap(w.Key, vals[w.Key])
+		if err != nil {
+			return nil, err
+		}
+		external, externalSet, err := parseCap(w.ExternalKey, vals[w.ExternalKey])
+		if err != nil {
+			return nil, err
+		}
+		st.LocalCapUSD, st.ExternalCapUSD = local, external
+		selectEffectiveState(&st, local, localSet, external, externalSet, localStart, externalStartAt)
 		out[i] = st
 	}
 	return out, nil
@@ -162,14 +187,14 @@ func Status(s *store.Store, now time.Time) ([]WindowState, error) {
 // window's spend has reached its cap, or the calling agent has reached its
 // own daily cap. A nil, nil return means proceed.
 func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
-	keys := []string{KeyBanActive, KeyOverrideDay}
+	keys := []string{KeyBanActive, KeyExternalBanActive, KeyOverrideDay}
 	agentKey := ""
 	if agent != "" {
 		agentKey = KeyAgentCapPrefix + agent
 		keys = append(keys, agentKey)
 	}
 	for _, w := range Windows() {
-		keys = append(keys, w.Key)
+		keys = append(keys, w.Key, w.ExternalKey)
 	}
 	vals, err := g.S.GetSettings(keys...)
 	if err != nil {
@@ -182,46 +207,76 @@ func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 			Message: "burn ban in effect: all agent spend is paused. Lift it with `burnban lift`.",
 		}, nil
 	}
-	if vals[KeyOverrideDay] == now.Format("2006-01-02") {
-		return nil, nil
+	if vals[KeyExternalBanActive] == "1" {
+		return &Denial{
+			Type:    "burnban_external_ban",
+			Message: "organization burn ban in effect: spend is paused by external policy. Contact your Burnban administrator.",
+		}, nil
 	}
+	overrideLocal := vals[KeyOverrideDay] == now.Format("2006-01-02")
 
-	// One scan covers every configured window.
-	var capped []Window
-	var caps []float64
-	var starts []time.Time
+	// Local caps use the machine's calendar; external fleet allocations use
+	// UTC so every meter enforces the same organization window. One scan still
+	// covers every configured cutoff.
+	type capCheck struct {
+		window Window
+		cap    float64
+		start  time.Time
+		source string
+	}
+	var checks []capCheck
 	for _, w := range Windows() {
-		cap, ok, err := parseCap(w.Key, vals[w.Key])
+		local, localSet, err := parseCap(w.Key, vals[w.Key])
 		if err != nil {
 			return nil, err
 		}
-		if !ok {
-			continue
+		if overrideLocal {
+			local, localSet = 0, false
 		}
-		capped = append(capped, w)
-		caps = append(caps, cap)
-		starts = append(starts, w.Start(now))
+		external, externalSet, err := parseCap(w.ExternalKey, vals[w.ExternalKey])
+		if err != nil {
+			return nil, err
+		}
+		if localSet {
+			checks = append(checks, capCheck{window: w, cap: local, start: w.Start(now), source: "local"})
+		}
+		if externalSet {
+			checks = append(checks, capCheck{window: w, cap: external, start: externalStart(w, now), source: "external"})
+		}
 	}
-	if len(capped) > 0 {
+	if len(checks) > 0 {
+		starts := make([]time.Time, len(checks))
+		for i, check := range checks {
+			starts[i] = check.start
+		}
 		spents, err := g.S.SpentSinceMulti(starts)
 		if err != nil {
 			return nil, err
 		}
-		for i, w := range capped {
-			if spents[i] >= caps[i] {
+		for i, check := range checks {
+			if spents[i] >= check.cap {
+				if check.source == "external" {
+					return &Denial{
+						Type: "burnban_external_cap_reached",
+						Message: fmt.Sprintf(
+							"organization %s burn allocation reached: $%.2f spent of $%.2f (resets on the UTC boundary). Contact your Burnban administrator.",
+							check.window.Name, spents[i], check.cap),
+						Window: check.window.Name, WindowStart: check.start,
+					}, nil
+				}
 				return &Denial{
 					Type: "burnban_cap_reached",
 					Message: fmt.Sprintf(
 						"%s burn cap reached: $%.2f spent of $%.2f (resets %s). Raise it (`burnban cap --%s %.0f`) or override for today (`burnban lift --today`).",
-						w.Name, spents[i], caps[i], w.Reset, w.Name, caps[i]*2),
-					Window:      w.Name,
-					WindowStart: starts[i],
+						check.window.Name, spents[i], check.cap, check.window.Reset, check.window.Name, check.cap*2),
+					Window:      check.window.Name,
+					WindowStart: check.start,
 				}, nil
 			}
 		}
 	}
 
-	if agentKey == "" {
+	if agentKey == "" || overrideLocal {
 		return nil, nil
 	}
 	capUSD, ok, err := parseCap(agentKey, vals[agentKey])
@@ -241,6 +296,53 @@ func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 		}, nil
 	}
 	return nil, nil
+}
+
+// BanStatus reports the independently managed local and external ban states.
+func BanStatus(s *store.Store) (local, external bool, err error) {
+	vals, err := s.GetSettings(KeyBanActive, KeyExternalBanActive)
+	if err != nil {
+		return false, false, err
+	}
+	return vals[KeyBanActive] == "1", vals[KeyExternalBanActive] == "1", nil
+}
+
+func selectEffectiveState(st *WindowState, local float64, localSet bool, external float64, externalSet bool, localStart, externalStartAt time.Time) {
+	switch {
+	case localSet && externalSet:
+		localPct := st.LocalSpent / local
+		externalPct := st.ExternalSpent / external
+		switch {
+		case localPct > externalPct:
+			st.CapUSD, st.Spent, st.StartAt, st.Source = local, st.LocalSpent, localStart, "local"
+		case externalPct > localPct:
+			st.CapUSD, st.Spent, st.StartAt, st.Source = external, st.ExternalSpent, externalStartAt, "external"
+		default:
+			if local <= external {
+				st.CapUSD, st.Spent, st.StartAt = local, st.LocalSpent, localStart
+			} else {
+				st.CapUSD, st.Spent, st.StartAt = external, st.ExternalSpent, externalStartAt
+			}
+			st.Source = "both"
+		}
+		st.Set = true
+	case localSet:
+		st.CapUSD, st.Spent, st.StartAt, st.Source, st.Set = local, st.LocalSpent, localStart, "local", true
+	case externalSet:
+		st.CapUSD, st.Spent, st.StartAt, st.Source, st.Set = external, st.ExternalSpent, externalStartAt, "external", true
+	}
+}
+
+func externalStart(w Window, now time.Time) time.Time {
+	utc := now.UTC()
+	switch w.Name {
+	case "daily":
+		return DayStart(utc)
+	case "weekly":
+		return WeekStart(utc)
+	default:
+		return MonthStart(utc)
+	}
 }
 
 // Warning reports a window at or past the early-warning threshold.
@@ -272,7 +374,7 @@ func (g *Guard) WarnStatus(now time.Time) (*Warning, error) {
 	threshold := DefaultWarnPct
 	if pctStr := vals[KeyWarnPct]; pctStr != "" {
 		v, perr := strconv.ParseFloat(pctStr, 64)
-		if perr != nil {
+		if perr != nil || math.IsNaN(v) || math.IsInf(v, 0) || v > 100 {
 			return nil, fmt.Errorf("invalid %s setting %q", KeyWarnPct, pctStr)
 		}
 		threshold = v
@@ -313,7 +415,7 @@ func parseCap(key, s string) (float64, bool, error) {
 		return 0, false, nil
 	}
 	v, perr := strconv.ParseFloat(s, 64)
-	if perr != nil {
+	if perr != nil || math.IsNaN(v) || math.IsInf(v, 0) {
 		return 0, false, fmt.Errorf("invalid %s setting %q", key, s)
 	}
 	if v <= 0 {

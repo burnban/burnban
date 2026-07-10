@@ -3,6 +3,7 @@ package main
 import (
 	"flag"
 	"fmt"
+	"net/url"
 
 	"github.com/syft8/burnban/internal/budget"
 	"github.com/syft8/burnban/internal/store"
@@ -34,6 +35,10 @@ func cmdAlert(args []string) error {
 		}
 		fmt.Println("webhook removed")
 	case *webhook != "":
+		u, err := url.Parse(*webhook)
+		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
+			return fmt.Errorf("--webhook must be an http or https URL with a host")
+		}
 		if err := s.SetSetting(budget.KeyWebhookURL, *webhook); err != nil {
 			return err
 		}
@@ -46,8 +51,16 @@ func cmdAlert(args []string) error {
 		if v == "" {
 			fmt.Println("no webhook set. Set one: burnban alert --webhook https://hooks.slack.com/...")
 		} else {
-			fmt.Printf("webhook: %s\n", v)
+			fmt.Printf("webhook: %s\n", redactURL(v))
 		}
 	}
 	return nil
+}
+
+func redactURL(raw string) string {
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" {
+		return "<redacted>"
+	}
+	return u.Scheme + "://" + u.Host + "/<redacted>"
 }

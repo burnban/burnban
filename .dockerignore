@@ -1,9 +1,11 @@
-/burnban
+.git
+.github
+.env*
 *.db
 *.db-wal
 *.db-shm
-.env
 *.pem
 *.key
 *.crt
-dist/
+burnban
+dist

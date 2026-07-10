@@ -70,8 +70,14 @@ func renderTop(s *store.Store) (string, error) {
 	fmt.Fprintf(&b, "today   $%.4f · %d req · cache hit %s\n", sum.Cost, sum.Requests, cachePct(sum.CacheRead, sum.In))
 	fmt.Fprintf(&b, "rate    $%.4f/hr\n\n", lastHour)
 
-	if ban, _ := s.GetSetting(budget.KeyBanActive); ban == "1" {
-		b.WriteString(cRed + "🚫 BURN BAN IN EFFECT — all spend paused (burnban lift)" + cReset + "\n\n")
+	if local, external, err := budget.BanStatus(s); err != nil {
+		return "", err
+	} else if local || external {
+		message := "🚫 BURN BAN IN EFFECT — all spend paused (burnban lift)"
+		if external {
+			message = "🚫 ORGANIZATION BURN BAN — external policy; contact your administrator"
+		}
+		b.WriteString(cRed + message + cReset + "\n\n")
 	} else if states, err := budget.Status(s, now); err != nil {
 		return "", err
 	} else {
@@ -88,7 +94,7 @@ func renderTop(s *store.Store) (string, error) {
 			case frac >= 0.6:
 				color = cYellow
 			}
-			fmt.Fprintf(&b, "%-7s %s%s%s $%.2f / $%.2f\n", st.Name, color, bar(frac, 30), cReset, st.Spent, st.CapUSD)
+			fmt.Fprintf(&b, "%-7s %s%s%s $%.2f / $%.2f (%s)\n", st.Name, color, bar(frac, 30), cReset, st.Spent, st.CapUSD, st.Source)
 			any = true
 		}
 		if any {

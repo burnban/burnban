@@ -42,7 +42,7 @@ burnban cap --daily 10 --weekly 40 --monthly 120   # 402 past any of them
 burnban cap --agent openclaw --daily 3             # that one hungry agent gets $3
 burnban cap --warn 80                              # webhook ping at 80% of any cap
 burnban ban                                        # emergency stop: pause ALL spend now
-burnban lift --today                               # resume, overriding today's caps
+burnban lift --today                               # resume, overriding today's local caps
 ```
 
 And when the bill makes you wonder:
@@ -184,11 +184,12 @@ One binary, one SQLite file, nothing leaves your network. Three deployment shape
 2. **Team gateway** — one instance the whole team points at:
 
    ```sh
-   BURNBAN_TOKEN=$(openssl rand -hex 16) burnban serve --host 0.0.0.0
+   BURNBAN_TOKEN=$(openssl rand -hex 16) burnban serve --host 0.0.0.0 \
+     --tls-cert /etc/burnban/tls.crt --tls-key /etc/burnban/tls.key
    ```
 
-   Non-loopback binds **fail closed** without a token. Clients authenticate with the `x-burnban-token` header or `Bearer` auth (Claude Code: `ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ..."`); the dashboard accepts `?token=`. Spend is attributed per agent and per `x-burnban-session`.
-3. **Docker** — `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 4141:4141 -v burnban-data:/data burnban`
+   Non-loopback binds **fail closed** without a strong token and TLS. Clients authenticate with the `x-burnban-token` header (Claude Code: `ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ..."`); it is consumed locally and never forwarded to providers. Bearer auth is reserved for dashboard/control routes because provider routes need `Authorization` for the provider key. The dashboard also accepts `?token=`. Spend is attributed per agent and per `x-burnban-session`; those attribution headers also stay local.
+3. **Docker** — bind the host side to loopback and put TLS at your ingress: `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 127.0.0.1:4141:4141 -v burnban-data:/data burnban serve --host 0.0.0.0 --allow-insecure-http`. The escape hatch is only for a local container bridge or TLS reverse proxy; never expose that plaintext port to a network.
 
 And the plumbing your existing stack expects:
 
@@ -199,7 +200,7 @@ And the plumbing your existing stack expects:
 
 ## Pricing table
 
-Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3 Pro/Flash and 2.5, Grok 4.5) ship embedded, plus the GPT-5/5.1 and Claude Opus 4.5–4.7 generations so `subsidy` can price older session logs. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
+Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3.1 Pro / 3.5 Flash / 3.1 Flash-Lite, and Grok 4.5) ship embedded, plus older GPT-5 and Claude generations so `subsidy` can price historical session logs. Per-request long-context tiers and GPT-5.6 cache writes are included. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
 
 ```json
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}
@@ -209,7 +210,7 @@ Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 
 
 Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no telemetry, no account, no license checks, and **no code path to our servers**: if a feature ever needs the network beyond your model providers, it ships as a separate opt-in product, never in the meter.
 
-The paid product is **[Burnban Teams](https://burnban.dev#teams)** (early access): a centralized control plane for fleets — org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, SSO + audit + chargeback exports, deployed in your VPC or hosted. Meters keep working standalone if it's unreachable.
+The paid product is **[Burnban Teams](https://burnban.dev#teams)** (early access): a separate centralized control plane and opt-in connector for fleets, with org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, an immutable policy audit log, and aggregate chargeback exports. SSO/SAML, billing automation, fine-grained RBAC, and HA storage are enterprise follow-ons, not features hidden in this binary. The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if the control plane is unreachable.
 
 ## Roadmap
 

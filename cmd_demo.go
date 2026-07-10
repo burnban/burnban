@@ -21,10 +21,24 @@ func cmdDemo(args []string) error {
 	fs := flag.NewFlagSet("demo", flag.ExitOnError)
 	port := fs.Int("port", 4242, "port for the demo server")
 	dbPath := fs.String("db", filepath.Join(os.TempDir(), "burnban-demo.db"), "demo database path")
+	force := fs.Bool("force", false, "replace an existing custom demo database")
 	fs.Parse(args)
 
+	customDB := false
+	fs.Visit(func(f *flag.Flag) { customDB = customDB || f.Name == "db" })
+	if customDB && !*force {
+		for _, suffix := range []string{"", "-wal", "-shm"} {
+			if _, err := os.Lstat(*dbPath + suffix); err == nil {
+				return fmt.Errorf("refusing to replace existing demo database %s without --force", *dbPath)
+			} else if !os.IsNotExist(err) {
+				return err
+			}
+		}
+	}
 	for _, suffix := range []string{"", "-wal", "-shm"} {
-		os.Remove(*dbPath + suffix)
+		if err := os.Remove(*dbPath + suffix); err != nil && !os.IsNotExist(err) {
+			return err
+		}
 	}
 	s, err := store.Open(*dbPath)
 	if err != nil {

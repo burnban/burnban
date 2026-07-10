@@ -169,6 +169,116 @@ func TestZeroCapIsUnset(t *testing.T) {
 	}
 }
 
+func TestNonFiniteSettingsAreRejected(t *testing.T) {
+	for _, value := range []string{"NaN", "+Inf", "-Inf"} {
+		s := newStore(t)
+		if err := s.SetSetting(budget.KeyDailyCapUSD, value); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := (&budget.Guard{S: s}).Check(now, ""); err == nil {
+			t.Errorf("cap %q was accepted", value)
+		}
+	}
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyWarnPct, "101"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&budget.Guard{S: s}).WarnStatus(now); err == nil {
+		t.Fatal("warning threshold above 100 was accepted")
+	}
+}
+
+func TestExternalPolicyIsStricterAndCannotBeOverridden(t *testing.T) {
+	s := newStore(t)
+	g := &budget.Guard{S: s}
+	spend(t, s, now.Add(-time.Hour), 6)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "5"); err != nil {
+		t.Fatal(err)
+	}
+	denial, err := g.Check(now, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if denial == nil || denial.Type != "burnban_external_cap_reached" {
+		t.Fatalf("denial = %+v", denial)
+	}
+	if err := s.SetSetting(budget.KeyOverrideDay, now.Format("2006-01-02")); err != nil {
+		t.Fatal(err)
+	}
+	denial, err = g.Check(now, "")
+	if err != nil || denial == nil || denial.Type != "burnban_external_cap_reached" {
+		t.Fatalf("local override bypassed external policy: denial=%+v err=%v", denial, err)
+	}
+	states, err := budget.Status(s, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := states[0]; got.CapUSD != 5 || got.LocalCapUSD != 10 || got.ExternalCapUSD != 5 || got.Source != "external" {
+		t.Fatalf("daily state = %+v", got)
+	}
+}
+
+func TestLocalCapCanRemainStricterThanExternalPolicy(t *testing.T) {
+	s := newStore(t)
+	g := &budget.Guard{S: s}
+	spend(t, s, now.Add(-time.Hour), 6)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "5"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	denial, err := g.Check(now, "")
+	if err != nil || denial == nil || denial.Type != "burnban_cap_reached" {
+		t.Fatalf("denial=%+v err=%v", denial, err)
+	}
+}
+
+func TestExternalBanCannotBeLiftedLocally(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyExternalBanActive, "1"); err != nil {
+		t.Fatal(err)
+	}
+	denial, err := (&budget.Guard{S: s}).Check(now, "")
+	if err != nil || denial == nil || denial.Type != "burnban_external_ban" {
+		t.Fatalf("denial=%+v err=%v", denial, err)
+	}
+	local, external, err := budget.BanStatus(s)
+	if err != nil || local || !external {
+		t.Fatalf("ban status local=%t external=%t err=%v", local, external, err)
+	}
+}
+
+func TestExternalWindowsUseUTCAcrossMeters(t *testing.T) {
+	s := newStore(t)
+	location := time.FixedZone("Pacific", -7*60*60)
+	queryNow := time.Date(2026, 7, 9, 1, 0, 0, 0, time.UTC).In(location)
+	// This row belongs to the machine-local day (July 8) but precedes the
+	// organization UTC day (July 9), so it must not consume the fleet cap.
+	spend(t, s, time.Date(2026, 7, 8, 22, 0, 0, 0, time.UTC), 9)
+	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "5"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	if denial, err := guard.Check(queryNow, ""); err != nil || denial != nil {
+		t.Fatalf("pre-UTC-boundary spend denied: denial=%+v err=%v", denial, err)
+	}
+	spend(t, s, time.Date(2026, 7, 9, 0, 30, 0, 0, time.UTC), 6)
+	if denial, err := guard.Check(queryNow, ""); err != nil || denial == nil || denial.Type != "burnban_external_cap_reached" {
+		t.Fatalf("UTC-window spend was not denied: denial=%+v err=%v", denial, err)
+	}
+	states, err := budget.Status(s, queryNow)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if states[0].LocalSpent != 15 || states[0].ExternalSpent != 6 || states[0].Spent != 6 {
+		t.Fatalf("daily state=%+v", states[0])
+	}
+}
+
 func TestStatusOneShot(t *testing.T) {
 	s := newStore(t)
 	spend(t, s, now.Add(-time.Hour), 3)

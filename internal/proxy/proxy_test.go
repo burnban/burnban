@@ -81,6 +81,91 @@ func TestPassthroughAndMetering(t *testing.T) {
 	}
 }
 
+func TestBurnbanHeadersStayLocal(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		for _, name := range []string{"x-burnban-token", "x-burnban-agent", "x-burnban-session"} {
+			if got := r.Header.Get(name); got != "" {
+				t.Errorf("upstream received %s=%q", name, got)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(`{"model":"claude-opus-4-7"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("x-burnban-token", "gateway-secret")
+	req.Header.Set("x-burnban-agent", "payments-agent")
+	req.Header.Set("x-burnban-session", "private-session")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if got := summarize(t, s).Agents[0].Agent; got != "payments-agent" {
+		t.Fatalf("local attribution = %q", got)
+	}
+}
+
+func TestUpstreamQueryIsPreserved(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.URL.Query().Get("api-version"); got != "2026-01-01" {
+			t.Errorf("upstream api-version = %q", got)
+		}
+		if got := r.URL.Query().Get("stream"); got != "true" {
+			t.Errorf("request query = %q", got)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	t.Cleanup(up.Close)
+	s, err := store.Open(filepath.Join(t.TempDir(), "query.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	p, err := proxy.New(s, &pricing.Table{Models: map[string]pricing.Price{}}, map[string]proxy.Upstream{
+		"anthropic": {URL: up.URL + "?api-version=2026-01-01", Shape: "anthropic"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	outer := httptest.NewServer(p.Handler())
+	t.Cleanup(outer.Close)
+	resp, err := http.Post(outer.URL+"/anthropic/v1/messages?stream=true", "application/json", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+}
+
+func TestUpstreamRedirectIsRelayedNotFollowed(t *testing.T) {
+	redirected := 0
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		redirected++
+	}))
+	t.Cleanup(target.Close)
+	srv, _ := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL+"/credential-sink", http.StatusTemporaryRedirect)
+	}))
+	client := &http.Client{CheckRedirect: func(_ *http.Request, _ []*http.Request) error { return http.ErrUseLastResponse }}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(`{}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("x-api-key", "provider-secret")
+	resp, err := client.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusTemporaryRedirect || redirected != 0 {
+		t.Fatalf("status=%d redirected=%d", resp.StatusCode, redirected)
+	}
+}
+
 func TestStreamMetering(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/event-stream")
@@ -449,6 +534,20 @@ func TestOversizeBodyRefused(t *testing.T) {
 		t.Fatalf("status = %d, want 413", resp.StatusCode)
 	}
 	_ = s
+}
+
+func TestOversizeResponsePassesThroughInFull(t *testing.T) {
+	want := strings.Repeat("x", (32<<20)+17)
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, want)
+	}))
+	resp, body := post(t, srv.URL)
+	if resp.StatusCode != http.StatusOK || body != want {
+		t.Fatalf("response status=%d bytes=%d, want %d", resp.StatusCode, len(body), len(want))
+	}
+	if sum := summarize(t, s); sum.Requests != 1 || sum.Unpriced != 1 {
+		t.Fatalf("summary = %+v", sum)
+	}
 }
 
 func TestWarnWebhookFiresOnce(t *testing.T) {
