@@ -10,6 +10,10 @@ Your agents run all day on your API keys. Burnban is a single-binary local proxy
 
 ## Quickstart
 
+```sh
+curl -fsSL https://burnban.sh/install | sh    # or: make build (Go, no cgo)
+```
+
 No traffic yet? See it alive first — fake data, fresh every run:
 
 ```sh
@@ -201,12 +205,19 @@ Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}
 ```
 
+## Free forever vs. paid
+
+Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no telemetry, no account, no license checks, and **no code path to our servers**: if a feature ever needs the network beyond your model providers, it ships as a separate opt-in product, never in the meter.
+
+The paid product is **[Burnban Teams](https://burnban.dev#teams)** (early access): a centralized control plane for fleets — org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, SSO + audit + chargeback exports, deployed in your VPC or hosted. Meters keep working standalone if it's unreachable.
+
 ## Roadmap
 
 - **Cache-aware request shaping** — stabilize prompt prefixes to turn cache misses into 90%-off hits
 - **Downshift routing** — send trivial calls to a cheap tier or your local Ollama, by policy (`whatif` already tells you what it would save)
 - **`burnban doctor`** — one command that verifies your agents are actually flowing through the meter
 - **State of Agent Spend** — opt-in anonymous aggregates, published monthly
+- **Burnban Teams** — the paid fleet control plane above; [early access](https://burnban.dev#teams)
 
 ## Development
 
