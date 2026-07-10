@@ -1,0 +1,228 @@
+// Package store persists every proxied request to a local SQLite database
+// and answers the aggregate questions the CLI asks of it.
+package store
+
+import (
+	"database/sql"
+	"os"
+	"path/filepath"
+	"time"
+
+	_ "modernc.org/sqlite"
+)
+
+const schema = `
+CREATE TABLE IF NOT EXISTS requests (
+	id INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts TEXT NOT NULL,
+	provider TEXT NOT NULL,
+	model TEXT NOT NULL DEFAULT '',
+	agent TEXT NOT NULL DEFAULT '',
+	session TEXT NOT NULL DEFAULT '',
+	in_tokens INTEGER NOT NULL DEFAULT 0,
+	out_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+	cache_write_tokens INTEGER NOT NULL DEFAULT 0,
+	cost_usd REAL NOT NULL DEFAULT 0,
+	latency_ms INTEGER NOT NULL DEFAULT 0,
+	status INTEGER NOT NULL DEFAULT 0,
+	streamed INTEGER NOT NULL DEFAULT 0,
+	estimated INTEGER NOT NULL DEFAULT 0,
+	priced INTEGER NOT NULL DEFAULT 1,
+	body_hash TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
+CREATE TABLE IF NOT EXISTS settings (
+	key TEXT PRIMARY KEY,
+	value TEXT NOT NULL
+);
+`
+
+type Store struct {
+	db *sql.DB
+}
+
+func Open(path string) (*Store, error) {
+	if dir := filepath.Dir(path); dir != "." {
+		if err := os.MkdirAll(dir, 0o755); err != nil {
+			return nil, err
+		}
+	}
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	return &Store{db: db}, nil
+}
+
+func (s *Store) Close() error { return s.db.Close() }
+
+// Request is one proxied API call. In/Out are full-price tokens; cache
+// fields hold discounted reads and premium writes, already normalized by
+// the meter so pricing can treat all providers the same way.
+type Request struct {
+	Ts               time.Time
+	Provider         string
+	Model            string
+	Agent            string
+	Session          string
+	InTokens         int64
+	OutTokens        int64
+	CacheReadTokens  int64
+	CacheWriteTokens int64
+	CostUSD          float64
+	LatencyMs        int64
+	Status           int
+	Streamed         bool
+	Estimated        bool
+	Priced           bool
+	BodyHash         string
+}
+
+func (s *Store) Insert(r Request) error {
+	_, err := s.db.Exec(`INSERT INTO requests
+		(ts, provider, model, agent, session, in_tokens, out_tokens,
+		 cache_read_tokens, cache_write_tokens, cost_usd, latency_ms,
+		 status, streamed, estimated, priced, body_hash)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+		r.Ts.UTC().Format(time.RFC3339), r.Provider, r.Model, r.Agent, r.Session,
+		r.InTokens, r.OutTokens, r.CacheReadTokens, r.CacheWriteTokens,
+		r.CostUSD, r.LatencyMs, r.Status, b2i(r.Streamed), b2i(r.Estimated),
+		b2i(r.Priced), r.BodyHash)
+	return err
+}
+
+func (s *Store) SpentSince(t time.Time) (float64, error) {
+	var v float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE ts >= ?`,
+		t.UTC().Format(time.RFC3339)).Scan(&v)
+	return v, err
+}
+
+type ModelRow struct {
+	Model     string
+	Requests  int64
+	In        int64
+	Out       int64
+	CacheRead int64
+	Cost      float64
+}
+
+type AgentRow struct {
+	Agent    string
+	Requests int64
+	Cost     float64
+}
+
+type Summary struct {
+	Requests     int64
+	Cost         float64
+	In           int64
+	Out          int64
+	CacheRead    int64
+	CacheWrite   int64
+	Unpriced     int64
+	Estimated    int64
+	Models       []ModelRow
+	Agents       []AgentRow
+	DupGroups    int64
+	DupWastedUSD float64
+}
+
+func (s *Store) Summarize(since time.Time) (*Summary, error) {
+	ts := since.UTC().Format(time.RFC3339)
+	sum := &Summary{}
+	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
+		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
+		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+		COALESCE(SUM(CASE WHEN priced=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(estimated),0)
+		FROM requests WHERE ts >= ?`, ts).
+		Scan(&sum.Requests, &sum.Cost, &sum.In, &sum.Out,
+			&sum.CacheRead, &sum.CacheWrite, &sum.Unpriced, &sum.Estimated)
+	if err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`SELECT model, COUNT(*),
+		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
+		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? AND model != ''
+		GROUP BY model ORDER BY SUM(cost_usd) DESC LIMIT 20`, ts)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var m ModelRow
+		if err := rows.Scan(&m.Model, &m.Requests, &m.In, &m.Out, &m.CacheRead, &m.Cost); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sum.Models = append(sum.Models, m)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.db.Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? AND agent != ''
+		GROUP BY agent ORDER BY SUM(cost_usd) DESC LIMIT 20`, ts)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var a AgentRow
+		if err := rows.Scan(&a.Agent, &a.Requests, &a.Cost); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		sum.Agents = append(sum.Agents, a)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	err = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(wasted),0) FROM (
+		SELECT SUM(cost_usd) * (COUNT(*)-1.0)/COUNT(*) AS wasted
+		FROM requests WHERE ts >= ? AND body_hash != ''
+		GROUP BY body_hash HAVING COUNT(*) > 1)`, ts).
+		Scan(&sum.DupGroups, &sum.DupWastedUSD)
+	if err != nil {
+		return nil, err
+	}
+	return sum, nil
+}
+
+func (s *Store) SetSetting(key, value string) error {
+	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
+	return err
+}
+
+// GetSetting returns "" for keys that were never set.
+func (s *Store) GetSetting(key string) (string, error) {
+	var v string
+	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return v, err
+}
+
+func (s *Store) DeleteSetting(key string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
+func b2i(b bool) int {
+	if b {
+		return 1
+	}
+	return 0
+}
