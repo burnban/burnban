@@ -48,10 +48,10 @@ func cmdReport(args []string) error {
 	if len(sum.Models) > 0 {
 		fmt.Println("\nBY MODEL")
 		w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
-		fmt.Fprintln(w, "model\treq\tin\tout\tcache%\tcost")
+		fmt.Fprintln(w, "model\treq\tin\tout\tcache-r\tcache-w\tcost")
 		for _, m := range sum.Models {
-			fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t$%.4f\n",
-				m.Model, m.Requests, fmtTok(m.In), fmtTok(m.Out), cachePct(m.CacheRead, m.In), m.Cost)
+			fmt.Fprintf(w, "%s\t%d\t%s\t%s\t%s\t%s\t$%.4f\n",
+				m.Model, m.Requests, fmtTok(m.In), fmtTok(m.Out), fmtTok(m.CacheRead), fmtTok(m.CacheWrite), m.Cost)
 		}
 		w.Flush()
 	}

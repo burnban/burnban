@@ -104,12 +104,13 @@ func (s *Store) SpentSince(t time.Time) (float64, error) {
 }
 
 type ModelRow struct {
-	Model     string
-	Requests  int64
-	In        int64
-	Out       int64
-	CacheRead int64
-	Cost      float64
+	Model      string
+	Requests   int64
+	In         int64
+	Out        int64
+	CacheRead  int64
+	CacheWrite int64
+	Cost       float64
 }
 
 type AgentRow struct {
@@ -150,7 +151,8 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 
 	rows, err := s.db.Query(`SELECT model, COUNT(*),
 		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
-		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cost_usd),0)
+		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+		COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE ts >= ? AND model != ''
 		GROUP BY model ORDER BY SUM(cost_usd) DESC LIMIT 20`, ts)
 	if err != nil {
@@ -158,7 +160,7 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	}
 	for rows.Next() {
 		var m ModelRow
-		if err := rows.Scan(&m.Model, &m.Requests, &m.In, &m.Out, &m.CacheRead, &m.Cost); err != nil {
+		if err := rows.Scan(&m.Model, &m.Requests, &m.In, &m.Out, &m.CacheRead, &m.CacheWrite, &m.Cost); err != nil {
 			rows.Close()
 			return nil, err
 		}
