@@ -63,11 +63,15 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]string) (*Proxy,
 
 // DefaultUpstreams maps URL path prefixes to provider APIs. Each can be
 // overridden by env var, which is also how tests point burnban at fakes.
+// Any other name added to the map (serve --upstream name=url) is metered
+// with OpenAI-shaped usage parsing — the de-facto standard that Groq,
+// Mistral, DeepSeek, OpenRouter, Ollama, vLLM and friends all speak.
 func DefaultUpstreams() map[string]string {
 	return map[string]string{
 		"anthropic": envOr("BURNBAN_ANTHROPIC_UPSTREAM", "https://api.anthropic.com"),
 		"openai":    envOr("BURNBAN_OPENAI_UPSTREAM", "https://api.openai.com"),
 		"xai":       envOr("BURNBAN_XAI_UPSTREAM", "https://api.x.ai"),
+		"gemini":    envOr("BURNBAN_GEMINI_UPSTREAM", "https://generativelanguage.googleapis.com"),
 	}
 }
 
@@ -190,6 +194,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		if err := p.Store.Insert(rec); err != nil {
 			p.Logf("burnban: store: %v", err)
 		}
+		p.maybeWarn(time.Now())
 	}
 }
 
@@ -198,9 +203,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 // mid-stream we keep draining upstream so the spend still gets recorded.
 func (p *Proxy) streamThrough(w http.ResponseWriter, body io.Reader, provider string) meter.Usage {
 	var tracker meter.Tracker
-	if provider == "anthropic" {
+	switch provider {
+	case "anthropic":
 		tracker = &meter.AnthropicSSE{}
-	} else {
+	case "gemini":
+		tracker = &meter.GeminiSSE{}
+	default:
 		tracker = &meter.OpenAISSE{}
 	}
 
@@ -227,10 +235,14 @@ func (p *Proxy) streamThrough(w http.ResponseWriter, body io.Reader, provider st
 }
 
 func parseJSON(provider string, body []byte) meter.Usage {
-	if provider == "anthropic" {
+	switch provider {
+	case "anthropic":
 		return meter.ParseAnthropicJSON(body)
+	case "gemini":
+		return meter.ParseGeminiJSON(body)
+	default:
+		return meter.ParseOpenAIJSON(body)
 	}
-	return meter.ParseOpenAIJSON(body)
 }
 
 // hopHeaders are stripped before forwarding. Accept-Encoding is included
@@ -269,8 +281,8 @@ func agentFrom(r *http.Request) string {
 }
 
 // alertCapReached fires the configured webhook (Slack-compatible JSON)
-// the first time the daily cap trips each day. Fire-and-forget: a slow or
-// dead webhook must never sit in the request path.
+// the first time a cap trips each day. Fire-and-forget: a slow or dead
+// webhook must never sit in the request path.
 func (p *Proxy) alertCapReached(d *budget.Denial) {
 	if d.Type != "burnban_cap_reached" {
 		return
@@ -280,13 +292,38 @@ func (p *Proxy) alertCapReached(d *budget.Denial) {
 		return
 	}
 	today := time.Now().Format("2006-01-02")
-	if day, _ := p.Store.GetSetting(budget.KeyAlertedDay); day == today {
+	if won, err := p.Store.SetSettingOnce(budget.KeyAlertedDay, today); err != nil || !won {
 		return
 	}
-	if err := p.Store.SetSetting(budget.KeyAlertedDay, today); err != nil {
+	p.postWebhook(urlStr, "🔥🚫 burnban: "+d.Message)
+}
+
+// maybeWarn posts the early warning when a budget window crosses the warn
+// threshold — once per window instance, and only when a webhook is set. It
+// runs after the response is already on the wire, never in front of it.
+func (p *Proxy) maybeWarn(now time.Time) {
+	urlStr, err := p.Store.GetSetting(budget.KeyWebhookURL)
+	if err != nil || urlStr == "" {
 		return
 	}
-	body, _ := json.Marshal(map[string]string{"text": "🔥🚫 burnban: " + d.Message})
+	warn, err := p.Guard.WarnStatus(now)
+	if err != nil {
+		p.Logf("burnban: warn check: %v", err)
+		return
+	}
+	if warn == nil {
+		return
+	}
+	if won, err := p.Store.SetSettingOnce(warn.MarkKey, "1"); err != nil || !won {
+		return
+	}
+	p.postWebhook(urlStr, fmt.Sprintf(
+		"⚠️ burnban: %.0f%% of the %s cap burned — $%.2f of $%.2f (resets %s)",
+		warn.Pct, warn.Window, warn.Spent, warn.Cap, warn.Reset))
+}
+
+func (p *Proxy) postWebhook(urlStr, text string) {
+	body, _ := json.Marshal(map[string]string{"text": text})
 	go func() {
 		c := &http.Client{Timeout: 5 * time.Second}
 		resp, err := c.Post(urlStr, "application/json", bytes.NewReader(body))

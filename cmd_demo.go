@@ -34,9 +34,15 @@ func cmdDemo(args []string) error {
 		s.Close()
 		return err
 	}
-	if err := s.SetSetting(budget.KeyDailyCapUSD, "40.00"); err != nil {
-		s.Close()
-		return err
+	for key, cap := range map[string]string{
+		budget.KeyDailyCapUSD:   "40.00",
+		budget.KeyWeeklyCapUSD:  "200.00",
+		budget.KeyMonthlyCapUSD: "600.00",
+	} {
+		if err := s.SetSetting(key, cap); err != nil {
+			s.Close()
+			return err
+		}
 	}
 	if err := s.Close(); err != nil {
 		return err
@@ -84,46 +90,54 @@ func seedDemo(s *store.Store) error {
 	}
 
 	now := time.Now()
-	for hoursAgo := 23; hoursAgo >= 0; hoursAgo-- {
-		// A gentle diurnal curve: the demo day ramps up, peaks, cools off.
-		phase := float64(23-hoursAgo) / 23
-		busy := 3 + int(10*phase*(1.3-phase))
-		for i := 0; i < busy; i++ {
-			m := pick()
-			ts := now.Add(-time.Duration(hoursAgo)*time.Hour - time.Duration(rng.Intn(3500))*time.Second)
-			in := m.inLo + rng.Int63n(m.inHi-m.inLo)
-			out := m.outLo + rng.Int63n(m.outHi-m.outLo)
-			var cacheRead, cacheWrite int64
-			if m.cacheHot {
-				if rng.Float64() < 0.75 {
-					cacheRead = 20000 + rng.Int63n(45000)
-				} else {
-					cacheWrite = 20000 + rng.Int63n(45000)
+	// A week of history so report/whatif/weekly budgets have something to
+	// chew on; today gets the full diurnal curve the dashboard shows.
+	for daysAgo := 6; daysAgo >= 0; daysAgo-- {
+		for hoursAgo := 23; hoursAgo >= 0; hoursAgo-- {
+			// A gentle diurnal curve: each demo day ramps up, peaks, cools off.
+			phase := float64(23-hoursAgo) / 23
+			busy := 3 + int(10*phase*(1.3-phase))
+			if daysAgo > 0 {
+				busy = busy * (5 + rng.Intn(4)) / 12 // past days: lighter, uneven
+			}
+			for i := 0; i < busy; i++ {
+				m := pick()
+				ts := now.AddDate(0, 0, -daysAgo).
+					Add(-time.Duration(hoursAgo)*time.Hour - time.Duration(rng.Intn(3500))*time.Second)
+				in := m.inLo + rng.Int63n(m.inHi-m.inLo)
+				out := m.outLo + rng.Int63n(m.outHi-m.outLo)
+				var cacheRead, cacheWrite int64
+				if m.cacheHot {
+					if rng.Float64() < 0.75 {
+						cacheRead = 20000 + rng.Int63n(45000)
+					} else {
+						cacheWrite = 20000 + rng.Int63n(45000)
+					}
 				}
-			}
-			price, ok := prices.Lookup(m.model)
-			if !ok {
-				return fmt.Errorf("demo model %q missing from pricing table", m.model)
-			}
-			req := store.Request{
-				Ts:       ts,
-				Provider: providerOf(m.model),
-				Model:    m.model,
-				Agent:    m.agent,
-				Session:  fmt.Sprintf("%s-%d", m.agent, rng.Intn(4)),
-				InTokens: in, OutTokens: out,
-				CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite,
-				CostUSD:   pricing.Cost(price, in, out, cacheRead, cacheWrite),
-				LatencyMs: 400 + int64(rng.Intn(9000)),
-				Status:    200,
-				Streamed:  true,
-				Priced:    true,
-				// A narrow-ish hash space, so a handful of "duplicate
-				// request" waste receipts show up — the point of the demo.
-				BodyHash: fmt.Sprintf("demo%04d", rng.Intn(2000)),
-			}
-			if err := s.Insert(req); err != nil {
-				return err
+				price, ok := prices.Lookup(m.model)
+				if !ok {
+					return fmt.Errorf("demo model %q missing from pricing table", m.model)
+				}
+				req := store.Request{
+					Ts:       ts,
+					Provider: providerOf(m.model),
+					Model:    m.model,
+					Agent:    m.agent,
+					Session:  fmt.Sprintf("%s-%d", m.agent, rng.Intn(4)),
+					InTokens: in, OutTokens: out,
+					CacheReadTokens: cacheRead, CacheWriteTokens: cacheWrite,
+					CostUSD:   pricing.Cost(price, in, out, cacheRead, cacheWrite),
+					LatencyMs: 400 + int64(rng.Intn(9000)),
+					Status:    200,
+					Streamed:  true,
+					Priced:    true,
+					// A narrow-ish hash space, so a handful of "duplicate
+					// request" waste receipts show up — the point of the demo.
+					BodyHash: fmt.Sprintf("demo%04d", rng.Intn(2000)),
+				}
+				if err := s.Insert(req); err != nil {
+					return err
+				}
 			}
 		}
 	}

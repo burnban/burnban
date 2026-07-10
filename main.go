@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-const version = "0.3.0-dev"
+const version = "0.4.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -37,6 +37,10 @@ func main() {
 		err = cmdAlert(os.Args[2:])
 	case "demo":
 		err = cmdDemo(os.Args[2:])
+	case "whatif":
+		err = cmdWhatif(os.Args[2:])
+	case "bench":
+		err = cmdBench(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnban", version)
 	case "help", "--help", "-h":
@@ -61,12 +65,14 @@ usage: burnban <command> [flags]
   demo     seed fake traffic and serve the dashboard — see it alive in 5s
   top      live spend view, refreshed in place
   report   spend + waste receipts for a window (--since today|24h|7d)
-  cap      set a daily budget (--daily 10 [--agent NAME] | --off)
+  whatif   reprice a window's traffic onto other models ("what would 7d cost on haiku?")
+  cap      set budgets (--daily 10 --weekly 40 --monthly 120 [--agent NAME] [--warn 80] | --off)
   ban      pause ALL agent spend immediately
-  lift     lift the ban (--today also overrides today's cap)
+  lift     lift the ban (--today also overrides today's caps)
   mcp      MCP server over stdio — plug burnban into Claude Code, Cursor, etc.
   export   dump raw request rows for finance (--since 7d --format csv|json)
-  alert    webhook for cap alerts (--webhook URL | --off)
+  alert    webhook for cap alerts and 80% warnings (--webhook URL | --off)
+  bench    measure burnban's own added latency against a loopback upstream
   version  print version
 
 Every command accepts --db (default ~/.burnban/burnban.db, or $BURNBAN_DB).

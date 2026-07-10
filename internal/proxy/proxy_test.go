@@ -201,6 +201,198 @@ func TestBanBlocksAndLifts(t *testing.T) {
 	}
 }
 
+const geminiJSON = `{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"model"},"finishReason":"STOP"}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":300,"thoughtsTokenCount":200,"cachedContentTokenCount":400,"totalTokenCount":1500},"modelVersion":"gemini-3-pro"}`
+
+const geminiSSE = `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":10},"modelVersion":"gemini-3-pro"}` + "\n\n" +
+	`data: {"candidates":[{"content":{"parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":300,"thoughtsTokenCount":200,"cachedContentTokenCount":400}}` + "\n\n"
+
+// newProxyFor builds a proxy with one named upstream and that model priced.
+func newProxyFor(t *testing.T, name string, upstream http.Handler, prices *pricing.Table) (*httptest.Server, *store.Store) {
+	t.Helper()
+	up := httptest.NewServer(upstream)
+	t.Cleanup(up.Close)
+	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	p, err := proxy.New(s, prices, map[string]string{name: up.URL})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p.Handler())
+	t.Cleanup(srv.Close)
+	return srv, s
+}
+
+func TestGeminiMetering(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"gemini-3-pro": {InputPerMTok: 2, OutputPerMTok: 12, CacheReadMult: 0.1},
+	}}
+	srv, s := newProxyFor(t, "gemini", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, geminiJSON)
+	}), prices)
+
+	resp, err := http.Post(srv.URL+"/gemini/v1beta/models/gemini-3-pro:generateContent",
+		"application/json", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	sum := summarize(t, s)
+	// In = prompt(1000) - cached(400); Out = candidates(300) + thoughts(200).
+	if sum.In != 600 || sum.Out != 500 || sum.CacheRead != 400 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	want := (600*2.0 + 500*12.0 + 400*2.0*0.1) / 1e6
+	if math.Abs(sum.Cost-want) > 1e-9 {
+		t.Fatalf("cost = %v, want %v", sum.Cost, want)
+	}
+	if len(sum.Models) != 1 || sum.Models[0].Model != "gemini-3-pro" {
+		t.Fatalf("models = %+v", sum.Models)
+	}
+}
+
+func TestGeminiStreamMetering(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"gemini-3-pro": {InputPerMTok: 2, OutputPerMTok: 12, CacheReadMult: 0.1},
+	}}
+	srv, s := newProxyFor(t, "gemini", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		f := w.(http.Flusher)
+		for _, line := range strings.SplitAfter(geminiSSE, "\n") {
+			io.WriteString(w, line)
+			f.Flush()
+		}
+	}), prices)
+
+	resp, err := http.Post(srv.URL+"/gemini/v1beta/models/gemini-3-pro:streamGenerateContent?alt=sse",
+		"application/json", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if !strings.Contains(string(body), "done") {
+		t.Fatal("stream reached the client truncated")
+	}
+	sum := summarize(t, s)
+	// The final cumulative frame wins; model carries over from frame one.
+	if sum.In != 600 || sum.Out != 500 || sum.CacheRead != 400 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	if len(sum.Models) != 1 || sum.Models[0].Model != "gemini-3-pro" {
+		t.Fatalf("models = %+v", sum.Models)
+	}
+}
+
+// A custom upstream (serve --upstream groq=…) gets routed by name and
+// metered with OpenAI-shaped parsing — the compat-provider default.
+func TestCustomUpstreamOpenAIShaped(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"kimi-k3": {InputPerMTok: 1, OutputPerMTok: 3, CacheReadMult: 0.1},
+	}}
+	srv, s := newProxyFor(t, "groq", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/openai/v1/chat/completions" {
+			t.Errorf("upstream saw path %s", r.URL.Path)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"id":"cmpl","model":"kimi-k3","choices":[{"message":{"content":"hi"}}],"usage":{"prompt_tokens":800,"completion_tokens":200,"prompt_tokens_details":{"cached_tokens":300}}}`)
+	}), prices)
+
+	resp, err := http.Post(srv.URL+"/groq/openai/v1/chat/completions",
+		"application/json", strings.NewReader(`{"model":"kimi-k3","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	sum := summarize(t, s)
+	if sum.In != 500 || sum.Out != 200 || sum.CacheRead != 300 {
+		t.Fatalf("summary = %+v", sum)
+	}
+}
+
+func TestWeeklyCapBlocksE2E(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, anthropicJSON)
+	}))
+	// Spend earlier in the week (2 days back, clamped inside Monday) plus
+	// today crosses the weekly cap even though today alone would not.
+	early := time.Now().AddDate(0, 0, -2)
+	if ws := budget.WeekStart(time.Now()); early.Before(ws) {
+		early = ws.Add(time.Hour)
+	}
+	if err := s.Insert(store.Request{Ts: early, Provider: "anthropic", CostUSD: 0.008, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Insert(store.Request{Ts: time.Now(), Provider: "anthropic", CostUSD: 0.004, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyWeeklyCapUSD, "0.01"); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := post(t, srv.URL)
+	if resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(body, "weekly") {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+}
+
+func TestWarnWebhookFiresOnce(t *testing.T) {
+	hits := make(chan string, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		hits <- string(b)
+	}))
+	t.Cleanup(hook.Close)
+
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyWebhookURL, hook.URL); err != nil {
+		t.Fatal(err)
+	}
+	// $9 already burned against a $10 cap: past the default 80% threshold,
+	// under the cap, so requests still pass but the warning must fire.
+	if err := s.Insert(store.Request{Ts: time.Now(), Provider: "anthropic", CostUSD: 9, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d, want request to pass under the cap", resp.StatusCode)
+	}
+	select {
+	case msg := <-hits:
+		if !strings.Contains(msg, "daily cap") || !strings.Contains(msg, "⚠️") {
+			t.Fatalf("webhook payload = %s", msg)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("warning webhook never fired")
+	}
+
+	// Same window: a second request must not warn again.
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusOK {
+		t.Fatal("second request should still pass")
+	}
+	select {
+	case msg := <-hits:
+		t.Fatalf("warned twice in one window: %s", msg)
+	case <-time.After(300 * time.Millisecond):
+	}
+}
+
 func TestDuplicateWasteReceipt(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

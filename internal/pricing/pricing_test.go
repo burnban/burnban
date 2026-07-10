@@ -36,6 +36,22 @@ func TestCost(t *testing.T) {
 	}
 }
 
+func TestReprice(t *testing.T) {
+	opus := testTable().Models["claude-opus-4-7"]
+	// With cache tiers present, Reprice matches Cost exactly.
+	if got, want := Reprice(opus, 1000, 500, 2000, 0), Cost(opus, 1000, 500, 2000, 0); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("reprice with cache tiers = %v, want %v", got, want)
+	}
+	// A target without a cache-write tier bills those tokens as ordinary
+	// input — not zero, which is what Cost's ingest semantics would say.
+	luna := testTable().Models["gpt-5.6-luna"]
+	got := Reprice(luna, 1000, 500, 0, 4000)
+	want := (1000*1.0 + 500*6.0 + 4000*1.0) / 1e6
+	if math.Abs(got-want) > 1e-12 {
+		t.Fatalf("reprice cache-write fallback = %v, want %v", got, want)
+	}
+}
+
 func TestEmbeddedTableParses(t *testing.T) {
 	var tb Table
 	if err := json.Unmarshal(embedded, &tb); err != nil {

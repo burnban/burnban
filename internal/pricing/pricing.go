@@ -82,3 +82,23 @@ func Cost(p Price, in, out, cacheRead, cacheWrite int64) float64 {
 		float64(cacheRead)*p.InputPerMTok*p.CacheReadMult +
 		float64(cacheWrite)*p.InputPerMTok*p.CacheWriteMult) / 1e6
 }
+
+// Reprice costs a token bundle as if it had run on a different model. It
+// differs from Cost on one point: a zero cache multiplier here means the
+// target has no such cache tier, so those tokens fall back to the full
+// input rate — on that provider they would have been ordinary input, not
+// free. (At ingest time, Cost's zero write multiplier is correct because
+// such providers never report cache-write tokens in the first place.)
+func Reprice(p Price, in, out, cacheRead, cacheWrite int64) float64 {
+	readMult, writeMult := p.CacheReadMult, p.CacheWriteMult
+	if readMult <= 0 {
+		readMult = 1
+	}
+	if writeMult <= 0 {
+		writeMult = 1
+	}
+	return (float64(in)*p.InputPerMTok +
+		float64(out)*p.OutputPerMTok +
+		float64(cacheRead)*p.InputPerMTok*readMult +
+		float64(cacheWrite)*p.InputPerMTok*writeMult) / 1e6
+}

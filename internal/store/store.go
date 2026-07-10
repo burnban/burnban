@@ -48,7 +48,10 @@ func Open(path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)")
+	// WAL + synchronous=NORMAL: commits append to the log without an fsync
+	// each — the standard WAL setup. Worst case on an OS crash is losing
+	// the final moments of the ledger, never corrupting it.
+	db, err := sql.Open("sqlite", path+"?_pragma=busy_timeout(5000)&_pragma=journal_mode(WAL)&_pragma=synchronous(NORMAL)")
 	if err != nil {
 		return nil, err
 	}
@@ -254,6 +257,40 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	return sum, nil
 }
 
+// Totals is the token mass and metered cost of the priced rows in a window,
+// plus how many rows had to be excluded for lack of a known price.
+type Totals struct {
+	Requests   int64
+	Unpriced   int64
+	In         int64
+	Out        int64
+	CacheRead  int64
+	CacheWrite int64
+	CostUSD    float64
+}
+
+// TokenTotals sums tokens and cost across priced rows since t. Repricing
+// math is linear in token counts, so these sums are all what-if needs.
+func (s *Store) TokenTotals(t time.Time) (*Totals, error) {
+	ts := t.UTC().Format(time.RFC3339)
+	var tot Totals
+	err := s.db.QueryRow(`SELECT COUNT(*),
+		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
+		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
+		COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? AND priced = 1`, ts).
+		Scan(&tot.Requests, &tot.In, &tot.Out, &tot.CacheRead, &tot.CacheWrite, &tot.CostUSD)
+	if err != nil {
+		return nil, err
+	}
+	err = s.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE ts >= ? AND priced = 0`, ts).
+		Scan(&tot.Unpriced)
+	if err != nil {
+		return nil, err
+	}
+	return &tot, nil
+}
+
 // Export returns raw request rows for finance/audit tooling, oldest first.
 func (s *Store) Export(since time.Time) ([]Request, error) {
 	rows, err := s.db.Query(`SELECT ts, provider, model, agent, session,
@@ -286,6 +323,20 @@ func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
 	return err
+}
+
+// SetSettingOnce writes key=value and reports whether this call changed
+// anything. False means the value was already there — which is how alert
+// paths dedup atomically when concurrent requests race to send one.
+func (s *Store) SetSettingOnce(key, value string) (bool, error) {
+	res, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
+		ON CONFLICT(key) DO UPDATE SET value = excluded.value
+		WHERE settings.value <> excluded.value`, key, value)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
 }
 
 // GetSetting returns "" for keys that were never set.

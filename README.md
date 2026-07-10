@@ -34,10 +34,17 @@ open http://localhost:4141       # the live dashboard
 Set a budget and forget about surprise bills:
 
 ```sh
-burnban cap --daily 10                    # global: 402 once today hits $10
-burnban cap --agent openclaw --daily 3    # that one hungry agent gets $3
-burnban ban                               # emergency stop: pause ALL spend now
-burnban lift --today                      # resume, overriding today's cap
+burnban cap --daily 10 --weekly 40 --monthly 120   # 402 past any of them
+burnban cap --agent openclaw --daily 3             # that one hungry agent gets $3
+burnban cap --warn 80                              # webhook ping at 80% of any cap
+burnban ban                                        # emergency stop: pause ALL spend now
+burnban lift --today                               # resume, overriding today's caps
+```
+
+And when the bill makes you wonder:
+
+```sh
+burnban whatif --since 7d       # your exact week repriced on every model
 ```
 
 ## What you get
@@ -45,7 +52,8 @@ burnban lift --today                      # resume, overriding today's cap
 - **Live dashboard** at `http://localhost:4141` — the burn total glowing ember, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
 - **`burnban report`** — spend for any window, plus **waste receipts**: duplicate requests that burned money twice, and cache hit rates that mean you're paying full price for context the provider would re-serve at a 90% discount.
-- **Budget enforcement** — a daily dollar cap enforced in the request path with a clear 402 your agent surfaces verbatim, and a manual **burn ban** kill switch.
+- **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
+- **Budget enforcement** — daily, weekly, and monthly dollar caps enforced in the request path with a clear 402 your agent surfaces verbatim, per-agent daily caps, a webhook warning at 80% (yours to tune) *before* the hard stop, and a manual **burn ban** kill switch.
 - **Honest numbers** — usage comes from provider usage frames, priced per model including cache read/write economics. Unknown models are recorded as unpriced, never guessed. Estimated counts are flagged as estimates.
 
 ## How it works
@@ -54,7 +62,7 @@ burnban lift --today                      # resume, overriding today's cap
 agents (Claude Code, Codex, OpenClaw, Hermes, your app)
    │  one env var change
    ▼
-burnban serve  ──►  api.anthropic.com / api.openai.com / api.x.ai
+burnban serve  ──►  anthropic / openai / gemini / xai / any --upstream
    │
    ├─ passes every byte through unmodified (SSE included)
    ├─ reads usage frames, prices them (cache-aware)
@@ -64,13 +72,55 @@ burnban serve  ──►  api.anthropic.com / api.openai.com / api.x.ai
 
 Burnban binds to `127.0.0.1` only. It is a pass-through observer: request and response bodies are never rewritten, and API keys are forwarded, never persisted.
 
+## Why not the big gateway?
+
+The tools in this space either **watch** or **weigh a ton**. Log reporters ([ccusage](https://github.com/ccusage/ccusage), usage monitors) read what your agents already spent and can't stop the next dollar. Platform gateways enforce budgets, but [LiteLLM needs Postgres for budget state and Redis to enforce accurately across workers](https://docs.litellm.ai/docs/proxy/users), issues clients **its own virtual keys** instead of passing yours through, and [benchmarks its proxy overhead in milliseconds on a four-instance cluster](https://docs.litellm.ai/docs/benchmarks). Cloud gateways cap spend fine — through their cloud.
+
+|  | log reporters (ccusage…) | platform gateways (LiteLLM…) | cloud gateways (Cloudflare…) | **burnban** |
+|---|---|---|---|---|
+| stops overspend in the request path | — | ✅ | ✅ | ✅ **402 + kill switch** |
+| runs entirely on your machine | ✅ | ◐ self-hosted service | — | ✅ localhost-only default |
+| your provider keys stay yours | ✅ n/a | — virtual keys | — provider keys uploaded | ✅ pass-through, never stored |
+| infra needed | none | Postgres + Redis + config | an account | **one binary, one SQLite file** |
+| waste receipts (dupes, cache misses) | — | — | — | ✅ |
+| reprice your traffic (`whatif`) | — | — | — | ✅ |
+| agent self-throttling over MCP | — | — | — | ✅ |
+
+The honest flip side: LiteLLM speaks 100+ providers and does routing, fallbacks, and org-level key issuance — if you're a platform team standing up a company gateway, use it. Burnban is for the other 99%: you, your laptop, your agents, your bill.
+
+### Measure it, don't trust it
+
+```sh
+burnban bench
+```
+
+stands up an instant loopback upstream and runs the same traffic direct and through a fully armed proxy — metering, pricing, and a live budget check on every request. On an M-series laptop, 2,000 requests × 4 clients:
+
+```
+                p50       p90       p99      mean
+direct         90µs     131µs     249µs      98µs
+burnban       838µs     1.6ms     4.2ms     1.0ms
+─────────────────────────────────────────────────
+added         748µs     1.5ms     3.9ms     913µs
+```
+
+**~0.75ms median, with the ledger write and cap check included** — against an instant upstream, the worst case a proxy can face. Real inference calls run seconds; your agents will not feel it. Run it on your own hardware and check.
+
 ## Providers
 
 | provider  | point your client at                | env var the SDKs read |
 |-----------|-------------------------------------|-----------------------|
 | Anthropic | `http://localhost:4141/anthropic`   | `ANTHROPIC_BASE_URL`  |
 | OpenAI    | `http://localhost:4141/openai/v1`   | `OPENAI_BASE_URL`     |
+| Gemini    | `http://localhost:4141/gemini`      | `GOOGLE_GEMINI_BASE_URL` |
 | xAI       | `http://localhost:4141/xai/v1`      | `OPENAI_BASE_URL` (xAI SDKs are OpenAI-compatible) |
+
+**Anything OpenAI-compatible** — Groq, Mistral, DeepSeek, OpenRouter, your local Ollama or vLLM — mounts as an extra route with one flag and gets metered the same way:
+
+```sh
+burnban serve --upstream groq=https://api.groq.com --upstream ollama=http://localhost:11434
+# then point clients at http://localhost:4141/groq/…, /ollama/v1/…
+```
 
 Attribution: burnban groups spend by the client's `User-Agent`. For finer tracking, send `x-burnban-agent` / `x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
 
@@ -84,7 +134,9 @@ Burnban ships an MCP server, so any MCP client — Claude Code, Claude Desktop, 
 claude mcp add burnban -- burnban mcp
 ```
 
-Then just ask: *"what have my agents burned today?"*, *"set a $20 daily cap"*, *"burn ban, now"*. Tools exposed: `spend_summary`, `burn_status`, `set_daily_cap`, `burn_ban`, `lift_burn_ban`. Everything runs over stdio against the local database — no network, no keys.
+Then just ask: *"what have my agents burned today?"*, *"set a $150 weekly cap"*, *"burn ban, now"*. Tools exposed: `spend_summary`, `burn_status`, `set_daily_cap` (daily/weekly/monthly windows), `burn_ban`, `lift_burn_ban`. Everything runs over stdio against the local database — no network, no keys.
+
+`burn_status` reports spent/cap/**remaining** per window, which turns budgets into something agents can plan around: an agent that can ask *"how much runway is left?"* can downshift models or stop gracefully instead of slamming into the 402.
 
 ## For IT managers
 
@@ -102,14 +154,14 @@ One binary, one SQLite file, nothing leaves your network. Three deployment shape
 
 And the plumbing your existing stack expects:
 
-- **Prometheus** — scrape `/metrics`: total/per-model/per-agent spend counters, today's spend, cap, and ban-state gauges. Grafana dashboard in two minutes, no exporter.
-- **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) the first time the daily cap trips each day.
+- **Prometheus** — scrape `/metrics`: total/per-model/per-agent spend counters, spend and cap gauges for the day/week/month windows, and ban state. Grafana dashboard in two minutes, no exporter.
+- **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`) and again when a cap trips.
 - **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines.
 - **Audit trail** — every request row (timestamp, model, agent, session, tokens, cost, status) lives in plain SQLite you can query directly.
 
 ## Pricing table
 
-Current prices for the July 2026 lineup (GPT-5.6 Sol/Terra/Luna, Grok 4.5, Claude Opus 4.7/Sonnet 4.6/Haiku 4.5) ship embedded. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
+Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3 Pro/Flash and 2.5, Grok 4.5) ship embedded. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
 
 ```json
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}
@@ -118,8 +170,8 @@ Current prices for the July 2026 lineup (GPT-5.6 Sol/Terra/Luna, Grok 4.5, Claud
 ## Roadmap
 
 - **Cache-aware request shaping** — stabilize prompt prefixes to turn cache misses into 90%-off hits
-- **Downshift routing** — send trivial calls to a cheap tier or your local Ollama, by policy
-- **Per-agent budgets** and webhook alerts
+- **Downshift routing** — send trivial calls to a cheap tier or your local Ollama, by policy (`whatif` already tells you what it would save)
+- **`burnban doctor`** — one command that verifies your agents are actually flowing through the meter
 - **State of Agent Spend** — opt-in anonymous aggregates, published monthly
 
 ## Development

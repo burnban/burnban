@@ -84,6 +84,43 @@ func ParseOpenAIJSON(body []byte) Usage {
 	return Usage{Model: v.Model, In: in - cached, Out: out, CacheRead: cached, Found: true}
 }
 
+type geminiUsage struct {
+	PromptTokenCount        int64 `json:"promptTokenCount"`
+	CandidatesTokenCount    int64 `json:"candidatesTokenCount"`
+	ThoughtsTokenCount      int64 `json:"thoughtsTokenCount"`
+	CachedContentTokenCount int64 `json:"cachedContentTokenCount"`
+}
+
+type geminiBody struct {
+	ModelVersion string       `json:"modelVersion"`
+	Usage        *geminiUsage `json:"usageMetadata"`
+}
+
+// ParseGeminiJSON reads usageMetadata from a generateContent response.
+// Gemini's promptTokenCount includes the cached subset, and thinking tokens
+// are billed as output, so both are normalized here.
+func ParseGeminiJSON(body []byte) Usage {
+	var v geminiBody
+	if json.Unmarshal(body, &v) != nil || v.Usage == nil {
+		return Usage{}
+	}
+	return geminiToUsage(v)
+}
+
+func geminiToUsage(v geminiBody) Usage {
+	u := v.Usage
+	if u == nil || (u.PromptTokenCount == 0 && u.CandidatesTokenCount == 0) {
+		return Usage{}
+	}
+	return Usage{
+		Model:     v.ModelVersion,
+		In:        u.PromptTokenCount - u.CachedContentTokenCount,
+		Out:       u.CandidatesTokenCount + u.ThoughtsTokenCount,
+		CacheRead: u.CachedContentTokenCount,
+		Found:     true,
+	}
+}
+
 // Tracker consumes SSE lines from a streamed response and reports usage.
 type Tracker interface {
 	Feed(line []byte)
@@ -182,6 +219,34 @@ func (t *OpenAISSE) Usage() Usage {
 	}
 	return u
 }
+
+// GeminiSSE tracks streamGenerateContent?alt=sse: chunks carry cumulative
+// usageMetadata as the response grows, so the last complete one wins.
+type GeminiSSE struct {
+	u Usage
+}
+
+func (t *GeminiSSE) Feed(line []byte) {
+	data, ok := sseData(line)
+	if !ok {
+		return
+	}
+	var v geminiBody
+	if json.Unmarshal(data, &v) != nil {
+		return
+	}
+	if v.ModelVersion != "" {
+		t.u.Model = v.ModelVersion
+	}
+	if u := geminiToUsage(v); u.Found {
+		if u.Model == "" {
+			u.Model = t.u.Model
+		}
+		t.u = u
+	}
+}
+
+func (t *GeminiSSE) Usage() Usage { return t.u }
 
 func sseData(line []byte) ([]byte, bool) {
 	line = bytes.TrimSpace(line)

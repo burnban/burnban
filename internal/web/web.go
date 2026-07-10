@@ -129,13 +129,27 @@ func writeMetrics(w http.ResponseWriter, s *store.Store, now time.Time) error {
 		fmt.Fprintf(w, "burnban_agent_cost_usd_total{agent=%q} %g\n", a.Agent, a.Cost)
 	}
 	fmt.Fprintf(w, "# HELP burnban_spend_today_usd Spend since local midnight.\n# TYPE burnban_spend_today_usd gauge\nburnban_spend_today_usd %g\n", today)
-	capUSD := 0.0
-	if capStr, err := s.GetSetting(budget.KeyDailyCapUSD); err == nil && capStr != "" {
-		if v, perr := strconv.ParseFloat(capStr, 64); perr == nil {
-			capUSD = v
+	for _, win := range budget.Windows() {
+		if win.Name == "daily" {
+			continue // today's gauge above predates windows; keep its name stable
 		}
+		spent, err := s.SpentSince(win.Start(now))
+		if err != nil {
+			return err
+		}
+		fmt.Fprintf(w, "# HELP burnban_spend_%s_usd Spend since the %s window opened.\n# TYPE burnban_spend_%s_usd gauge\nburnban_spend_%s_usd %g\n",
+			win.Name, win.Name, win.Name, win.Name, spent)
 	}
-	fmt.Fprintf(w, "# HELP burnban_cap_daily_usd Configured daily cap (0 = none).\n# TYPE burnban_cap_daily_usd gauge\nburnban_cap_daily_usd %g\n", capUSD)
+	for _, win := range budget.Windows() {
+		capUSD := 0.0
+		if capStr, err := s.GetSetting(win.Key); err == nil && capStr != "" {
+			if v, perr := strconv.ParseFloat(capStr, 64); perr == nil {
+				capUSD = v
+			}
+		}
+		fmt.Fprintf(w, "# HELP burnban_cap_%s_usd Configured %s cap (0 = none).\n# TYPE burnban_cap_%s_usd gauge\nburnban_cap_%s_usd %g\n",
+			win.Name, win.Name, win.Name, win.Name, capUSD)
+	}
 	ban := 0
 	if b, err := s.GetSetting(budget.KeyBanActive); err == nil && b == "1" {
 		ban = 1
@@ -176,6 +190,10 @@ type summaryJSON struct {
 	Unpriced      int64       `json:"unpriced"`
 	CapDailyUSD   float64     `json:"cap_daily_usd"`
 	HasCap        bool        `json:"has_cap"`
+	CapWeeklyUSD  float64     `json:"cap_weekly_usd"`
+	WeekCost      float64     `json:"week_cost"`
+	CapMonthlyUSD float64     `json:"cap_monthly_usd"`
+	MonthCost     float64     `json:"month_cost"`
 	BanActive     bool        `json:"ban_active"`
 	OverrideToday bool        `json:"override_today"`
 	Models        []modelJSON `json:"models"`
@@ -232,6 +250,26 @@ func build(s *store.Store, version string, now time.Time) (*summaryJSON, error) 
 		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil {
 			resp.HasCap = true
 			resp.CapDailyUSD = capUSD
+		}
+	}
+	if capStr, err := s.GetSetting(budget.KeyWeeklyCapUSD); err != nil {
+		return nil, err
+	} else if capStr != "" {
+		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil && capUSD > 0 {
+			resp.CapWeeklyUSD = capUSD
+			if resp.WeekCost, err = s.SpentSince(budget.WeekStart(now)); err != nil {
+				return nil, err
+			}
+		}
+	}
+	if capStr, err := s.GetSetting(budget.KeyMonthlyCapUSD); err != nil {
+		return nil, err
+	} else if capStr != "" {
+		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil && capUSD > 0 {
+			resp.CapMonthlyUSD = capUSD
+			if resp.MonthCost, err = s.SpentSince(budget.MonthStart(now)); err != nil {
+				return nil, err
+			}
 		}
 	}
 	if ban, err := s.GetSetting(budget.KeyBanActive); err != nil {

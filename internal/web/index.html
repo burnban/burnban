@@ -189,6 +189,7 @@
   <section class="reveal d2">
     <div class="fuse-head"><span class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
     <div class="track"><div id="fill" class="fill ok"></div></div>
+    <div id="windows" class="label" style="margin-top:8px"></div>
   </section>
 
   <section class="panel chartp reveal d3">
@@ -308,6 +309,10 @@
         ftext.textContent = "no cap set — burnban cap --daily 10";
         big.classList.remove("hot");
       }
+      const wins = [];
+      if (d.cap_weekly_usd > 0) wins.push("week " + fmt$(d.week_cost) + " / " + fmt$(d.cap_weekly_usd));
+      if (d.cap_monthly_usd > 0) wins.push("month " + fmt$(d.month_cost) + " / " + fmt$(d.cap_monthly_usd));
+      $("windows").textContent = wins.join(" · ");
       renderModels(d.models);
       renderAgents(d.agents);
       renderReceipts(d);
