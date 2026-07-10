@@ -17,6 +17,8 @@ const (
 	KeyOverrideDay = "cap_override_day"
 	KeyWebhookURL  = "webhook_url"
 	KeyAlertedDay  = "alert_sent_day"
+	// KeyAgentCapPrefix + <agent name> holds that agent's own daily cap.
+	KeyAgentCapPrefix = "cap_agent_daily_usd:"
 )
 
 type Guard struct {
@@ -32,9 +34,10 @@ type Denial struct {
 
 func (d *Denial) Error() string { return d.Message }
 
-// Check returns a non-nil Denial when the burn ban is active or today's
-// spend has reached the daily cap. A nil, nil return means proceed.
-func (g *Guard) Check(now time.Time) (*Denial, error) {
+// Check returns a non-nil Denial when the burn ban is active, or when
+// today's spend has reached the global daily cap or the calling agent's
+// own cap. A nil, nil return means proceed.
+func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 	ban, err := g.S.GetSetting(KeyBanActive)
 	if err != nil {
 		return nil, err
@@ -46,18 +49,6 @@ func (g *Guard) Check(now time.Time) (*Denial, error) {
 		}, nil
 	}
 
-	capStr, err := g.S.GetSetting(KeyDailyCapUSD)
-	if err != nil {
-		return nil, err
-	}
-	if capStr == "" {
-		return nil, nil
-	}
-	capUSD, err := strconv.ParseFloat(capStr, 64)
-	if err != nil {
-		return nil, fmt.Errorf("invalid %s setting %q", KeyDailyCapUSD, capStr)
-	}
-
 	if ov, err := g.S.GetSetting(KeyOverrideDay); err != nil {
 		return nil, err
 	} else if ov == now.Format("2006-01-02") {
@@ -65,16 +56,52 @@ func (g *Guard) Check(now time.Time) (*Denial, error) {
 	}
 
 	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	spent, err := g.S.SpentSince(midnight)
+
+	if capStr, err := g.S.GetSetting(KeyDailyCapUSD); err != nil {
+		return nil, err
+	} else if capStr != "" {
+		capUSD, perr := strconv.ParseFloat(capStr, 64)
+		if perr != nil {
+			return nil, fmt.Errorf("invalid %s setting %q", KeyDailyCapUSD, capStr)
+		}
+		spent, err := g.S.SpentSince(midnight)
+		if err != nil {
+			return nil, err
+		}
+		if spent >= capUSD {
+			return &Denial{
+				Type: "burnban_cap_reached",
+				Message: fmt.Sprintf(
+					"daily burn cap reached: $%.2f spent of $%.2f. Raise it (`burnban cap --daily %.0f`) or override for today (`burnban lift --today`).",
+					spent, capUSD, capUSD*2),
+			}, nil
+		}
+	}
+
+	if agent == "" {
+		return nil, nil
+	}
+	capStr, err := g.S.GetSetting(KeyAgentCapPrefix + agent)
+	if err != nil {
+		return nil, err
+	}
+	if capStr == "" {
+		return nil, nil
+	}
+	capUSD, perr := strconv.ParseFloat(capStr, 64)
+	if perr != nil {
+		return nil, fmt.Errorf("invalid agent cap for %q: %q", agent, capStr)
+	}
+	spent, err := g.S.SpentSinceForAgent(midnight, agent)
 	if err != nil {
 		return nil, err
 	}
 	if spent >= capUSD {
 		return &Denial{
-			Type: "burnban_cap_reached",
+			Type: "burnban_agent_cap_reached",
 			Message: fmt.Sprintf(
-				"daily burn cap reached: $%.2f spent of $%.2f. Raise it (`burnban cap --daily %.0f`) or override for today (`burnban lift --today`).",
-				spent, capUSD, capUSD*2),
+				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent %s --daily %.0f`.",
+				agent, spent, capUSD, agent, capUSD*2),
 		}, nil
 	}
 	return nil, nil

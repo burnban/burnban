@@ -141,6 +141,45 @@ func TestDailyCapBlocks(t *testing.T) {
 	}
 }
 
+func TestAgentCapBlocksOnlyThatAgent(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.Insert(store.Request{Ts: time.Now(), Provider: "anthropic", Agent: "alpha", CostUSD: 0.02, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyAgentCapPrefix+"alpha", "0.01"); err != nil {
+		t.Fatal(err)
+	}
+
+	postAs := func(agent string) (*http.Response, string) {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages",
+			strings.NewReader(`{"model":"claude-opus-4-7","messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("x-burnban-agent", agent)
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(body)
+	}
+
+	resp, body := postAs("alpha")
+	if resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(body, "burnban_agent_cap_reached") {
+		t.Fatalf("alpha: status = %d, body = %s", resp.StatusCode, body)
+	}
+	resp, _ = postAs("beta")
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("beta should pass: status = %d", resp.StatusCode)
+	}
+}
+
 func TestBanBlocksAndLifts(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")

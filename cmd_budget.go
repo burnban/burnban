@@ -13,7 +13,8 @@ import (
 func cmdCap(args []string) error {
 	fs := flag.NewFlagSet("cap", flag.ExitOnError)
 	daily := fs.Float64("daily", 0, "daily cap in USD")
-	off := fs.Bool("off", false, "remove the daily cap")
+	agent := fs.String("agent", "", "apply the cap to a single agent (name as shown in reports)")
+	off := fs.Bool("off", false, "remove the cap")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
 
@@ -23,26 +24,40 @@ func cmdCap(args []string) error {
 	}
 	defer s.Close()
 
+	key := budget.KeyDailyCapUSD
+	scope := "daily cap"
+	if *agent != "" {
+		key = budget.KeyAgentCapPrefix + *agent
+		scope = fmt.Sprintf("daily cap for agent %q", *agent)
+	}
+
 	switch {
 	case *off:
-		if err := s.DeleteSetting(budget.KeyDailyCapUSD); err != nil {
+		if err := s.DeleteSetting(key); err != nil {
 			return err
 		}
-		fmt.Println("daily cap removed — spend is uncapped")
+		fmt.Printf("%s removed\n", scope)
 	case *daily > 0:
-		if err := s.SetSetting(budget.KeyDailyCapUSD, strconv.FormatFloat(*daily, 'f', 2, 64)); err != nil {
+		if err := s.SetSetting(key, strconv.FormatFloat(*daily, 'f', 2, 64)); err != nil {
 			return err
 		}
-		fmt.Printf("daily cap set: $%.2f — the proxy returns 402 once today's spend reaches it\n", *daily)
+		fmt.Printf("%s set: $%.2f — the proxy returns 402 once it is reached\n", scope, *daily)
 	default:
 		v, err := s.GetSetting(budget.KeyDailyCapUSD)
 		if err != nil {
 			return err
 		}
 		if v == "" {
-			fmt.Println("no daily cap set. Set one: burnban cap --daily 10")
+			fmt.Println("no global daily cap set. Set one: burnban cap --daily 10")
 		} else {
 			fmt.Printf("daily cap: $%s\n", v)
+		}
+		agents, err := s.SettingsWithPrefix(budget.KeyAgentCapPrefix)
+		if err != nil {
+			return err
+		}
+		for name, cap := range agents {
+			fmt.Printf("agent %-24s $%s/day\n", name, cap)
 		}
 	}
 	return nil

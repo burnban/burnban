@@ -89,9 +89,10 @@ func (p *Proxy) Handler() http.Handler {
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string) {
 	start := time.Now()
+	agent := agentFrom(r)
 
 	if r.Method == http.MethodPost {
-		denial, err := p.Guard.Check(time.Now())
+		denial, err := p.Guard.Check(time.Now(), agent)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -135,7 +136,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	rec := store.Request{
 		Ts:       start,
 		Provider: provider,
-		Agent:    agentFrom(r),
+		Agent:    agent,
 		Session:  r.Header.Get("x-burnban-session"),
 		Status:   resp.StatusCode,
 	}

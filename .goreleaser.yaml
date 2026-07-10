@@ -1,0 +1,28 @@
+version: 2
+project_name: burnban
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+    # Versionless names so install.sh can always fetch .../latest/download/
+    name_template: "burnban_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+
+checksum:
+  name_template: checksums.txt
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - "^docs"
+      - "^chore"

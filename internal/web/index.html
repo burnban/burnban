@@ -115,7 +115,9 @@
   @keyframes heat { 50% { filter: brightness(1.25); } }
 
   /* ── panels ──────────────────────────────────────────────── */
-  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 26px; }
+  .chartp { margin-top: 26px; }
+  .chartp svg { width: 100%; height: 120px; display: block; margin-top: 10px; }
+  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 14px; }
   @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } .hero { align-items: flex-start; flex-direction: column; } }
   .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 10px; }
   .panel h2 {
@@ -187,6 +189,11 @@
   <section class="reveal d2">
     <div class="fuse-head"><span class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
     <div class="track"><div id="fill" class="fill ok"></div></div>
+  </section>
+
+  <section class="panel chartp reveal d3">
+    <h2>Burn — last 24h <span id="chartMax" style="float:right;color:var(--faint);letter-spacing:.08em"></span></h2>
+    <svg id="chart" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="hourly spend chart"></svg>
   </section>
 
   <section class="grid reveal d3">
@@ -309,8 +316,37 @@
     }
   }
 
+  function drawChart(pts) {
+    if (!pts.length) return;
+    const svg = $("chart");
+    const W = 600, H = 120, P = 6;
+    const max = Math.max(...pts.map(p => p.cost), 0.0001);
+    const x = i => P + i * (W - 2 * P) / Math.max(pts.length - 1, 1);
+    const y = c => H - P - (c / max) * (H - 2 * P);
+    let d = "";
+    pts.forEach((p, i) => { d += (i ? "L" : "M") + x(i).toFixed(1) + "," + y(p.cost).toFixed(1); });
+    const area = d + `L${x(pts.length - 1).toFixed(1)},${H - P}L${x(0).toFixed(1)},${H - P}Z`;
+    svg.innerHTML =
+      '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">' +
+      '<stop offset="0" stop-color="#ff7a2f" stop-opacity=".4"/>' +
+      '<stop offset="1" stop-color="#ff7a2f" stop-opacity="0"/>' +
+      "</linearGradient></defs>" +
+      `<path d="${area}" fill="url(#g)"/>` +
+      `<path d="${d}" fill="none" stroke="#ff7a2f" stroke-width="2" stroke-linejoin="round"/>`;
+    $("chartMax").textContent = "peak " + fmt$(max) + "/hr";
+  }
+
+  async function series() {
+    try {
+      const r = await fetch("/api/series", TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined);
+      if (r.ok) drawChart(await r.json());
+    } catch (e) { /* chart is decorative; the tick loop owns the offline state */ }
+  }
+
   tick();
+  series();
   setInterval(tick, 2000);
+  setInterval(series, 15000);
 </script>
 </body>
 </html>

@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-const version = "0.2.0-dev"
+const version = "0.3.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -35,6 +35,8 @@ func main() {
 		err = cmdExport(os.Args[2:])
 	case "alert":
 		err = cmdAlert(os.Args[2:])
+	case "demo":
+		err = cmdDemo(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnban", version)
 	case "help", "--help", "-h":
@@ -56,9 +58,10 @@ func usage() {
 usage: burnban <command> [flags]
 
   serve    run the metering proxy (point your agents at it)
+  demo     seed fake traffic and serve the dashboard — see it alive in 5s
   top      live spend view, refreshed in place
   report   spend + waste receipts for a window (--since today|24h|7d)
-  cap      set a daily budget (--daily 10 | --off)
+  cap      set a daily budget (--daily 10 [--agent NAME] | --off)
   ban      pause ALL agent spend immediately
   lift     lift the ban (--today also overrides today's cap)
   mcp      MCP server over stdio — plug burnban into Claude Code, Cursor, etc.

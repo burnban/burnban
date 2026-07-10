@@ -41,6 +41,36 @@ func Register(mux *http.ServeMux, s *store.Store, version string) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 		}
 	})
+	mux.HandleFunc("GET /api/series", func(w http.ResponseWriter, r *http.Request) {
+		hours := 24
+		if v := r.URL.Query().Get("hours"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 24*14 {
+				hours = n
+			}
+		}
+		now := time.Now().UTC()
+		since := now.Add(-time.Duration(hours-1) * time.Hour).Truncate(time.Hour)
+		pts, err := s.HourlySeries(since)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		byHour := make(map[string]float64, len(pts))
+		for _, p := range pts {
+			byHour[p.Hour] = p.Cost
+		}
+		type pt struct {
+			T    string  `json:"t"`
+			Cost float64 `json:"cost"`
+		}
+		out := make([]pt, 0, hours)
+		for i := 0; i < hours; i++ {
+			h := since.Add(time.Duration(i) * time.Hour)
+			out = append(out, pt{T: h.Format(time.RFC3339), Cost: byHour[h.Format("2006-01-02T15")]})
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(out)
+	})
 }
 
 // WithAuth guards every route with a shared token when one is configured.

@@ -4,9 +4,19 @@
 
 Your agents run all day on your API keys. Burnban is a single-binary local proxy that sits between them and every provider, shows you the burn in real time, itemizes the waste with dollar amounts attached, and cuts spend off when you say so. No signup, no cloud, no telemetry — your traffic never leaves your machine.
 
+![burnban dashboard](docs/dashboard.png)
+
 > Two frontier models launched on the same day this week, four-x apart on price. You can't manage what you don't meter.
 
 ## Quickstart
+
+No traffic yet? See it alive first — fake data, fresh every run:
+
+```sh
+burnban demo    # dashboard on http://localhost:4242
+```
+
+Then the real thing:
 
 ```sh
 # 1. run the meter
@@ -24,9 +34,10 @@ open http://localhost:4141       # the live dashboard
 Set a budget and forget about surprise bills:
 
 ```sh
-burnban cap --daily 10     # proxy returns 402 once today's spend hits $10
-burnban ban                # emergency stop: pause ALL agent spend now
-burnban lift --today       # resume, overriding today's cap
+burnban cap --daily 10                    # global: 402 once today hits $10
+burnban cap --agent openclaw --daily 3    # that one hungry agent gets $3
+burnban ban                               # emergency stop: pause ALL spend now
+burnban lift --today                      # resume, overriding today's cap
 ```
 
 ## What you get

@@ -132,9 +132,10 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "set_daily_cap",
-			"description": "Set the daily USD spend cap enforced by the proxy (requests past it get a 402). Pass 0 to remove the cap.",
+			"description": "Set the daily USD spend cap enforced by the proxy (requests past it get a 402). Pass 0 to remove the cap. With agent set, caps only that agent.",
 			"inputSchema": obj(map[string]any{
-				"usd": map[string]any{"type": "number", "description": "daily cap in USD; 0 removes it"},
+				"usd":   map[string]any{"type": "number", "description": "daily cap in USD; 0 removes it"},
+				"agent": map[string]any{"type": "string", "description": "optional: cap a single agent by its reported name (e.g. claude-cli)"},
 			}, "usd"),
 		},
 		{
@@ -168,7 +169,8 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		return s.burnStatus()
 	case "set_daily_cap":
 		var a struct {
-			USD float64 `json:"usd"`
+			USD   float64 `json:"usd"`
+			Agent string  `json:"agent"`
 		}
 		if err := json.Unmarshal(args, &a); err != nil {
 			return "", fmt.Errorf("bad arguments: %w", err)
@@ -176,16 +178,20 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if a.USD < 0 {
 			return "", fmt.Errorf("cap must be >= 0")
 		}
+		key, scope := budget.KeyDailyCapUSD, "daily cap"
+		if a.Agent != "" {
+			key, scope = budget.KeyAgentCapPrefix+a.Agent, fmt.Sprintf("daily cap for agent %q", a.Agent)
+		}
 		if a.USD == 0 {
-			if err := s.S.DeleteSetting(budget.KeyDailyCapUSD); err != nil {
+			if err := s.S.DeleteSetting(key); err != nil {
 				return "", err
 			}
-			return "daily cap removed — spend is uncapped", nil
+			return scope + " removed", nil
 		}
-		if err := s.S.SetSetting(budget.KeyDailyCapUSD, strconv.FormatFloat(a.USD, 'f', 2, 64)); err != nil {
+		if err := s.S.SetSetting(key, strconv.FormatFloat(a.USD, 'f', 2, 64)); err != nil {
 			return "", err
 		}
-		return fmt.Sprintf("daily cap set to $%.2f — the proxy refuses spend past it with a 402", a.USD), nil
+		return fmt.Sprintf("%s set to $%.2f — the proxy refuses spend past it with a 402", scope, a.USD), nil
 	case "burn_ban":
 		if err := s.S.SetSetting(budget.KeyBanActive, "1"); err != nil {
 			return "", err

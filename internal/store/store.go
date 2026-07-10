@@ -103,6 +103,59 @@ func (s *Store) SpentSince(t time.Time) (float64, error) {
 	return v, err
 }
 
+func (s *Store) SpentSinceForAgent(t time.Time, agent string) (float64, error) {
+	var v float64
+	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE ts >= ? AND agent = ?`,
+		t.UTC().Format(time.RFC3339), agent).Scan(&v)
+	return v, err
+}
+
+// SeriesPoint is one hour's spend; Hour is the UTC bucket "2006-01-02T15".
+type SeriesPoint struct {
+	Hour string
+	Cost float64
+}
+
+// HourlySeries groups spend by hour. Timestamps are stored as UTC RFC3339,
+// so the first 13 characters are exactly the hour bucket.
+func (s *Store) HourlySeries(since time.Time) ([]SeriesPoint, error) {
+	rows, err := s.db.Query(`SELECT substr(ts,1,13) h, COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? GROUP BY h ORDER BY h`,
+		since.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []SeriesPoint
+	for rows.Next() {
+		var p SeriesPoint
+		if err := rows.Scan(&p.Hour, &p.Cost); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+// SettingsWithPrefix returns all settings whose key starts with prefix,
+// keyed by the remainder after the prefix.
+func (s *Store) SettingsWithPrefix(prefix string) (map[string]string, error) {
+	rows, err := s.db.Query(`SELECT key, value FROM settings WHERE key LIKE ? || '%'`, prefix)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[string]string{}
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k[len(prefix):]] = v
+	}
+	return out, rows.Err()
+}
+
 type ModelRow struct {
 	Model      string
 	Requests   int64
