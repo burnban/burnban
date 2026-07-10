@@ -97,6 +97,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 			return
 		}
 		if denial != nil {
+			p.alertCapReached(denial)
 			writeDenial(w, denial)
 			return
 		}
@@ -264,6 +265,36 @@ func agentFrom(r *http.Request) string {
 		ua = ua[:i]
 	}
 	return ua
+}
+
+// alertCapReached fires the configured webhook (Slack-compatible JSON)
+// the first time the daily cap trips each day. Fire-and-forget: a slow or
+// dead webhook must never sit in the request path.
+func (p *Proxy) alertCapReached(d *budget.Denial) {
+	if d.Type != "burnban_cap_reached" {
+		return
+	}
+	urlStr, err := p.Store.GetSetting(budget.KeyWebhookURL)
+	if err != nil || urlStr == "" {
+		return
+	}
+	today := time.Now().Format("2006-01-02")
+	if day, _ := p.Store.GetSetting(budget.KeyAlertedDay); day == today {
+		return
+	}
+	if err := p.Store.SetSetting(budget.KeyAlertedDay, today); err != nil {
+		return
+	}
+	body, _ := json.Marshal(map[string]string{"text": "🔥🚫 burnban: " + d.Message})
+	go func() {
+		c := &http.Client{Timeout: 5 * time.Second}
+		resp, err := c.Post(urlStr, "application/json", bytes.NewReader(body))
+		if err != nil {
+			p.Logf("burnban: webhook: %v", err)
+			return
+		}
+		resp.Body.Close()
+	}()
 }
 
 func writeDenial(w http.ResponseWriter, d *budget.Denial) {

@@ -216,6 +216,11 @@
 
 <script>
   const $ = id => document.getElementById(id);
+  const TOKEN = (() => {
+    const q = new URLSearchParams(location.search).get("token");
+    if (q) sessionStorage.setItem("bb_token", q);
+    return q || sessionStorage.getItem("bb_token") || "";
+  })();
   const fmt$ = v => "$" + (v >= 10 ? v.toFixed(2) : v.toFixed(4));
   const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
   const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
@@ -272,7 +277,7 @@
 
   async function tick() {
     try {
-      const r = await fetch("/api/summary");
+      const r = await fetch("/api/summary", TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined);
       if (!r.ok) throw new Error(r.status);
       const d = await r.json();
       online(true);

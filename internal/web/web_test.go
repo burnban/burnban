@@ -44,6 +44,54 @@ func TestDashboardServes(t *testing.T) {
 	}
 }
 
+func TestMetrics(t *testing.T) {
+	srv, _ := newServer(t)
+	resp, err := http.Get(srv.URL + "/metrics")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "burnban_requests_total") {
+		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+}
+
+func TestWithAuth(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+	srv := httptest.NewServer(web.WithAuth("sekret", inner))
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/x")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("no token: status = %d, want 401", resp.StatusCode)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/x", nil)
+	req.Header.Set("x-burnban-token", "sekret")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("with token: status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/x?token=sekret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("query token: status = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestSummaryAPI(t *testing.T) {
 	srv, s := newServer(t)
 	if err := s.SetSetting(budget.KeyBanActive, "1"); err != nil {

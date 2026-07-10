@@ -8,7 +8,7 @@ import (
 	"path/filepath"
 )
 
-const version = "0.1.0-dev"
+const version = "0.2.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
@@ -29,6 +29,12 @@ func main() {
 		err = cmdBan(os.Args[2:])
 	case "lift":
 		err = cmdLift(os.Args[2:])
+	case "mcp":
+		err = cmdMCP(os.Args[2:])
+	case "export":
+		err = cmdExport(os.Args[2:])
+	case "alert":
+		err = cmdAlert(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnban", version)
 	case "help", "--help", "-h":
@@ -55,6 +61,9 @@ usage: burnban <command> [flags]
   cap      set a daily budget (--daily 10 | --off)
   ban      pause ALL agent spend immediately
   lift     lift the ban (--today also overrides today's cap)
+  mcp      MCP server over stdio — plug burnban into Claude Code, Cursor, etc.
+  export   dump raw request rows for finance (--since 7d --format csv|json)
+  alert    webhook for cap alerts (--webhook URL | --off)
   version  print version
 
 Every command accepts --db (default ~/.burnban/burnban.db, or $BURNBAN_DB).

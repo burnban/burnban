@@ -65,6 +65,37 @@ Attribution: burnban groups spend by the client's `User-Agent`. For finer tracki
 
 OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact counts; without it burnban estimates output tokens and flags them as estimates in reports.
 
+## Plug it into your tools (MCP)
+
+Burnban ships an MCP server, so any MCP client — Claude Code, Claude Desktop, Cursor — can query spend and control budgets in natural language:
+
+```sh
+claude mcp add burnban -- burnban mcp
+```
+
+Then just ask: *"what have my agents burned today?"*, *"set a $20 daily cap"*, *"burn ban, now"*. Tools exposed: `spend_summary`, `burn_status`, `set_daily_cap`, `burn_ban`, `lift_burn_ban`. Everything runs over stdio against the local database — no network, no keys.
+
+## For IT managers
+
+One binary, one SQLite file, nothing leaves your network. Three deployment shapes:
+
+1. **Per developer** (default) — localhost-only, zero config, each dev owns their meter.
+2. **Team gateway** — one instance the whole team points at:
+
+   ```sh
+   BURNBAN_TOKEN=$(openssl rand -hex 16) burnban serve --host 0.0.0.0
+   ```
+
+   Non-loopback binds **fail closed** without a token. Clients authenticate with the `x-burnban-token` header or `Bearer` auth (Claude Code: `ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ..."`); the dashboard accepts `?token=`. Spend is attributed per agent and per `x-burnban-session`.
+3. **Docker** — `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 4141:4141 -v burnban-data:/data burnban`
+
+And the plumbing your existing stack expects:
+
+- **Prometheus** — scrape `/metrics`: total/per-model/per-agent spend counters, today's spend, cap, and ban-state gauges. Grafana dashboard in two minutes, no exporter.
+- **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) the first time the daily cap trips each day.
+- **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines.
+- **Audit trail** — every request row (timestamp, model, agent, session, tokens, cost, status) lives in plain SQLite you can query directly.
+
 ## Pricing table
 
 Current prices for the July 2026 lineup (GPT-5.6 Sol/Terra/Luna, Grok 4.5, Claude Opus 4.7/Sonnet 4.6/Haiku 4.5) ship embedded. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:

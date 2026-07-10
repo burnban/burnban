@@ -15,6 +15,8 @@ const (
 	KeyDailyCapUSD = "cap_daily_usd"
 	KeyBanActive   = "ban_active"
 	KeyOverrideDay = "cap_override_day"
+	KeyWebhookURL  = "webhook_url"
+	KeyAlertedDay  = "alert_sent_day"
 )
 
 type Guard struct {

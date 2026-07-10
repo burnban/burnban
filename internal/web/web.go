@@ -4,10 +4,13 @@
 package web
 
 import (
+	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/syft8/burnban/internal/budget"
@@ -33,6 +36,82 @@ func Register(mux *http.ServeMux, s *store.Store, version string) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(resp)
 	})
+	mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, r *http.Request) {
+		if err := writeMetrics(w, s, time.Now()); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+	})
+}
+
+// WithAuth guards every route with a shared token when one is configured.
+// The token may arrive as Bearer auth, an x-burnban-token header, or a
+// ?token= query param (so the dashboard can be opened in a browser). An
+// empty token disables the check — that is the localhost-only default.
+func WithAuth(token string, next http.Handler) http.Handler {
+	if token == "" {
+		return next
+	}
+	want := []byte(token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got := r.Header.Get("x-burnban-token")
+		if got == "" {
+			if h := r.Header.Get("Authorization"); strings.HasPrefix(h, "Bearer ") {
+				got = strings.TrimPrefix(h, "Bearer ")
+			}
+		}
+		if got == "" {
+			got = r.URL.Query().Get("token")
+		}
+		if subtle.ConstantTimeCompare([]byte(got), want) == 1 {
+			next.ServeHTTP(w, r)
+			return
+		}
+		http.Error(w, "burnban: missing or invalid token", http.StatusUnauthorized)
+	})
+}
+
+// writeMetrics emits Prometheus text exposition so platform teams can
+// scrape burnban into Grafana without any exporter in between. Per-model
+// and per-agent series follow the store's top-20 cut to bound cardinality.
+func writeMetrics(w http.ResponseWriter, s *store.Store, now time.Time) error {
+	all, err := s.Summarize(time.Unix(0, 0))
+	if err != nil {
+		return err
+	}
+	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	today, err := s.SpentSince(midnight)
+	if err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	fmt.Fprintf(w, "# HELP burnban_requests_total Proxied inference requests since first run.\n# TYPE burnban_requests_total counter\nburnban_requests_total %d\n", all.Requests)
+	fmt.Fprintf(w, "# HELP burnban_cost_usd_total Metered spend in USD since first run.\n# TYPE burnban_cost_usd_total counter\nburnban_cost_usd_total %g\n", all.Cost)
+	fmt.Fprintf(w, "# TYPE burnban_model_cost_usd_total counter\n")
+	for _, m := range all.Models {
+		fmt.Fprintf(w, "burnban_model_cost_usd_total{model=%q} %g\n", m.Model, m.Cost)
+	}
+	fmt.Fprintf(w, "# TYPE burnban_model_requests_total counter\n")
+	for _, m := range all.Models {
+		fmt.Fprintf(w, "burnban_model_requests_total{model=%q} %d\n", m.Model, m.Requests)
+	}
+	fmt.Fprintf(w, "# TYPE burnban_agent_cost_usd_total counter\n")
+	for _, a := range all.Agents {
+		fmt.Fprintf(w, "burnban_agent_cost_usd_total{agent=%q} %g\n", a.Agent, a.Cost)
+	}
+	fmt.Fprintf(w, "# HELP burnban_spend_today_usd Spend since local midnight.\n# TYPE burnban_spend_today_usd gauge\nburnban_spend_today_usd %g\n", today)
+	capUSD := 0.0
+	if capStr, err := s.GetSetting(budget.KeyDailyCapUSD); err == nil && capStr != "" {
+		if v, perr := strconv.ParseFloat(capStr, 64); perr == nil {
+			capUSD = v
+		}
+	}
+	fmt.Fprintf(w, "# HELP burnban_cap_daily_usd Configured daily cap (0 = none).\n# TYPE burnban_cap_daily_usd gauge\nburnban_cap_daily_usd %g\n", capUSD)
+	ban := 0
+	if b, err := s.GetSetting(budget.KeyBanActive); err == nil && b == "1" {
+		ban = 1
+	}
+	fmt.Fprintf(w, "# HELP burnban_ban_active Whether the burn ban is engaged.\n# TYPE burnban_ban_active gauge\nburnban_ban_active %d\n", ban)
+	return nil
 }
 
 type modelJSON struct {

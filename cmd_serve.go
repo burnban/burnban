@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"net/http"
+	"os"
 
 	"github.com/syft8/burnban/internal/budget"
 	"github.com/syft8/burnban/internal/pricing"
@@ -14,9 +15,15 @@ import (
 
 func cmdServe(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
-	port := fs.Int("port", 4141, "listen port (binds to localhost only)")
+	port := fs.Int("port", 4141, "listen port")
+	host := fs.String("host", "127.0.0.1", "bind address; anything non-loopback requires BURNBAN_TOKEN (team mode)")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+
+	token := os.Getenv("BURNBAN_TOKEN")
+	if *host != "127.0.0.1" && *host != "localhost" && *host != "::1" && token == "" {
+		return fmt.Errorf("refusing to bind %s without BURNBAN_TOKEN set — team mode fails closed", *host)
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -33,8 +40,12 @@ func cmdServe(args []string) error {
 		return err
 	}
 
-	addr := fmt.Sprintf("127.0.0.1:%d", *port)
+	addr := fmt.Sprintf("%s:%d", *host, *port)
 	base := "http://" + addr
+	authState := "open (localhost only)"
+	if token != "" {
+		authState = "token required (BURNBAN_TOKEN)"
+	}
 
 	capState, _ := s.GetSetting(budget.KeyDailyCapUSD)
 	if capState == "" {
@@ -58,14 +69,15 @@ func cmdServe(args []string) error {
 
    db    %s
    cap   %s
+   auth  %s
 %s
    watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, base, *dbPath, capState, banState)
+`, version, base, base, base, base, *dbPath, capState, authState, banState)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())
 	web.Register(mux, s, version)
-	srv := &http.Server{Addr: addr, Handler: mux}
+	srv := &http.Server{Addr: addr, Handler: web.WithAuth(token, mux)}
 	return srv.ListenAndServe()
 }

@@ -201,6 +201,34 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	return sum, nil
 }
 
+// Export returns raw request rows for finance/audit tooling, oldest first.
+func (s *Store) Export(since time.Time) ([]Request, error) {
+	rows, err := s.db.Query(`SELECT ts, provider, model, agent, session,
+		in_tokens, out_tokens, cache_read_tokens, cache_write_tokens,
+		cost_usd, latency_ms, status, streamed, estimated, priced
+		FROM requests WHERE ts >= ? ORDER BY ts`,
+		since.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []Request
+	for rows.Next() {
+		var r Request
+		var ts string
+		var streamed, estimated, priced int
+		if err := rows.Scan(&ts, &r.Provider, &r.Model, &r.Agent, &r.Session,
+			&r.InTokens, &r.OutTokens, &r.CacheReadTokens, &r.CacheWriteTokens,
+			&r.CostUSD, &r.LatencyMs, &r.Status, &streamed, &estimated, &priced); err != nil {
+			return nil, err
+		}
+		r.Ts, _ = time.Parse(time.RFC3339, ts)
+		r.Streamed, r.Estimated, r.Priced = streamed == 1, estimated == 1, priced == 1
+		out = append(out, r)
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) SetSetting(key, value string) error {
 	_, err := s.db.Exec(`INSERT INTO settings (key, value) VALUES (?, ?)
 		ON CONFLICT(key) DO UPDATE SET value = excluded.value`, key, value)
