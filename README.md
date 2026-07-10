@@ -2,7 +2,7 @@
 
 **Meter, itemize, and cap what your AI agents spend. Meters watch. Burnban acts.**
 
-Your agents run all day on your API keys. Burnban is a single-binary local proxy that sits between them and every provider, shows you the burn in real time, itemizes the waste with dollar amounts attached, and cuts spend off when you say so. No signup, no cloud, no telemetry — your traffic never leaves your machine.
+Your agents run all day on your API keys. Burnban is a single-binary local proxy that sits between them and every provider, shows you the burn in real time, itemizes the waste with dollar amounts attached, and cuts spend off when you say so. No signup, no cloud, no telemetry — your traffic never leaves your machine. On a flat-rate plan instead of keys? [`burnban subsidy`](#on-a-flat-rate-plan-price-your-subsidy) prices those sessions too — no proxy needed.
 
 ![burnban dashboard](docs/dashboard.png)
 
@@ -47,12 +47,44 @@ And when the bill makes you wonder:
 burnban whatif --since 7d       # your exact week repriced on every model
 ```
 
+## On a flat-rate plan? Price your subsidy
+
+Claude Code on Pro/Max and Codex on ChatGPT plans never produce a per-token bill, so there's nothing to meter — but there is something to price. Both tools keep session logs with real token counts, and burnban reads them where they sit:
+
+```sh
+burnban subsidy                 # last 30 days; --since 7d, --daily, --json
+```
+
+```
+BURNBAN SUBSIDY — last 30 days of subscription traffic at API prices
+
+CLAUDE CODE  ~/.claude/projects · 2015 sessions
+  model                      calls  in      out     cache-r   cache-w  API price
+  claude-opus-4-8            15747  7.5M    21.5M   2643.4M   120.6M   $2949.73
+  claude-fable-5             3207   919.1K  3.5M    668.9M    13.6M    $1098.57
+  claude-sonnet-4-6          2306   90.6K   446.8K  144.6M    5.1M     $70.02
+  claude-haiku-4-5-20251001  3373   50.4K   2.8M    130.0M    16.6M    $55.18
+  subtotal                                                             $4173.49
+
+TOTAL  $4173.49 at API prices
+
+  claude-code pace ≈ $4173.49/mo vs  Claude Pro $20 → 208.7x  ·  Claude Max 20x $200 → 20.9x
+```
+
+That's a real machine's last 30 days: a $200/mo plan doing **$4,173** of API-priced work — a 20.9× subsidy. Same cache-aware table the proxy prices with, plus one thing the API bill never shows: the logs split 5-minute and 1-hour cache writes, so the 1h tier is billed at its real 2× rate. Deduped by message ID (a multi-block reply logs its usage more than once — counting that twice is how you get inflated numbers).
+
+Which door is yours?
+
+- **Per-token keys** — agent fleets, CI, production apps, Codex on an API key → `burnban serve` meters and **caps** the spend live.
+- **Flat-rate plan** — Claude Pro/Max, ChatGPT Plus/Team/Pro → `burnban subsidy` shows what the plan is worth. The day your fleet outgrows it and moves to keys, the meter is already installed.
+
 ## What you get
 
 - **Live dashboard** at `http://localhost:4141` — the burn total glowing ember, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
 - **`burnban report`** — spend for any window, plus **waste receipts**: duplicate requests that burned money twice, and cache hit rates that mean you're paying full price for context the provider would re-serve at a 90% discount.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
+- **`burnban subsidy`** — no proxy needed: read the session logs Claude Code and Codex already keep and price your flat-rate usage at API rates. "Your $200 Max plan did $4,173 of API work this month."
 - **Budget enforcement** — daily, weekly, and monthly dollar caps enforced in the request path with a clear 402 your agent surfaces verbatim, per-agent daily caps, a webhook warning at 80% (yours to tune) *before* the hard stop, and a manual **burn ban** kill switch.
 - **Honest numbers** — usage comes from provider usage frames, priced per model including cache read/write economics. Unknown models are recorded as unpriced, never guessed. Estimated counts are flagged as estimates.
 
@@ -163,7 +195,7 @@ And the plumbing your existing stack expects:
 
 ## Pricing table
 
-Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3 Pro/Flash and 2.5, Grok 4.5) ship embedded. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
+Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3 Pro/Flash and 2.5, Grok 4.5) ship embedded, plus the GPT-5/5.1 and Claude Opus 4.5–4.7 generations so `subsidy` can price older session logs. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
 
 ```json
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}

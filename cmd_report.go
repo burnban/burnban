@@ -4,6 +4,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -84,18 +86,19 @@ func cmdReport(args []string) error {
 
 func parseSince(s string) (time.Time, string, error) {
 	now := time.Now()
-	switch s {
-	case "today":
+	if s == "today" {
 		midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 		return midnight, "today (" + now.Format("2006-01-02") + ")", nil
-	case "24h":
-		return now.Add(-24 * time.Hour), "last 24h", nil
-	case "7d":
-		return now.Add(-7 * 24 * time.Hour), "last 7 days", nil
+	}
+	if n, err := strconv.Atoi(strings.TrimSuffix(s, "d")); err == nil && strings.HasSuffix(s, "d") && n > 0 {
+		if n == 1 {
+			return now.Add(-24 * time.Hour), "last 1 day", nil
+		}
+		return now.Add(-time.Duration(n) * 24 * time.Hour), fmt.Sprintf("last %d days", n), nil
 	}
 	d, err := time.ParseDuration(s)
 	if err != nil {
-		return time.Time{}, "", fmt.Errorf("bad --since %q: use today, 24h, 7d, or a duration like 90m", s)
+		return time.Time{}, "", fmt.Errorf("bad --since %q: use today, 24h, 7d, 30d, or a duration like 90m", s)
 	}
 	return now.Add(-d), "last " + s, nil
 }

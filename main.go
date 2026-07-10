@@ -39,6 +39,8 @@ func main() {
 		err = cmdDemo(os.Args[2:])
 	case "whatif":
 		err = cmdWhatif(os.Args[2:])
+	case "subsidy":
+		err = cmdSubsidy(os.Args[2:])
 	case "bench":
 		err = cmdBench(os.Args[2:])
 	case "version", "--version", "-v":
@@ -66,6 +68,7 @@ usage: burnban <command> [flags]
   top      live spend view, refreshed in place
   report   spend + waste receipts for a window (--since today|24h|7d)
   whatif   reprice a window's traffic onto other models ("what would 7d cost on haiku?")
+  subsidy  price your Claude Code / Codex subscription logs at API rates — no proxy needed
   cap      set budgets (--daily 10 --weekly 40 --monthly 120 [--agent NAME] [--warn 80] | --off)
   ban      pause ALL agent spend immediately
   lift     lift the ban (--today also overrides today's caps)
