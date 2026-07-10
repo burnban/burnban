@@ -12,10 +12,10 @@ import (
 
 func cmdCap(args []string) error {
 	fs := flag.NewFlagSet("cap", flag.ExitOnError)
-	daily := fs.Float64("daily", 0, "daily cap in USD")
+	daily := fs.Float64("daily", 0, "daily cap in USD (min 0.01)")
 	weekly := fs.Float64("weekly", 0, "weekly cap in USD (resets Monday)")
 	monthly := fs.Float64("monthly", 0, "monthly cap in USD (resets on the 1st)")
-	warn := fs.Float64("warn", -1, "webhook warning threshold as % of any cap (default 80; 0 disables)")
+	warn := fs.Float64("warn", -1, "webhook warning threshold as % of any cap, 1-100 (default 80; 0 disables)")
 	agent := fs.String("agent", "", "apply the cap to a single agent (name as shown in reports)")
 	off := fs.Bool("off", false, "remove the cap(s)")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
@@ -27,27 +27,16 @@ func cmdCap(args []string) error {
 	}
 	defer s.Close()
 
+	// Sub-cent caps would round to $0.00 in display and read as
+	// "cap everything"; refuse them instead of storing a footgun.
+	for _, usd := range []float64{*daily, *weekly, *monthly} {
+		if usd != 0 && usd < 0.01 {
+			return fmt.Errorf("caps below $0.01 are not enforceable — use `burnban ban` to stop all spend")
+		}
+	}
+
 	if *agent != "" {
-		if *weekly > 0 || *monthly > 0 {
-			return fmt.Errorf("per-agent caps are daily-only for now — drop --weekly/--monthly or the --agent")
-		}
-		key := budget.KeyAgentCapPrefix + *agent
-		scope := fmt.Sprintf("daily cap for agent %q", *agent)
-		switch {
-		case *off:
-			if err := s.DeleteSetting(key); err != nil {
-				return err
-			}
-			fmt.Printf("%s removed\n", scope)
-		case *daily > 0:
-			if err := s.SetSetting(key, strconv.FormatFloat(*daily, 'f', 2, 64)); err != nil {
-				return err
-			}
-			fmt.Printf("%s set: $%.2f — the proxy returns 402 once it is reached\n", scope, *daily)
-		default:
-			return fmt.Errorf("nothing to do: give --daily, or --off to remove")
-		}
-		return nil
+		return capAgent(s, *agent, *daily, *weekly, *monthly, *warn, *off)
 	}
 
 	if *off {
@@ -55,69 +44,119 @@ func cmdCap(args []string) error {
 			if err := s.DeleteSetting(w.Key); err != nil {
 				return err
 			}
+			if err := budget.ClearMarks(s, w.Name); err != nil {
+				return err
+			}
 		}
-		if err := s.DeleteSetting(budget.KeyWarnPct); err != nil {
-			return err
-		}
-		fmt.Println("all global caps removed (per-agent caps kept — clear with --agent NAME --off)")
+		fmt.Println("all global caps removed (per-agent caps and the --warn threshold kept)")
 		return nil
 	}
 
+	// An explicitly passed `--daily 0` removes just that window's cap;
+	// an omitted flag (also 0) is simply not mentioned.
+	passed := map[string]bool{}
+	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
+
+	byName := map[string]float64{"daily": *daily, "weekly": *weekly, "monthly": *monthly}
 	set := false
-	for _, w := range []struct {
-		name string
-		key  string
-		usd  float64
-	}{
-		{"daily", budget.KeyDailyCapUSD, *daily},
-		{"weekly", budget.KeyWeeklyCapUSD, *weekly},
-		{"monthly", budget.KeyMonthlyCapUSD, *monthly},
-	} {
-		if w.usd <= 0 {
+	for _, w := range budget.Windows() {
+		usd := byName[w.Name]
+		if usd <= 0 {
+			if usd == 0 && passed[w.Name] {
+				if err := s.DeleteSetting(w.Key); err != nil {
+					return err
+				}
+				if err := budget.ClearMarks(s, w.Name); err != nil {
+					return err
+				}
+				fmt.Printf("%s cap removed\n", w.Name)
+				set = true
+			}
 			continue
 		}
-		if err := s.SetSetting(w.key, strconv.FormatFloat(w.usd, 'f', 2, 64)); err != nil {
+		if err := s.SetSetting(w.Key, strconv.FormatFloat(usd, 'f', -1, 64)); err != nil {
 			return err
 		}
-		fmt.Printf("%s cap set: $%.2f — the proxy returns 402 once it is reached\n", w.name, w.usd)
+		// A new threshold means the old "already warned/alerted" marks no
+		// longer describe anything — re-arm both for this window.
+		if err := budget.ClearMarks(s, w.Name); err != nil {
+			return err
+		}
+		fmt.Printf("%s cap set: $%.2f — the proxy returns 402 once it is reached\n", w.Name, usd)
 		set = true
 	}
 	if *warn >= 0 {
-		if err := s.SetSetting(budget.KeyWarnPct, strconv.FormatFloat(*warn, 'f', 0, 64)); err != nil {
+		if *warn > 100 {
+			return fmt.Errorf("--warn is a percentage of the cap: use 1-100, or 0 to disable")
+		}
+		if err := s.SetSetting(budget.KeyWarnPct, strconv.FormatFloat(*warn, 'f', -1, 64)); err != nil {
 			return err
 		}
 		if *warn == 0 {
 			fmt.Println("early warnings disabled")
 		} else {
-			fmt.Printf("early warning at %.0f%% of any cap (needs a webhook: burnban alert --webhook URL)\n", *warn)
+			fmt.Printf("early warning at %.4g%% of any cap (needs a webhook: burnban alert --webhook URL)\n", *warn)
 		}
 		set = true
 	}
 	if set {
 		return nil
 	}
+	return printCapStatus(s)
+}
 
-	// No flags: show status with live spend against each window.
-	now := time.Now()
-	shown := false
-	for _, w := range budget.Windows() {
-		v, err := s.GetSetting(w.Key)
+// capAgent handles every --agent form: set, remove, or show one agent's cap.
+func capAgent(s *store.Store, agent string, daily, weekly, monthly, warn float64, off bool) error {
+	if weekly > 0 || monthly > 0 {
+		return fmt.Errorf("per-agent caps are daily-only for now — drop --weekly/--monthly or the --agent")
+	}
+	if warn >= 0 {
+		return fmt.Errorf("--warn is global, not per-agent — set it without --agent")
+	}
+	key := budget.KeyAgentCapPrefix + agent
+	scope := fmt.Sprintf("daily cap for agent %q", agent)
+	switch {
+	case off:
+		if err := s.DeleteSetting(key); err != nil {
+			return err
+		}
+		fmt.Printf("%s removed\n", scope)
+	case daily > 0:
+		if err := s.SetSetting(key, strconv.FormatFloat(daily, 'f', -1, 64)); err != nil {
+			return err
+		}
+		fmt.Printf("%s set: $%.2f — the proxy returns 402 once it is reached\n", scope, daily)
+	default:
+		v, err := s.GetSetting(key)
 		if err != nil {
 			return err
 		}
 		if v == "" {
-			continue
+			fmt.Printf("no cap set for agent %q. Set one: burnban cap --agent %s --daily 5\n", agent, agent)
+			return nil
 		}
-		capUSD, _ := strconv.ParseFloat(v, 64)
-		spent, err := s.SpentSince(w.Start(now))
+		spent, err := s.SpentSinceForAgent(budget.DayStart(time.Now()), agent)
 		if err != nil {
 			return err
 		}
-		pct := 0.0
-		if capUSD > 0 {
-			pct = spent / capUSD * 100
+		fmt.Printf("agent %-24s $%.2f of $%s today\n", agent, spent, v)
+	}
+	return nil
+}
+
+// printCapStatus shows every window's live position, the warn threshold,
+// and per-agent caps.
+func printCapStatus(s *store.Store) error {
+	states, err := budget.Status(s, time.Now())
+	if err != nil {
+		return err
+	}
+	shown := false
+	for _, st := range states {
+		if !st.Set {
+			continue
 		}
-		fmt.Printf("%-8s $%.2f of $%.2f (%.0f%%, resets %s)\n", w.Name, spent, capUSD, pct, w.Reset)
+		fmt.Printf("%-8s $%.2f of $%.2f (%.0f%%, resets %s)\n", st.Name, st.Spent, st.CapUSD, st.Pct(), st.Reset)
 		shown = true
 	}
 	if !shown {
@@ -125,10 +164,10 @@ func cmdCap(args []string) error {
 	}
 	if wp, err := s.GetSetting(budget.KeyWarnPct); err != nil {
 		return err
-	} else if wp != "" && wp != "0" {
-		fmt.Printf("warn     at %s%% of any cap\n", wp)
 	} else if wp == "0" {
 		fmt.Println("warn     disabled")
+	} else if wp != "" {
+		fmt.Printf("warn     at %s%% of any cap\n", wp)
 	}
 	agents, err := s.SettingsWithPrefix(budget.KeyAgentCapPrefix)
 	if err != nil {

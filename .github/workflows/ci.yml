@@ -4,6 +4,9 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
@@ -13,5 +16,5 @@ jobs:
         with:
           go-version: "1.25"
       - run: go vet ./...
-      - run: go test ./...
+      - run: go test -race ./...
       - run: CGO_ENABLED=0 go build -o burnban .

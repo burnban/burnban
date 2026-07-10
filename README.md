@@ -98,13 +98,13 @@ stands up an instant loopback upstream and runs the same traffic direct and thro
 
 ```
                 p50       p90       p99      mean
-direct         90µs     131µs     249µs      98µs
-burnban       838µs     1.6ms     4.2ms     1.0ms
+direct        103µs     174µs     332µs     115µs
+burnban       628µs     1.7ms     8.8ms     1.0ms
 ─────────────────────────────────────────────────
-added         748µs     1.5ms     3.9ms     913µs
+added         525µs     1.5ms     8.5ms     924µs
 ```
 
-**~0.75ms median, with the ledger write and cap check included** — against an instant upstream, the worst case a proxy can face. Real inference calls run seconds; your agents will not feel it. Run it on your own hardware and check.
+**~0.5ms median, with the durable ledger write and cap check included** — against an instant upstream, the worst case a proxy can face (the p99 tail is SQLite checkpointing; real inference calls run seconds either way). Percentiles are nearest-rank, warts kept. Run it on your own hardware and check.
 
 ## Providers
 
@@ -118,9 +118,11 @@ added         748µs     1.5ms     3.9ms     913µs
 **Anything OpenAI-compatible** — Groq, Mistral, DeepSeek, OpenRouter, your local Ollama or vLLM — mounts as an extra route with one flag and gets metered the same way:
 
 ```sh
-burnban serve --upstream groq=https://api.groq.com --upstream ollama=http://localhost:11434
-# then point clients at http://localhost:4141/groq/…, /ollama/v1/…
+burnban serve --upstream groq=https://api.groq.com/openai --upstream ollama=http://localhost:11434
+# then point clients at http://localhost:4141/groq/v1/…, /ollama/v1/…
 ```
+
+Endpoint speaks a different dialect? Prefix the url with its usage shape — `--upstream corp=anthropic:https://llm.corp.internal` — and burnban meters it with that provider's parser.
 
 Attribution: burnban groups spend by the client's `User-Agent`. For finer tracking, send `x-burnban-agent` / `x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
 

@@ -4,12 +4,15 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/syft8/burnban/internal/budget"
@@ -110,7 +113,7 @@ func runBench(n, conc int) (*benchResult, error) {
 	prices := &pricing.Table{Models: map[string]pricing.Price{
 		"claude-bench-1": {InputPerMTok: 5, OutputPerMTok: 25, CacheReadMult: 0.1, CacheWriteMult: 1.25},
 	}}
-	p, err := proxy.New(s, prices, map[string]string{"anthropic": upURL})
+	p, err := proxy.New(s, prices, map[string]proxy.Upstream{"anthropic": {URL: upURL, Shape: "anthropic"}})
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +128,9 @@ func runBench(n, conc int) (*benchResult, error) {
 	warmup := min(50, n)
 
 	measure := func(url string) (latStats, error) {
-		runPass(client, url, warmup, conc, nil)
+		if err := runPass(client, url, warmup, conc, nil); err != nil {
+			return latStats{}, fmt.Errorf("warmup: %w", err)
+		}
 		lats := make([]time.Duration, 0, n)
 		if err := runPass(client, url, n, conc, &lats); err != nil {
 			return latStats{}, err
@@ -137,36 +142,55 @@ func runBench(n, conc int) (*benchResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	proxied, err := measure(proxyURL + "/anthropic/v1/messages")
+	// Count ledger rows around the measured pass, so `recorded` reports
+	// exactly what the timed requests wrote — warmup rows excluded by
+	// measurement, not by assumption.
+	if err := runPass(client, proxyURL+"/anthropic/v1/messages", warmup, conc, nil); err != nil {
+		return nil, fmt.Errorf("warmup: %w", err)
+	}
+	rowsBefore, err := ledgerRows(s)
 	if err != nil {
 		return nil, err
 	}
+	lats := make([]time.Duration, 0, n)
+	if err := runPass(client, proxyURL+"/anthropic/v1/messages", n, conc, &lats); err != nil {
+		return nil, err
+	}
+	proxied := summarizeLats(lats)
+	rowsAfter, err := ledgerRows(s)
+	if err != nil {
+		return nil, err
+	}
+	return &benchResult{direct: direct, proxied: proxied, recorded: rowsAfter - rowsBefore}, nil
+}
 
+func ledgerRows(s *store.Store) (int64, error) {
 	sum, err := s.Summarize(time.Unix(0, 0))
 	if err != nil {
-		return nil, err
+		return 0, err
 	}
-	return &benchResult{direct: direct, proxied: proxied, recorded: sum.Requests - int64(warmup)}, nil
+	return sum.Requests, nil
 }
 
 const benchRequestBody = `{"model":"claude-bench-1","max_tokens":512,"messages":[{"role":"user","content":"benchmark request with a plausible amount of prompt text attached to it"}]}`
 
 // runPass fires total POSTs at url from conc workers; when lats is non-nil
-// each request's wall time is appended to it.
+// each request's wall time is appended to it. It always waits for every
+// worker to finish before returning — an early error must not leave
+// stragglers firing into the next measurement pass.
 func runPass(client *http.Client, url string, total, conc int, lats *[]time.Duration) error {
-	type res struct {
-		d   time.Duration
-		err error
-	}
-	jobs := make(chan struct{}, total)
-	for i := 0; i < total; i++ {
-		jobs <- struct{}{}
-	}
-	close(jobs)
-	results := make(chan res, total)
+	var (
+		next    atomic.Int64
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		firstEr error
+	)
+	perWorker := make([][]time.Duration, conc)
 	for w := 0; w < conc; w++ {
-		go func() {
-			for range jobs {
+		wg.Add(1)
+		go func(w int) {
+			defer wg.Done()
+			for next.Add(1) <= int64(total) {
 				start := time.Now()
 				resp, err := client.Post(url, "application/json", strings.NewReader(benchRequestBody))
 				if err == nil {
@@ -176,17 +200,25 @@ func runPass(client *http.Client, url string, total, conc int, lats *[]time.Dura
 						err = fmt.Errorf("status %d", resp.StatusCode)
 					}
 				}
-				results <- res{time.Since(start), err}
+				if err != nil {
+					mu.Lock()
+					if firstEr == nil {
+						firstEr = err
+					}
+					mu.Unlock()
+					return
+				}
+				perWorker[w] = append(perWorker[w], time.Since(start))
 			}
-		}()
+		}(w)
 	}
-	for i := 0; i < total; i++ {
-		r := <-results
-		if r.err != nil {
-			return r.err
-		}
-		if lats != nil {
-			*lats = append(*lats, r.d)
+	wg.Wait()
+	if firstEr != nil {
+		return firstEr
+	}
+	if lats != nil {
+		for _, ws := range perWorker {
+			*lats = append(*lats, ws...)
 		}
 	}
 	return nil
@@ -194,13 +226,18 @@ func runPass(client *http.Client, url string, total, conc int, lats *[]time.Dura
 
 func summarizeLats(lats []time.Duration) latStats {
 	sort.Slice(lats, func(i, j int) bool { return lats[i] < lats[j] })
+	// Nearest-rank percentiles: ceil(p·n) — anything else drops the tail
+	// sample the percentile exists to report.
 	pct := func(p float64) time.Duration {
 		if len(lats) == 0 {
 			return 0
 		}
-		i := int(p*float64(len(lats))) - 1
+		i := int(math.Ceil(p*float64(len(lats)))) - 1
 		if i < 0 {
 			i = 0
+		}
+		if i >= len(lats) {
+			i = len(lats) - 1
 		}
 		return lats[i]
 	}

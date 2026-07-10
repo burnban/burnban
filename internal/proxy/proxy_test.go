@@ -27,25 +27,10 @@ const anthropicSSE = "event: message_start\n" +
 
 func newProxy(t *testing.T, upstream http.Handler) (*httptest.Server, *store.Store) {
 	t.Helper()
-	up := httptest.NewServer(upstream)
-	t.Cleanup(up.Close)
-
-	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { s.Close() })
-
 	prices := &pricing.Table{Models: map[string]pricing.Price{
 		"claude-opus-4-7": {InputPerMTok: 5, OutputPerMTok: 25, CacheReadMult: 0.1, CacheWriteMult: 1.25},
 	}}
-	p, err := proxy.New(s, prices, map[string]string{"anthropic": up.URL})
-	if err != nil {
-		t.Fatal(err)
-	}
-	srv := httptest.NewServer(p.Handler())
-	t.Cleanup(srv.Close)
-	return srv, s
+	return newProxyFor(t, "anthropic", upstream, prices)
 }
 
 func post(t *testing.T, base string) (*http.Response, string) {
@@ -206,7 +191,9 @@ const geminiJSON = `{"candidates":[{"content":{"parts":[{"text":"hi"}],"role":"m
 const geminiSSE = `data: {"candidates":[{"content":{"parts":[{"text":"partial"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":10},"modelVersion":"gemini-3-pro"}` + "\n\n" +
 	`data: {"candidates":[{"content":{"parts":[{"text":"done"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":300,"thoughtsTokenCount":200,"cachedContentTokenCount":400}}` + "\n\n"
 
-// newProxyFor builds a proxy with one named upstream and that model priced.
+// newProxyFor builds a proxy with one named upstream and the given price
+// table. Built-in provider names get their native metering shape, exactly
+// as DefaultUpstreams wires them; anything else meters as OpenAI-shaped.
 func newProxyFor(t *testing.T, name string, upstream http.Handler, prices *pricing.Table) (*httptest.Server, *store.Store) {
 	t.Helper()
 	up := httptest.NewServer(upstream)
@@ -216,7 +203,11 @@ func newProxyFor(t *testing.T, name string, upstream http.Handler, prices *prici
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	p, err := proxy.New(s, prices, map[string]string{name: up.URL})
+	shape := "openai"
+	if name == "anthropic" || name == "gemini" {
+		shape = name
+	}
+	p, err := proxy.New(s, prices, map[string]proxy.Upstream{name: {URL: up.URL, Shape: shape}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -344,6 +335,120 @@ func TestWeeklyCapBlocksE2E(t *testing.T) {
 	if resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(body, "weekly") {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
 	}
+}
+
+// Gemini's REST streaming default (no alt=sse) is a JSON array of chunks
+// with Content-Type application/json — it must still be metered.
+func TestGeminiJSONArrayStream(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"gemini-3-pro": {InputPerMTok: 2, OutputPerMTok: 12, CacheReadMult: 0.1},
+	}}
+	arrayBody := `[{"candidates":[{"content":{"parts":[{"text":"par"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":10},"modelVersion":"gemini-3-pro"},` +
+		`{"candidates":[{"content":{"parts":[{"text":"tial"}]}}],"usageMetadata":{"promptTokenCount":1000,"candidatesTokenCount":300,"thoughtsTokenCount":200,"cachedContentTokenCount":400}}]`
+	srv, s := newProxyFor(t, "gemini", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, arrayBody)
+	}), prices)
+
+	resp, err := http.Post(srv.URL+"/gemini/v1beta/models/gemini-3-pro:streamGenerateContent",
+		"application/json", strings.NewReader(`{"contents":[{"parts":[{"text":"hi"}]}]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if string(body) != arrayBody {
+		t.Fatal("proxy altered the array body")
+	}
+	sum := summarize(t, s)
+	if sum.In != 600 || sum.Out != 500 || sum.CacheRead != 400 {
+		t.Fatalf("summary = %+v", sum)
+	}
+	if len(sum.Models) != 1 || sum.Models[0].Model != "gemini-3-pro" {
+		t.Fatalf("models = %+v", sum.Models)
+	}
+}
+
+// Two different windows tripping on the same day are two alerts, and a
+// weekly cap that stays tripped alerts once per week, not once per day.
+func TestDistinctWindowAlertsSameDay(t *testing.T) {
+	hits := make(chan string, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		hits <- string(b)
+	}))
+	t.Cleanup(hook.Close)
+
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyWebhookURL, hook.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Insert(store.Request{Ts: time.Now(), Provider: "anthropic", CostUSD: 5, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "4"); err != nil {
+		t.Fatal(err)
+	}
+
+	wait := func(wantSub string) string {
+		t.Helper()
+		select {
+		case msg := <-hits:
+			if !strings.Contains(msg, wantSub) {
+				t.Fatalf("webhook = %s, want %q", msg, wantSub)
+			}
+			return msg
+		case <-time.After(3 * time.Second):
+			t.Fatalf("no webhook containing %q", wantSub)
+			return ""
+		}
+	}
+
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("status = %d, want 402", resp.StatusCode)
+	}
+	wait("daily burn cap")
+
+	// Daily denial repeats: no second alert for the same window instance.
+	post(t, srv.URL)
+	select {
+	case msg := <-hits:
+		t.Fatalf("daily window alerted twice: %s", msg)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	// Raise the daily cap out of the way; now the weekly cap trips — a
+	// different window, so its alert must not be swallowed by today's.
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "1000"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyWeeklyCapUSD, "5"); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatal("weekly cap should deny")
+	}
+	wait("weekly burn cap")
+}
+
+func TestOversizeBodyRefused(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("oversize body must never reach the upstream")
+	}))
+	huge := strings.Repeat("x", 32<<20+1)
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(huge))
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status = %d, want 413", resp.StatusCode)
+	}
+	_ = s
 }
 
 func TestWarnWebhookFiresOnce(t *testing.T) {

@@ -16,6 +16,9 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version: "1.25"
+      # A tag must never publish binaries the test suite wouldn't pass.
+      - run: go vet ./...
+      - run: go test -race ./...
       - uses: goreleaser/goreleaser-action@v6
         with:
           args: release --clean

@@ -148,7 +148,7 @@ func toolDefs() []map[string]any {
 			"name":        "lift_burn_ban",
 			"description": "Lift the burn ban so spend can resume.",
 			"inputSchema": obj(map[string]any{
-				"today_override": map[string]any{"type": "boolean", "description": "also override the daily cap for the rest of today"},
+				"today_override": map[string]any{"type": "boolean", "description": "also override ALL budget caps (daily, weekly, monthly, per-agent) for the rest of today"},
 			}),
 		},
 	}
@@ -180,18 +180,16 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if a.USD < 0 {
 			return "", fmt.Errorf("cap must be >= 0")
 		}
-		key, scope := budget.KeyDailyCapUSD, "daily cap"
-		switch a.Window {
-		case "", "daily":
-		case "weekly":
-			key, scope = budget.KeyWeeklyCapUSD, "weekly cap"
-		case "monthly":
-			key, scope = budget.KeyMonthlyCapUSD, "monthly cap"
-		default:
+		if a.USD != 0 && a.USD < 0.01 {
+			return "", fmt.Errorf("caps below $0.01 are not enforceable — use burn_ban to stop all spend")
+		}
+		win, ok := budget.WindowByName(a.Window)
+		if !ok {
 			return "", fmt.Errorf("window must be daily, weekly, or monthly")
 		}
+		key, scope := win.Key, win.Name+" cap"
 		if a.Agent != "" {
-			if a.Window != "" && a.Window != "daily" {
+			if win.Name != "daily" {
 				return "", fmt.Errorf("per-agent caps are daily-only for now")
 			}
 			key, scope = budget.KeyAgentCapPrefix+a.Agent, fmt.Sprintf("daily cap for agent %q", a.Agent)
@@ -200,10 +198,21 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 			if err := s.S.DeleteSetting(key); err != nil {
 				return "", err
 			}
+			if a.Agent == "" {
+				if err := budget.ClearMarks(s.S, win.Name); err != nil {
+					return "", err
+				}
+			}
 			return scope + " removed", nil
 		}
-		if err := s.S.SetSetting(key, strconv.FormatFloat(a.USD, 'f', 2, 64)); err != nil {
+		if err := s.S.SetSetting(key, strconv.FormatFloat(a.USD, 'f', -1, 64)); err != nil {
 			return "", err
+		}
+		if a.Agent == "" {
+			// New threshold: re-arm this window's warning and alert.
+			if err := budget.ClearMarks(s.S, win.Name); err != nil {
+				return "", err
+			}
 		}
 		return fmt.Sprintf("%s set to $%.2f — the proxy refuses spend past it with a 402", scope, a.USD), nil
 	case "burn_ban":
@@ -228,7 +237,7 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 			if err := s.S.SetSetting(budget.KeyOverrideDay, time.Now().Format("2006-01-02")); err != nil {
 				return "", err
 			}
-			msg += " (daily cap overridden for the rest of today)"
+			msg += " (all caps overridden for the rest of today)"
 		}
 		return msg, nil
 	default:
@@ -316,32 +325,24 @@ func (s *Server) burnStatus() (string, error) {
 		out["ban_active"] = true
 	}
 	// Per-window state, so an agent can pace itself against what's left.
+	states, err := budget.Status(s.S, now)
+	if err != nil {
+		return "", err
+	}
 	windows := map[string]any{}
-	for _, w := range budget.Windows() {
-		capStr, err := s.S.GetSetting(w.Key)
-		if err != nil {
-			return "", err
-		}
-		if capStr == "" {
+	for _, st := range states {
+		if !st.Set {
 			continue
 		}
-		capUSD, perr := strconv.ParseFloat(capStr, 64)
-		if perr != nil {
-			continue
-		}
-		spent, err := s.S.SpentSince(w.Start(now))
-		if err != nil {
-			return "", err
-		}
-		windows[w.Name] = map[string]any{
-			"cap_usd":       capUSD,
-			"spent_usd":     spent,
-			"remaining_usd": max(0, capUSD-spent),
-			"resets":        w.Reset,
+		windows[st.Name] = map[string]any{
+			"cap_usd":       st.CapUSD,
+			"spent_usd":     st.Spent,
+			"remaining_usd": max(0, st.CapUSD-st.Spent),
+			"resets":        st.Reset,
 		}
 		out["has_cap"] = true
-		if w.Name == "daily" {
-			out["cap_daily_usd"] = capUSD
+		if st.Name == "daily" {
+			out["cap_daily_usd"] = st.CapUSD
 		}
 	}
 	if len(windows) > 0 {

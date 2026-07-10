@@ -61,7 +61,13 @@ func cmdWhatif(args []string) error {
 		for name, p := range prices.Models {
 			rows = append(rows, row{name, pricing.Reprice(p, tot.In, tot.Out, tot.CacheRead, tot.CacheWrite)})
 		}
-		sort.Slice(rows, func(i, j int) bool { return rows[i].cost < rows[j].cost })
+		// Name tiebreak keeps equal-priced models in a stable order run to run.
+		sort.Slice(rows, func(i, j int) bool {
+			if rows[i].cost != rows[j].cost {
+				return rows[i].cost < rows[j].cost
+			}
+			return rows[i].model < rows[j].model
+		})
 	}
 
 	fmt.Printf("BURNBAN WHAT-IF — %s, same tokens on one model\n\n", label)

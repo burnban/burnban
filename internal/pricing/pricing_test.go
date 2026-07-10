@@ -27,6 +27,23 @@ func TestLookup(t *testing.T) {
 	}
 }
 
+func TestLookupRefusesVariantSuffixes(t *testing.T) {
+	tb := &Table{Models: map[string]Price{
+		"gemini-2.5-flash": {InputPerMTok: 0.3, OutputPerMTok: 2.5},
+	}}
+	// A distinct cheaper tier must NOT silently bill at the base tier's
+	// rates just because the ID shares a prefix.
+	if _, ok := tb.Lookup("gemini-2.5-flash-lite"); ok {
+		t.Fatal("-lite variant matched the base tier — that's guessing")
+	}
+	// Date/version tags still match.
+	for _, id := range []string{"gemini-2.5-flash-001", "gemini-2.5-flash@20260601", "gemini-2.5-flash.1"} {
+		if _, ok := tb.Lookup(id); !ok {
+			t.Fatalf("version suffix %q should match the base entry", id)
+		}
+	}
+}
+
 func TestCost(t *testing.T) {
 	p := testTable().Models["claude-opus-4-7"]
 	got := Cost(p, 1000, 500, 2000, 0)

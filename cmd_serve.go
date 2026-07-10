@@ -3,9 +3,11 @@ package main
 import (
 	"flag"
 	"fmt"
+	"maps"
 	"net/http"
 	"os"
-	"sort"
+	"regexp"
+	"slices"
 	"strings"
 
 	"github.com/syft8/burnban/internal/budget"
@@ -19,32 +21,44 @@ import (
 // upstream may not shadow them.
 var reservedRoutes = map[string]bool{"health": true, "api": true, "metrics": true}
 
-// upstreamFlags collects repeated --upstream name=url pairs. Custom
-// upstreams are metered with OpenAI-shaped usage parsing, which is what
-// nearly every OpenAI-compatible provider emits.
-type upstreamFlags map[string]string
+// upstreamName is deliberately strict: route names become ServeMux
+// patterns, where characters like '{' either panic at registration or
+// register a wildcard that swallows arbitrary paths.
+var upstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+// upstreamFlags collects repeated --upstream name=url pairs. A url may be
+// prefixed with a usage shape ("anthropic:https://…", "gemini:…") when the
+// endpoint is not OpenAI-compatible; unprefixed urls meter as OpenAI-shaped,
+// which is what nearly every compatible provider emits.
+type upstreamFlags map[string]proxy.Upstream
 
 func (u upstreamFlags) String() string {
 	pairs := make([]string, 0, len(u))
-	for k, v := range u {
-		pairs = append(pairs, k+"="+v)
+	for _, k := range slices.Sorted(maps.Keys(u)) {
+		pairs = append(pairs, k+"="+u[k].URL)
 	}
-	sort.Strings(pairs)
 	return strings.Join(pairs, ",")
 }
 
 func (u upstreamFlags) Set(v string) error {
-	name, rawURL, ok := strings.Cut(v, "=")
-	if !ok || name == "" || rawURL == "" {
+	name, rest, ok := strings.Cut(v, "=")
+	if !ok || name == "" || rest == "" {
 		return fmt.Errorf("want name=url, e.g. --upstream groq=https://api.groq.com/openai")
 	}
-	if strings.ContainsAny(name, "/ ") {
-		return fmt.Errorf("upstream name %q must be path-safe (no slashes or spaces)", name)
+	if !upstreamName.MatchString(name) {
+		return fmt.Errorf("upstream name %q must match %s (it becomes a URL route)", name, upstreamName)
 	}
 	if reservedRoutes[name] {
 		return fmt.Errorf("upstream name %q is reserved for burnban's own routes", name)
 	}
-	u[name] = rawURL
+	up := proxy.Upstream{URL: rest} // shape left empty = unspecified
+	if shape, rawURL, ok := strings.Cut(rest, ":"); ok && slices.Contains(proxy.Shapes(), shape) {
+		up = proxy.Upstream{URL: rawURL, Shape: shape}
+	}
+	if !strings.Contains(up.URL, "://") {
+		return fmt.Errorf("upstream %s: url %q must include a scheme, e.g. https://", name, up.URL)
+	}
+	u[name] = up
 	return nil
 }
 
@@ -54,7 +68,7 @@ func cmdServe(args []string) error {
 	host := fs.String("host", "127.0.0.1", "bind address; anything non-loopback requires BURNBAN_TOKEN (team mode)")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	custom := upstreamFlags{}
-	fs.Var(custom, "upstream", "extra OpenAI-compatible upstream as name=url (repeatable): groq, mistral, deepseek, openrouter, ollama, vllm…")
+	fs.Var(custom, "upstream", "extra upstream as name=url (repeatable; OpenAI-shaped unless url is prefixed anthropic:/gemini:): groq, mistral, openrouter, ollama, vllm…")
 	fs.Parse(args)
 
 	token := os.Getenv("BURNBAN_TOKEN")
@@ -74,6 +88,11 @@ func cmdServe(args []string) error {
 	}
 	upstreams := proxy.DefaultUpstreams()
 	for name, u := range custom {
+		// Repointing a built-in keeps its native metering shape unless the
+		// user overrode it with an explicit shape prefix.
+		if base, isBuiltin := upstreams[name]; isBuiltin && u.Shape == "" {
+			u.Shape = base.Shape
+		}
 		upstreams[name] = u
 	}
 	p, err := proxy.New(s, prices, upstreams)
@@ -95,8 +114,13 @@ func cmdServe(args []string) error {
 	}
 
 	customLines := ""
-	for _, name := range sortedKeys(custom) {
-		customLines += fmt.Sprintf("     %-11s %s/%s → %s (OpenAI-shaped metering)\n", name, base, name, custom[name])
+	for _, name := range slices.Sorted(maps.Keys(custom)) {
+		shape := upstreams[name].Shape
+		if shape == "" {
+			shape = "openai"
+		}
+		customLines += fmt.Sprintf("     %-11s %s/%s → %s (%s-shaped metering)\n",
+			name, base, name, upstreams[name].URL, shape)
 	}
 
 	fmt.Printf(`🔥 burnban %s — the meter is running
@@ -137,13 +161,4 @@ func capBanner(s *store.Store) string {
 		return "none — set one: burnban cap --daily 10"
 	}
 	return strings.Join(parts, " · ")
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }

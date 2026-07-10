@@ -142,14 +142,56 @@ func TestWarnStatus(t *testing.T) {
 	if w2, err := g.WarnStatus(now); err != nil || w2 != nil {
 		t.Fatalf("marked window warned again: %+v, %v", w2, err)
 	}
+	// The next day the window's spend resets to zero, so there must be no
+	// warning — a non-nil result means a mark or window-start computation
+	// leaked across days.
 	if w3, err := g.WarnStatus(now.AddDate(0, 0, 1)); err != nil {
 		t.Fatal(err)
-	} else if w3 == nil {
-		// Yesterday's $8.50 is outside the new day's window, so no warning —
-		// but only because spend reset, not because the mark leaked over.
-		if got, _ := s.SpentSince(budget.DayStart(now.AddDate(0, 0, 1))); got != 0 {
-			t.Fatalf("expected fresh window, spent = %v", got)
-		}
+	} else if w3 != nil {
+		t.Fatalf("fresh day warned spuriously: %+v", w3)
+	}
+}
+
+func TestZeroCapIsUnset(t *testing.T) {
+	s := newStore(t)
+	g := &budget.Guard{S: s}
+	spend(t, s, now.Add(-time.Hour), 5)
+	// A stored "0.00" (e.g. hand-edited settings) must read as no cap at
+	// all — not as a cap that denies everything or divides warn math by zero.
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "0.00"); err != nil {
+		t.Fatal(err)
+	}
+	if d, err := g.Check(now, ""); err != nil || d != nil {
+		t.Fatalf("zero cap denied traffic: %+v, %v", d, err)
+	}
+	if w, err := g.WarnStatus(now); err != nil || w != nil {
+		t.Fatalf("zero cap produced a warning: %+v, %v", w, err)
+	}
+}
+
+func TestStatusOneShot(t *testing.T) {
+	s := newStore(t)
+	spend(t, s, now.Add(-time.Hour), 3)
+	spend(t, s, now.AddDate(0, 0, -2), 4) // earlier this week, not today
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	states, err := budget.Status(s, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	byName := map[string]budget.WindowState{}
+	for _, st := range states {
+		byName[st.Name] = st
+	}
+	if d := byName["daily"]; !d.Set || d.CapUSD != 10 || d.Spent != 3 {
+		t.Fatalf("daily = %+v", d)
+	}
+	if w := byName["weekly"]; w.Set || w.Spent != 7 {
+		t.Fatalf("weekly = %+v", w)
+	}
+	if m := byName["monthly"]; m.Set || m.Spent != 7 {
+		t.Fatalf("monthly = %+v", m)
 	}
 }
 

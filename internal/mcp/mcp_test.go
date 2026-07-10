@@ -67,8 +67,10 @@ func TestServerSession(t *testing.T) {
 		t.Fatalf("tools/list returned %d tools, want 5", len(tl.Result.Tools))
 	}
 
-	if v, _ := s.GetSetting(budget.KeyDailyCapUSD); v != "5.00" {
-		t.Fatalf("cap setting = %q, want 5.00", v)
+	// Caps store at full precision (no 'f',2 truncation that turned
+	// sub-cent caps into "0.00" deny-alls).
+	if v, _ := s.GetSetting(budget.KeyDailyCapUSD); v != "5" {
+		t.Fatalf("cap setting = %q, want 5", v)
 	}
 	if !strings.Contains(lines[3], "cap_daily_usd") {
 		t.Fatalf("burn_status missing cap: %s", lines[3])

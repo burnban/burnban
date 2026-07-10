@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -57,8 +56,7 @@ const (
 
 func renderTop(s *store.Store) (string, error) {
 	now := time.Now()
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	sum, err := s.Summarize(midnight)
+	sum, err := s.Summarize(budget.DayStart(now))
 	if err != nil {
 		return "", err
 	}
@@ -74,9 +72,15 @@ func renderTop(s *store.Store) (string, error) {
 
 	if ban, _ := s.GetSetting(budget.KeyBanActive); ban == "1" {
 		b.WriteString(cRed + "🚫 BURN BAN IN EFFECT — all spend paused (burnban lift)" + cReset + "\n\n")
-	} else if capStr, _ := s.GetSetting(budget.KeyDailyCapUSD); capStr != "" {
-		if capUSD, err := strconv.ParseFloat(capStr, 64); err == nil && capUSD > 0 {
-			frac := sum.Cost / capUSD
+	} else if states, err := budget.Status(s, now); err != nil {
+		return "", err
+	} else {
+		any := false
+		for _, st := range states {
+			if !st.Set {
+				continue
+			}
+			frac := st.Spent / st.CapUSD
 			color := cGreen
 			switch {
 			case frac >= 0.9:
@@ -84,10 +88,14 @@ func renderTop(s *store.Store) (string, error) {
 			case frac >= 0.6:
 				color = cYellow
 			}
-			fmt.Fprintf(&b, "budget  %s%s%s $%.2f / $%.2f\n\n", color, bar(frac, 30), cReset, sum.Cost, capUSD)
+			fmt.Fprintf(&b, "%-7s %s%s%s $%.2f / $%.2f\n", st.Name, color, bar(frac, 30), cReset, st.Spent, st.CapUSD)
+			any = true
 		}
-	} else {
-		b.WriteString(cDim + "budget  no cap set — burnban cap --daily 10" + cReset + "\n\n")
+		if any {
+			b.WriteString("\n")
+		} else {
+			b.WriteString(cDim + "budget  no cap set — burnban cap --daily 10" + cReset + "\n\n")
+		}
 	}
 
 	if len(sum.Models) > 0 {

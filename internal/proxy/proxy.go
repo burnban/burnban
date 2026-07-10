@@ -29,31 +29,65 @@ import (
 // comfortably, and streams are never buffered at all.
 const maxBodyBytes = 32 << 20
 
-type Proxy struct {
-	Store     *store.Store
-	Prices    *pricing.Table
-	Guard     *budget.Guard
-	Upstreams map[string]*url.URL
-	Logf      func(format string, v ...any)
-
-	client *http.Client
+// Upstream is one forwarding target. Shape names the usage dialect its
+// responses speak — "anthropic", "gemini", or "openai" (the default and the
+// de-facto standard that Groq, Mistral, DeepSeek, OpenRouter, Ollama, vLLM
+// and friends all emit) — so metering follows the wire format, not the
+// route name.
+type Upstream struct {
+	URL   string
+	Shape string
 }
 
-func New(s *store.Store, t *pricing.Table, upstreams map[string]string) (*Proxy, error) {
-	us := make(map[string]*url.URL, len(upstreams))
-	for name, raw := range upstreams {
-		u, err := url.Parse(raw)
+type parsedUpstream struct {
+	url   *url.URL
+	shape string
+}
+
+type Proxy struct {
+	Store  *store.Store
+	Prices *pricing.Table
+	Guard  *budget.Guard
+	Logf   func(format string, v ...any)
+
+	upstreams map[string]parsedUpstream
+	client    *http.Client
+}
+
+// Shapes lists the usage dialects the meter can parse.
+func Shapes() []string { return []string{"openai", "anthropic", "gemini"} }
+
+func validShape(s string) bool {
+	for _, v := range Shapes() {
+		if s == v {
+			return true
+		}
+	}
+	return false
+}
+
+func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Proxy, error) {
+	us := make(map[string]parsedUpstream, len(upstreams))
+	for name, up := range upstreams {
+		u, err := url.Parse(up.URL)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %s: %w", name, err)
 		}
-		us[name] = u
+		shape := up.Shape
+		if shape == "" {
+			shape = "openai"
+		}
+		if !validShape(shape) {
+			return nil, fmt.Errorf("upstream %s: unknown shape %q (want openai, anthropic, or gemini)", name, shape)
+		}
+		us[name] = parsedUpstream{url: u, shape: shape}
 	}
 	return &Proxy{
 		Store:     s,
 		Prices:    t,
 		Guard:     &budget.Guard{S: s},
-		Upstreams: us,
 		Logf:      log.Printf,
+		upstreams: us,
 		client: &http.Client{Transport: &http.Transport{
 			ResponseHeaderTimeout: 120 * time.Second,
 			MaxIdleConnsPerHost:   32,
@@ -63,15 +97,12 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]string) (*Proxy,
 
 // DefaultUpstreams maps URL path prefixes to provider APIs. Each can be
 // overridden by env var, which is also how tests point burnban at fakes.
-// Any other name added to the map (serve --upstream name=url) is metered
-// with OpenAI-shaped usage parsing — the de-facto standard that Groq,
-// Mistral, DeepSeek, OpenRouter, Ollama, vLLM and friends all speak.
-func DefaultUpstreams() map[string]string {
-	return map[string]string{
-		"anthropic": envOr("BURNBAN_ANTHROPIC_UPSTREAM", "https://api.anthropic.com"),
-		"openai":    envOr("BURNBAN_OPENAI_UPSTREAM", "https://api.openai.com"),
-		"xai":       envOr("BURNBAN_XAI_UPSTREAM", "https://api.x.ai"),
-		"gemini":    envOr("BURNBAN_GEMINI_UPSTREAM", "https://generativelanguage.googleapis.com"),
+func DefaultUpstreams() map[string]Upstream {
+	return map[string]Upstream{
+		"anthropic": {envOr("BURNBAN_ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "anthropic"},
+		"openai":    {envOr("BURNBAN_OPENAI_UPSTREAM", "https://api.openai.com"), "openai"},
+		"xai":       {envOr("BURNBAN_XAI_UPSTREAM", "https://api.x.ai"), "openai"},
+		"gemini":    {envOr("BURNBAN_GEMINI_UPSTREAM", "https://generativelanguage.googleapis.com"), "gemini"},
 	}
 }
 
@@ -81,7 +112,7 @@ func (p *Proxy) Handler() http.Handler {
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintln(w, `{"ok":true}`)
 	})
-	for name := range p.Upstreams {
+	for name := range p.upstreams {
 		name := name
 		mux.Handle("/"+name+"/", http.StripPrefix("/"+name,
 			http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -94,9 +125,10 @@ func (p *Proxy) Handler() http.Handler {
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string) {
 	start := time.Now()
 	agent := agentFrom(r)
+	shape := p.upstreams[provider].shape
 
 	if r.Method == http.MethodPost {
-		denial, err := p.Guard.Check(time.Now(), agent)
+		denial, err := p.Guard.Check(start, agent)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -110,15 +142,22 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 
 	var reqBody []byte
 	if r.Body != nil {
-		b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		// Read one byte past the cap so truncation is detectable: a body
+		// we couldn't hold intact must be refused, never forwarded corrupt.
+		b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 		if err != nil {
 			http.Error(w, "reading request body: "+err.Error(), http.StatusBadGateway)
+			return
+		}
+		if len(b) > maxBodyBytes {
+			http.Error(w, fmt.Sprintf("request body exceeds burnban's %dMB buffer", maxBodyBytes>>20),
+				http.StatusRequestEntityTooLarge)
 			return
 		}
 		reqBody = b
 	}
 
-	up := p.Upstreams[provider]
+	up := p.upstreams[provider].url
 	outURL := *up
 	outURL.Path = strings.TrimRight(up.Path, "/") + r.URL.Path
 	outURL.RawQuery = r.URL.RawQuery
@@ -167,7 +206,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	var usage meter.Usage
 	if isSSE {
 		rec.Streamed = true
-		usage = p.streamThrough(w, resp.Body, provider)
+		usage = p.streamThrough(w, resp.Body, shape)
 	} else {
 		body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes))
 		if err != nil {
@@ -175,7 +214,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		}
 		_, _ = w.Write(body)
 		if resp.StatusCode < 300 {
-			usage = parseJSON(provider, body)
+			usage = parseJSON(shape, body)
 		}
 	}
 
@@ -194,16 +233,19 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		if err := p.Store.Insert(rec); err != nil {
 			p.Logf("burnban: store: %v", err)
 		}
-		p.maybeWarn(time.Now())
+		// Off the handler goroutine: the warn check reads the ledger and
+		// must never hold up this connection's next keep-alive request.
+		// SetSettingOnce makes concurrent duplicates race-safe.
+		go p.maybeWarn(time.Now())
 	}
 }
 
 // streamThrough copies the SSE stream to the client line by line, flushing
 // as data arrives, while feeding a usage tracker. If the client goes away
 // mid-stream we keep draining upstream so the spend still gets recorded.
-func (p *Proxy) streamThrough(w http.ResponseWriter, body io.Reader, provider string) meter.Usage {
+func (p *Proxy) streamThrough(w http.ResponseWriter, body io.Reader, shape string) meter.Usage {
 	var tracker meter.Tracker
-	switch provider {
+	switch shape {
 	case "anthropic":
 		tracker = &meter.AnthropicSSE{}
 	case "gemini":
@@ -234,8 +276,8 @@ func (p *Proxy) streamThrough(w http.ResponseWriter, body io.Reader, provider st
 	return tracker.Usage()
 }
 
-func parseJSON(provider string, body []byte) meter.Usage {
-	switch provider {
+func parseJSON(shape string, body []byte) meter.Usage {
+	switch shape {
 	case "anthropic":
 		return meter.ParseAnthropicJSON(body)
 	case "gemini":
@@ -280,19 +322,20 @@ func agentFrom(r *http.Request) string {
 	return ua
 }
 
-// alertCapReached fires the configured webhook (Slack-compatible JSON)
-// the first time a cap trips each day. Fire-and-forget: a slow or dead
-// webhook must never sit in the request path.
+// alertCapReached fires the configured webhook (Slack-compatible JSON) the
+// first time each window instance trips — a daily and a weekly cap hitting
+// on the same day are two distinct alerts, not one. Fire-and-forget: a
+// slow or dead webhook must never sit in the request path.
 func (p *Proxy) alertCapReached(d *budget.Denial) {
-	if d.Type != "burnban_cap_reached" {
+	mark := d.AlertMark()
+	if mark == "" {
 		return
 	}
 	urlStr, err := p.Store.GetSetting(budget.KeyWebhookURL)
 	if err != nil || urlStr == "" {
 		return
 	}
-	today := time.Now().Format("2006-01-02")
-	if won, err := p.Store.SetSettingOnce(budget.KeyAlertedDay, today); err != nil || !won {
+	if won, err := p.Store.SetSettingOnce(mark, "1"); err != nil || !won {
 		return
 	}
 	p.postWebhook(urlStr, "🔥🚫 burnban: "+d.Message)

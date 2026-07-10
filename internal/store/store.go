@@ -6,6 +6,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -32,6 +33,10 @@ CREATE TABLE IF NOT EXISTS requests (
 	body_hash TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
+-- Covering indexes: budget checks SUM cost over time (and agent) ranges on
+-- every request, so the sums must never leave the index for the table.
+CREATE INDEX IF NOT EXISTS idx_requests_ts_cost ON requests(ts, cost_usd);
+CREATE INDEX IF NOT EXISTS idx_requests_agent_ts_cost ON requests(agent, ts, cost_usd);
 CREATE TABLE IF NOT EXISTS settings (
 	key TEXT PRIMARY KEY,
 	value TEXT NOT NULL
@@ -104,6 +109,36 @@ func (s *Store) SpentSince(t time.Time) (float64, error) {
 	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE ts >= ?`,
 		t.UTC().Format(time.RFC3339)).Scan(&v)
 	return v, err
+}
+
+// SpentSinceMulti sums spend since each cutoff in one pass: a single range
+// scan from the earliest cutoff with one conditional sum per window, so a
+// request checked against three budget windows costs one query, not three.
+func (s *Store) SpentSinceMulti(ts []time.Time) ([]float64, error) {
+	if len(ts) == 0 {
+		return nil, nil
+	}
+	min := ts[0]
+	for _, t := range ts[1:] {
+		if t.Before(min) {
+			min = t
+		}
+	}
+	cols := make([]string, len(ts))
+	args := make([]any, 0, len(ts)+1)
+	for i, t := range ts {
+		cols[i] = "COALESCE(SUM(CASE WHEN ts >= ? THEN cost_usd ELSE 0 END),0)"
+		args = append(args, t.UTC().Format(time.RFC3339))
+	}
+	args = append(args, min.UTC().Format(time.RFC3339))
+	dests := make([]any, len(ts))
+	out := make([]float64, len(ts))
+	for i := range out {
+		dests[i] = &out[i]
+	}
+	err := s.db.QueryRow(`SELECT `+strings.Join(cols, ", ")+
+		` FROM requests WHERE ts >= ?`, args...).Scan(dests...)
+	return out, err
 }
 
 func (s *Store) SpentSinceForAgent(t time.Time, agent string) (float64, error) {
@@ -269,22 +304,21 @@ type Totals struct {
 	CostUSD    float64
 }
 
-// TokenTotals sums tokens and cost across priced rows since t. Repricing
-// math is linear in token counts, so these sums are all what-if needs.
+// TokenTotals sums tokens and cost across priced rows since t in one scan,
+// counting unpriced rows on the side. Repricing math is linear in token
+// counts, so these sums are all what-if needs.
 func (s *Store) TokenTotals(t time.Time) (*Totals, error) {
-	ts := t.UTC().Format(time.RFC3339)
 	var tot Totals
-	err := s.db.QueryRow(`SELECT COUNT(*),
-		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
-		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
-		COALESCE(SUM(cost_usd),0)
-		FROM requests WHERE ts >= ? AND priced = 1`, ts).
-		Scan(&tot.Requests, &tot.In, &tot.Out, &tot.CacheRead, &tot.CacheWrite, &tot.CostUSD)
-	if err != nil {
-		return nil, err
-	}
-	err = s.db.QueryRow(`SELECT COUNT(*) FROM requests WHERE ts >= ? AND priced = 0`, ts).
-		Scan(&tot.Unpriced)
+	err := s.db.QueryRow(`SELECT
+		COALESCE(SUM(priced),0),
+		COALESCE(SUM(CASE WHEN priced=0 THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN priced=1 THEN in_tokens ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN priced=1 THEN out_tokens ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN priced=1 THEN cache_read_tokens ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN priced=1 THEN cache_write_tokens ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN priced=1 THEN cost_usd ELSE 0 END),0)
+		FROM requests WHERE ts >= ?`, t.UTC().Format(time.RFC3339)).
+		Scan(&tot.Requests, &tot.Unpriced, &tot.In, &tot.Out, &tot.CacheRead, &tot.CacheWrite, &tot.CostUSD)
 	if err != nil {
 		return nil, err
 	}
@@ -349,8 +383,43 @@ func (s *Store) GetSetting(key string) (string, error) {
 	return v, err
 }
 
+// GetSettings fetches many keys in one query; absent keys are simply
+// missing from the map. The budget guard runs per request, so it must not
+// pay one round trip per key.
+func (s *Store) GetSettings(keys ...string) (map[string]string, error) {
+	if len(keys) == 0 {
+		return map[string]string{}, nil
+	}
+	args := make([]any, len(keys))
+	for i, k := range keys {
+		args[i] = k
+	}
+	rows, err := s.db.Query(`SELECT key, value FROM settings WHERE key IN (?`+
+		strings.Repeat(",?", len(keys)-1)+`)`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string]string, len(keys))
+	for rows.Next() {
+		var k, v string
+		if err := rows.Scan(&k, &v); err != nil {
+			return nil, err
+		}
+		out[k] = v
+	}
+	return out, rows.Err()
+}
+
 func (s *Store) DeleteSetting(key string) error {
 	_, err := s.db.Exec(`DELETE FROM settings WHERE key = ?`, key)
+	return err
+}
+
+// DeleteSettingsWithPrefix clears a family of keys, e.g. the per-window
+// warned/alerted marks when a cap is changed or removed.
+func (s *Store) DeleteSettingsWithPrefix(prefix string) error {
+	_, err := s.db.Exec(`DELETE FROM settings WHERE key LIKE ? || '%'`, prefix)
 	return err
 }
 

@@ -187,7 +187,7 @@
   </section>
 
   <section class="reveal d2">
-    <div class="fuse-head"><span class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
+    <div class="fuse-head"><span id="fuseLabel" class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
     <div class="track"><div id="fill" class="fill ok"></div></div>
     <div id="windows" class="label" style="margin-top:8px"></div>
   </section>
@@ -298,13 +298,21 @@
       $("banBanner").classList.toggle("hidden", !d.ban_active);
 
       const fill = $("fill"), ftext = $("fuseText"), big = $("total");
-      if (d.has_cap && d.cap_daily_usd > 0) {
-        const frac = Math.min(1, d.total_cost / d.cap_daily_usd);
+      // The fuse shows the tightest configured window, so a weekly- or
+      // monthly-only budget never reads as "no cap set" while it enforces.
+      const fuse =
+        d.cap_daily_usd > 0   ? {label: "Daily budget",   spent: d.total_cost, cap: d.cap_daily_usd} :
+        d.cap_weekly_usd > 0  ? {label: "Weekly budget",  spent: d.week_cost,  cap: d.cap_weekly_usd} :
+        d.cap_monthly_usd > 0 ? {label: "Monthly budget", spent: d.month_cost, cap: d.cap_monthly_usd} : null;
+      if (fuse) {
+        const frac = Math.min(1, fuse.spent / fuse.cap);
+        $("fuseLabel").textContent = fuse.label;
         fill.style.width = (frac * 100).toFixed(1) + "%";
         fill.className = "fill " + (frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok");
-        ftext.textContent = fmt$(d.total_cost) + " / " + fmt$(d.cap_daily_usd) + (d.override_today ? " · overridden today" : "");
+        ftext.textContent = fmt$(fuse.spent) + " / " + fmt$(fuse.cap) + (d.override_today ? " · overridden today" : "");
         big.classList.toggle("hot", frac >= .9);
       } else {
+        $("fuseLabel").textContent = "Daily budget";
         fill.style.width = "0%";
         ftext.textContent = "no cap set — burnban cap --daily 10";
         big.classList.remove("hot");

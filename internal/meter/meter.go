@@ -94,31 +94,38 @@ type geminiUsage struct {
 type geminiBody struct {
 	ModelVersion string       `json:"modelVersion"`
 	Usage        *geminiUsage `json:"usageMetadata"`
+	Candidates   []struct {
+		Content struct {
+			Parts []struct {
+				Text string `json:"text"`
+			} `json:"parts"`
+		} `json:"content"`
+	} `json:"candidates"`
 }
 
 // ParseGeminiJSON reads usageMetadata from a generateContent response.
-// Gemini's promptTokenCount includes the cached subset, and thinking tokens
-// are billed as output, so both are normalized here.
+// streamGenerateContent WITHOUT alt=sse returns a JSON array of chunks
+// (the REST default), so arrays are accepted too and merged the same way
+// the SSE tracker merges frames.
 func ParseGeminiJSON(body []byte) Usage {
+	body = bytes.TrimSpace(body)
+	var t GeminiSSE
+	if len(body) > 0 && body[0] == '[' {
+		var chunks []geminiBody
+		if json.Unmarshal(body, &chunks) != nil {
+			return Usage{}
+		}
+		for i := range chunks {
+			t.merge(&chunks[i])
+		}
+		return t.Usage()
+	}
 	var v geminiBody
-	if json.Unmarshal(body, &v) != nil || v.Usage == nil {
+	if json.Unmarshal(body, &v) != nil {
 		return Usage{}
 	}
-	return geminiToUsage(v)
-}
-
-func geminiToUsage(v geminiBody) Usage {
-	u := v.Usage
-	if u == nil || (u.PromptTokenCount == 0 && u.CandidatesTokenCount == 0) {
-		return Usage{}
-	}
-	return Usage{
-		Model:     v.ModelVersion,
-		In:        u.PromptTokenCount - u.CachedContentTokenCount,
-		Out:       u.CandidatesTokenCount + u.ThoughtsTokenCount,
-		CacheRead: u.CachedContentTokenCount,
-		Found:     true,
-	}
+	t.merge(&v)
+	return t.Usage()
 }
 
 // Tracker consumes SSE lines from a streamed response and reports usage.
@@ -220,10 +227,17 @@ func (t *OpenAISSE) Usage() Usage {
 	return u
 }
 
-// GeminiSSE tracks streamGenerateContent?alt=sse: chunks carry cumulative
-// usageMetadata as the response grows, so the last complete one wins.
+// GeminiSSE tracks streamGenerateContent?alt=sse. Chunks carry cumulative
+// usageMetadata as the response grows, but not every chunk repeats every
+// field, so each count keeps its running maximum — a trailing prompt-only
+// frame must never wipe the output counts an earlier frame reported. When
+// the stream dies before any usage frame, output is estimated from the
+// streamed text and flagged, matching the OpenAI tracker's behavior.
 type GeminiSSE struct {
-	u Usage
+	model                                string
+	found                                bool
+	prompt, candidates, thoughts, cached int64
+	chars                                int64
 }
 
 func (t *GeminiSSE) Feed(line []byte) {
@@ -235,18 +249,47 @@ func (t *GeminiSSE) Feed(line []byte) {
 	if json.Unmarshal(data, &v) != nil {
 		return
 	}
+	t.merge(&v)
+}
+
+func (t *GeminiSSE) merge(v *geminiBody) {
 	if v.ModelVersion != "" {
-		t.u.Model = v.ModelVersion
+		t.model = v.ModelVersion
+		t.found = true
 	}
-	if u := geminiToUsage(v); u.Found {
-		if u.Model == "" {
-			u.Model = t.u.Model
+	for _, c := range v.Candidates {
+		for _, p := range c.Content.Parts {
+			t.chars += int64(len(p.Text))
 		}
-		t.u = u
+	}
+	if u := v.Usage; u != nil {
+		if u.PromptTokenCount > 0 || u.CandidatesTokenCount > 0 {
+			t.found = true
+		}
+		t.prompt = max(t.prompt, u.PromptTokenCount)
+		t.candidates = max(t.candidates, u.CandidatesTokenCount)
+		t.thoughts = max(t.thoughts, u.ThoughtsTokenCount)
+		t.cached = max(t.cached, u.CachedContentTokenCount)
 	}
 }
 
-func (t *GeminiSSE) Usage() Usage { return t.u }
+// Usage composes the tracked maxima. Gemini's promptTokenCount includes
+// the cached subset, and thinking tokens are billed as output, so both
+// are normalized here.
+func (t *GeminiSSE) Usage() Usage {
+	u := Usage{
+		Model:     t.model,
+		In:        t.prompt - t.cached,
+		Out:       t.candidates + t.thoughts,
+		CacheRead: t.cached,
+		Found:     t.found,
+	}
+	if u.Out == 0 && t.chars > 0 {
+		u.Out = t.chars / 4
+		u.Estimated = true
+	}
+	return u
+}
 
 func sseData(line []byte) ([]byte, bool) {
 	line = bytes.TrimSpace(line)

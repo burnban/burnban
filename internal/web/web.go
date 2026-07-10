@@ -108,8 +108,7 @@ func writeMetrics(w http.ResponseWriter, s *store.Store, now time.Time) error {
 	if err != nil {
 		return err
 	}
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	today, err := s.SpentSince(midnight)
+	states, err := budget.Status(s, now)
 	if err != nil {
 		return err
 	}
@@ -128,27 +127,15 @@ func writeMetrics(w http.ResponseWriter, s *store.Store, now time.Time) error {
 	for _, a := range all.Agents {
 		fmt.Fprintf(w, "burnban_agent_cost_usd_total{agent=%q} %g\n", a.Agent, a.Cost)
 	}
-	fmt.Fprintf(w, "# HELP burnban_spend_today_usd Spend since local midnight.\n# TYPE burnban_spend_today_usd gauge\nburnban_spend_today_usd %g\n", today)
-	for _, win := range budget.Windows() {
-		if win.Name == "daily" {
-			continue // today's gauge above predates windows; keep its name stable
-		}
-		spent, err := s.SpentSince(win.Start(now))
-		if err != nil {
-			return err
-		}
+	for _, st := range states {
 		fmt.Fprintf(w, "# HELP burnban_spend_%s_usd Spend since the %s window opened.\n# TYPE burnban_spend_%s_usd gauge\nburnban_spend_%s_usd %g\n",
-			win.Name, win.Name, win.Name, win.Name, spent)
-	}
-	for _, win := range budget.Windows() {
-		capUSD := 0.0
-		if capStr, err := s.GetSetting(win.Key); err == nil && capStr != "" {
-			if v, perr := strconv.ParseFloat(capStr, 64); perr == nil {
-				capUSD = v
-			}
-		}
+			st.Name, st.Name, st.Name, st.Name, st.Spent)
 		fmt.Fprintf(w, "# HELP burnban_cap_%s_usd Configured %s cap (0 = none).\n# TYPE burnban_cap_%s_usd gauge\nburnban_cap_%s_usd %g\n",
-			win.Name, win.Name, win.Name, win.Name, capUSD)
+			st.Name, st.Name, st.Name, st.Name, st.CapUSD)
+		if st.Name == "daily" {
+			// Legacy alias from before budget windows existed.
+			fmt.Fprintf(w, "# HELP burnban_spend_today_usd Spend since local midnight (alias of burnban_spend_daily_usd).\n# TYPE burnban_spend_today_usd gauge\nburnban_spend_today_usd %g\n", st.Spent)
+		}
 	}
 	ban := 0
 	if b, err := s.GetSetting(budget.KeyBanActive); err == nil && b == "1" {
@@ -203,8 +190,7 @@ type summaryJSON struct {
 }
 
 func build(s *store.Store, version string, now time.Time) (*summaryJSON, error) {
-	midnight := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
-	sum, err := s.Summarize(midnight)
+	sum, err := s.Summarize(budget.DayStart(now))
 	if err != nil {
 		return nil, err
 	}
@@ -244,31 +230,30 @@ func build(s *store.Store, version string, now time.Time) (*summaryJSON, error) 
 		resp.Agents = append(resp.Agents, agentJSON{Agent: a.Agent, Requests: a.Requests, Cost: a.Cost})
 	}
 
-	if capStr, err := s.GetSetting(budget.KeyDailyCapUSD); err != nil {
+	// One settings query + one ledger scan covers every budget window; the
+	// dashboard polls this endpoint every two seconds, so it must stay cheap.
+	states, err := budget.Status(s, now)
+	if err != nil {
 		return nil, err
-	} else if capStr != "" {
-		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil {
-			resp.HasCap = true
-			resp.CapDailyUSD = capUSD
-		}
 	}
-	if capStr, err := s.GetSetting(budget.KeyWeeklyCapUSD); err != nil {
-		return nil, err
-	} else if capStr != "" {
-		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil && capUSD > 0 {
-			resp.CapWeeklyUSD = capUSD
-			if resp.WeekCost, err = s.SpentSince(budget.WeekStart(now)); err != nil {
-				return nil, err
+	for _, st := range states {
+		if st.Set {
+			resp.HasCap = true // any enforcing window counts as "capped"
+		}
+		switch st.Name {
+		case "daily":
+			if st.Set {
+				resp.CapDailyUSD = st.CapUSD
 			}
-		}
-	}
-	if capStr, err := s.GetSetting(budget.KeyMonthlyCapUSD); err != nil {
-		return nil, err
-	} else if capStr != "" {
-		if capUSD, perr := strconv.ParseFloat(capStr, 64); perr == nil && capUSD > 0 {
-			resp.CapMonthlyUSD = capUSD
-			if resp.MonthCost, err = s.SpentSince(budget.MonthStart(now)); err != nil {
-				return nil, err
+		case "weekly":
+			if st.Set {
+				resp.CapWeeklyUSD = st.CapUSD
+				resp.WeekCost = st.Spent
+			}
+		case "monthly":
+			if st.Set {
+				resp.CapMonthlyUSD = st.CapUSD
+				resp.MonthCost = st.Spent
 			}
 		}
 	}

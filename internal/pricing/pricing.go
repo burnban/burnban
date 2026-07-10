@@ -55,16 +55,19 @@ func Load() (*Table, error) {
 }
 
 // Lookup finds a price by exact model ID, then by the longest table key
-// that prefixes it, so claude-opus-4-7-20260301 matches claude-opus-4-7.
-// Unknown models return false; burnban records them as unpriced rather
-// than guessing.
+// that prefixes it — but only when the leftover suffix is a version or
+// date tag (starts like "-20260301", ".1", "@2026"), so
+// claude-opus-4-7-20260301 matches claude-opus-4-7 while a genuinely
+// different tier like gemini-2.5-flash-lite does NOT silently bill at
+// gemini-2.5-flash rates. Unknown models return false; burnban records
+// them as unpriced rather than guessing.
 func (t *Table) Lookup(model string) (Price, bool) {
 	if p, ok := t.Models[model]; ok {
 		return p, true
 	}
 	best := ""
 	for k := range t.Models {
-		if strings.HasPrefix(model, k) && len(k) > len(best) {
+		if strings.HasPrefix(model, k) && versionSuffix(model[len(k):]) && len(k) > len(best) {
 			best = k
 		}
 	}
@@ -72,6 +75,13 @@ func (t *Table) Lookup(model string) (Price, bool) {
 		return Price{}, false
 	}
 	return t.Models[best], true
+}
+
+// versionSuffix reports whether s looks like a version/date tag rather
+// than a distinct model variant: a separator followed by a digit.
+func versionSuffix(s string) bool {
+	return len(s) >= 2 && strings.ContainsRune("-.@:", rune(s[0])) &&
+		s[1] >= '0' && s[1] <= '9'
 }
 
 // Cost prices normalized usage. in and out are full-price tokens; cacheRead
@@ -89,16 +99,13 @@ func Cost(p Price, in, out, cacheRead, cacheWrite int64) float64 {
 // input rate — on that provider they would have been ordinary input, not
 // free. (At ingest time, Cost's zero write multiplier is correct because
 // such providers never report cache-write tokens in the first place.)
+// The formula itself lives only in Cost.
 func Reprice(p Price, in, out, cacheRead, cacheWrite int64) float64 {
-	readMult, writeMult := p.CacheReadMult, p.CacheWriteMult
-	if readMult <= 0 {
-		readMult = 1
+	if p.CacheReadMult <= 0 {
+		p.CacheReadMult = 1
 	}
-	if writeMult <= 0 {
-		writeMult = 1
+	if p.CacheWriteMult <= 0 {
+		p.CacheWriteMult = 1
 	}
-	return (float64(in)*p.InputPerMTok +
-		float64(out)*p.OutputPerMTok +
-		float64(cacheRead)*p.InputPerMTok*readMult +
-		float64(cacheWrite)*p.InputPerMTok*writeMult) / 1e6
+	return Cost(p, in, out, cacheRead, cacheWrite)
 }

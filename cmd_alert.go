@@ -10,7 +10,7 @@ import (
 
 func cmdAlert(args []string) error {
 	fs := flag.NewFlagSet("alert", flag.ExitOnError)
-	webhook := fs.String("webhook", "", "Slack-compatible webhook URL, POSTed when the daily cap is reached")
+	webhook := fs.String("webhook", "", "Slack-compatible webhook URL, POSTed at the warn threshold and when a cap trips")
 	off := fs.Bool("off", false, "remove the webhook")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
@@ -26,15 +26,18 @@ func cmdAlert(args []string) error {
 		if err := s.DeleteSetting(budget.KeyWebhookURL); err != nil {
 			return err
 		}
-		if err := s.DeleteSetting(budget.KeyAlertedDay); err != nil {
-			return err
+		// Re-arm every window's sent-notification marks alongside.
+		for _, w := range budget.Windows() {
+			if err := budget.ClearMarks(s, w.Name); err != nil {
+				return err
+			}
 		}
 		fmt.Println("webhook removed")
 	case *webhook != "":
 		if err := s.SetSetting(budget.KeyWebhookURL, *webhook); err != nil {
 			return err
 		}
-		fmt.Println("webhook set — burnban will POST there the first time the cap trips each day")
+		fmt.Println("webhook set — burnban will POST there at the warn threshold and once per tripped cap window")
 	default:
 		v, err := s.GetSetting(budget.KeyWebhookURL)
 		if err != nil {
