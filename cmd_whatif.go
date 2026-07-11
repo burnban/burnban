@@ -7,8 +7,8 @@ import (
 	"sort"
 	"text/tabwriter"
 
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/store"
 )
 
 // cmdWhatif reprices the window's traffic onto other models: same token

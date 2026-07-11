@@ -15,10 +15,10 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/proxy"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/proxy"
+	"github.com/burnban/burnban/internal/store"
 )
 
 // cmdBench measures what burnban adds to a request: it stands up a fake

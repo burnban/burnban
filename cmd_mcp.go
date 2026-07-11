@@ -4,8 +4,8 @@ import (
 	"flag"
 	"os"
 
-	"github.com/syft8/burnban/internal/mcp"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/mcp"
+	"github.com/burnban/burnban/internal/store"
 )
 
 func cmdMCP(args []string) error {

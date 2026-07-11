@@ -6,7 +6,7 @@ import (
 	"runtime"
 	"testing"
 
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/store"
 )
 
 func TestOpenUsesPrivatePermissions(t *testing.T) {

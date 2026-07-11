@@ -10,7 +10,7 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/store"
 )
 
 // Settings keys shared between the proxy and the CLI.

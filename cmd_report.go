@@ -9,7 +9,7 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/store"
 )
 
 func cmdReport(args []string) error {

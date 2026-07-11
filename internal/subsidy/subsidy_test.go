@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/syft8/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/pricing"
 )
 
 var since = time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)

@@ -10,10 +10,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/proxy"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/proxy"
+	"github.com/burnban/burnban/internal/store"
 )
 
 const anthropicJSON = `{"id":"msg_01","type":"message","role":"assistant","model":"claude-opus-4-7-20260301","content":[{"type":"text","text":"hi"}],"usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":0,"cache_read_input_tokens":2000}}`

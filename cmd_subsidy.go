@@ -10,8 +10,8 @@ import (
 	"text/tabwriter"
 	"time"
 
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/subsidy"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/subsidy"
 )
 
 // cmdSubsidy prices local agent traffic that may never touch the proxy.

@@ -19,7 +19,7 @@ curl -fsSL https://burnban.sh/install | sh    # CLI + desktop/application launch
 Windows PowerShell:
 
 ```powershell
-irm https://raw.githubusercontent.com/syft8/burnban/main/install.ps1 | iex
+irm https://raw.githubusercontent.com/burnban/burnban/main/install.ps1 | iex
 ```
 
 The installer adds a one-click **Burnban** launcher. It starts the real meter,

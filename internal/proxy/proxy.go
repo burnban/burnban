@@ -19,10 +19,10 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/meter"
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/meter"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/store"
 )
 
 // maxBodyBytes caps buffered bodies; prompts and non-streamed replies fit

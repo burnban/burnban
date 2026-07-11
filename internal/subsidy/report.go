@@ -8,7 +8,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syft8/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/pricing"
 )
 
 // Totals is the common token and API-equivalent cost shape used by the CLI

@@ -5,8 +5,8 @@ import (
 	"fmt"
 	"net/url"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/store"
 )
 
 func cmdAlert(args []string) error {

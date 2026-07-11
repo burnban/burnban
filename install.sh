@@ -2,7 +2,7 @@
 # Burnban installer for macOS and Linux — https://burnban.dev
 set -eu
 
-REPO="syft8/burnban"
+REPO="burnban/burnban"
 CREATE_DESKTOP="${BURNBAN_CREATE_DESKTOP:-1}"
 UPDATE_PATH="${BURNBAN_UPDATE_PATH:-1}"
 UNINSTALL=0

@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/syft8/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/pricing"
 )
 
 func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {

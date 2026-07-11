@@ -14,8 +14,8 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/store"
 )
 
 const protocolVersion = "2025-06-18"

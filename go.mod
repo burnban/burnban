@@ -1,4 +1,4 @@
-module github.com/syft8/burnban
+module github.com/burnban/burnban
 
 go 1.25.0
 

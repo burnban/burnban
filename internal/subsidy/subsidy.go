@@ -13,7 +13,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syft8/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/pricing"
 )
 
 // Event is one model call recovered from a local log, normalized the same

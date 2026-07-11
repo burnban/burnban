@@ -7,9 +7,9 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/mcp"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/mcp"
+	"github.com/burnban/burnban/internal/store"
 )
 
 func TestServerSession(t *testing.T) {

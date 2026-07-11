@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/store"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/store"
 )
 
 // cmdDemo seeds a throwaway database with a realistic day of agent traffic

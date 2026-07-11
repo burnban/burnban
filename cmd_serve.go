@@ -13,11 +13,11 @@ import (
 	"strings"
 	"time"
 
-	"github.com/syft8/burnban/internal/budget"
-	"github.com/syft8/burnban/internal/pricing"
-	"github.com/syft8/burnban/internal/proxy"
-	"github.com/syft8/burnban/internal/store"
-	"github.com/syft8/burnban/internal/web"
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/proxy"
+	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/web"
 )
 
 // reservedRoutes are path prefixes the dashboard and metrics own; a custom
