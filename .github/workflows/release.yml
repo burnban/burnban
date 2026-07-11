@@ -62,18 +62,21 @@ jobs:
       - name: Inspect unpublished release payload
         shell: bash
         run: |
+          archive_listing=$(mktemp)
+          trap 'rm -f "$archive_listing"' EXIT
           for os in linux darwin; do
             for arch in amd64 arm64; do
               archive="dist/burnban_${os}_${arch}.tar.gz"
               test -f "$archive"
-              tar -tzf "$archive" | grep -Eq '(^|/)burnban$'
-              tar -tzf "$archive" | grep -Eq '(^|/)LICENSE$'
-              tar -tzf "$archive" | grep -Eq '(^|/)DATA_AND_PRIVACY.md$'
-              tar -tzf "$archive" | grep -Eq '(^|/)EXTERNAL_POLICY.md$'
-              tar -tzf "$archive" | grep -Eq '(^|/)SECURITY.md$'
-              tar -tzf "$archive" | grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$'
-              tar -tzf "$archive" | grep -Eq '(^|/)docs/dashboard.png$'
-              tar -tzf "$archive" | grep -Eq '(^|/)third_party_licenses/.+/LICENSE'
+              tar -tzf "$archive" >"$archive_listing"
+              grep -Eq '(^|/)burnban$' "$archive_listing"
+              grep -Eq '(^|/)LICENSE$' "$archive_listing"
+              grep -Eq '(^|/)DATA_AND_PRIVACY.md$' "$archive_listing"
+              grep -Eq '(^|/)EXTERNAL_POLICY.md$' "$archive_listing"
+              grep -Eq '(^|/)SECURITY.md$' "$archive_listing"
+              grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$' "$archive_listing"
+              grep -Eq '(^|/)docs/dashboard.png$' "$archive_listing"
+              grep -Eq '(^|/)third_party_licenses/.+/LICENSE' "$archive_listing"
             done
           done
           for arch in amd64 arm64; do
@@ -139,8 +142,10 @@ jobs:
             -t burnban:release-candidate .
           test "$(docker image inspect burnban:release-candidate --format '{{.Config.User}}')" = "65532:65532"
           cid=$(docker create burnban:release-candidate)
-          trap 'docker rm -fv "$cid" burnban-release-candidate >/dev/null 2>&1 || true' EXIT
-          docker export "$cid" | tar -tf - | grep -q '^licenses/burnban/THIRD_PARTY_NOTICES.md$'
+          container_listing=$(mktemp)
+          trap 'rm -f "$container_listing"; docker rm -fv "$cid" burnban-release-candidate >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | tar -tf - >"$container_listing"
+          grep -q '^licenses/burnban/THIRD_PARTY_NOTICES.md$' "$container_listing"
           docker rm -v "$cid"
           cid=
       - name: Run candidate container
