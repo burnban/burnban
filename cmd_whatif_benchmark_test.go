@@ -31,7 +31,7 @@ func BenchmarkWhatif100KRowsAcross30Models(b *testing.B) {
 			InputPerMTok: 1 + float64(i)/10, OutputPerMTok: 5 + float64(i)/5,
 			CacheReadMult: .1, CacheWriteMult: 1.25,
 			LongContextThreshold: 200_000 + int64(i%3)*36_000,
-			LongInputMult: 2, LongOutputMult: 1.5,
+			LongInputMult:        2, LongOutputMult: 1.5,
 		}
 	}
 	b.ReportAllocs()

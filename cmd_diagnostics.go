@@ -437,7 +437,7 @@ func cmdPrune(args []string) error {
 	defer s.Close()
 	lease, err := s.AcquireLease("serve", 30*time.Second)
 	if errors.Is(err, store.ErrLeaseHeld) {
-		return fmt.Errorf("refusing to prune while this ledger is served; run `burnban stop --db %s` first", terminalText(*dbPath, 200))
+		return fmt.Errorf("refusing to prune while this ledger is served; run `burnban stop` with the same --db first")
 	}
 	if err != nil {
 		return fmt.Errorf("acquire exclusive maintenance lease: %w", err)
