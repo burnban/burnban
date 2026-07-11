@@ -109,6 +109,7 @@ jobs:
               tar -tzf "$archive" | grep -Eq '(^|/)burnban$'
               tar -tzf "$archive" | grep -Eq '(^|/)LICENSE$'
               tar -tzf "$archive" | grep -Eq '(^|/)DATA_AND_PRIVACY.md$'
+              tar -tzf "$archive" | grep -Eq '(^|/)EXTERNAL_POLICY.md$'
               tar -tzf "$archive" | grep -Eq '(^|/)SECURITY.md$'
               tar -tzf "$archive" | grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$'
               tar -tzf "$archive" | grep -Eq '(^|/)docs/dashboard.png$'
@@ -191,7 +192,7 @@ jobs:
             -p 127.0.0.1:44141:4141 \
             burnban:ci serve --host 0.0.0.0 --allow-insecure-http
           trap 'docker logs burnban-ci || true; docker rm -fv burnban-ci >/dev/null 2>&1 || true' EXIT
-          for attempt in {1..30}; do
+          for _ in {1..30}; do
             if curl -fsS -H "x-burnban-token: $token" http://127.0.0.1:44141/health | grep -q '"ok":true'; then
               exit 0
             fi
@@ -255,13 +256,13 @@ jobs:
             exit "$status"
           }
           trap cleanup EXIT
-          for attempt in {1..60}; do
+          for _ in {1..60}; do
             if curl -fsS http://127.0.0.1:44143/health >/dev/null 2>&1; then break; fi
             if ! kill -0 "$demo_pid" >/dev/null 2>&1; then cat "$tmp/demo.log"; exit 1; fi
             sleep 0.25
           done
           curl -fsS http://127.0.0.1:44143/health | grep -q '"ok":true'
-          for attempt in {1..60}; do
+          for _ in {1..60}; do
             if curl -fsS -H "x-burnban-token: $BURNBAN_TEAM_TEST_TOKEN" http://127.0.0.1:44144/health >/dev/null 2>&1; then break; fi
             if ! kill -0 "$team_pid" >/dev/null 2>&1; then cat "$tmp/team.log"; exit 1; fi
             sleep 0.25
