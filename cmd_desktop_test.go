@@ -37,7 +37,7 @@ func TestDashboardCommand(t *testing.T) {
 }
 
 func TestDashboardURLAndExistingMeter(t *testing.T) {
-	if got := dashboardURL("http://127.0.0.1:4141", "a token"); got != "http://127.0.0.1:4141/?token=a+token" {
+	if got := dashboardURL("http://127.0.0.1:4141", "a token"); got != "http://127.0.0.1:4141" {
 		t.Fatalf("dashboardURL = %q", got)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

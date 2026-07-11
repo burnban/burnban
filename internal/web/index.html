@@ -12,8 +12,8 @@
     --line: rgba(255, 140, 60, .13);
     --line-soft: rgba(255, 255, 255, .06);
     --text: #e8dfd0;
-    --dim: #96876f;
-    --faint: #5f5546;
+    --dim: #b4a58d;
+    --faint: #998b75;
     --ember: #ff7a2f;
     --ember-hi: #ffc38a;
     --ember-deep: #d94f14;
@@ -32,7 +32,7 @@
     font-size: 14px;
     line-height: 1.5;
     min-height: 100vh;
-    overflow-x: hidden;
+    overflow-x: auto;
   }
   /* atmosphere: ember glow bleeding down from the top of the unit */
   body::before {
@@ -42,10 +42,10 @@
       radial-gradient(700px 300px at 82% -8%, rgba(255, 170, 60, .05), transparent 60%);
   }
   .scan {
-    position: fixed; inset: 0; pointer-events: none; z-index: 3; opacity: .35;
+    position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .22;
     background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
   }
-  main { position: relative; z-index: 1; max-width: 1060px; margin: 0 auto; padding: 28px 22px 48px; }
+  main { position: relative; z-index: 1; width: 100%; max-width: 1060px; margin: 0 auto; padding: 28px 22px 48px; }
 
   .label {
     font-family: var(--cond);
@@ -61,9 +61,11 @@
   .brand { font-family: var(--cond); font-size: 20px; letter-spacing: .22em; font-weight: 700; }
   .brand em { font-style: normal; color: var(--ember); }
   .brand .tag { font-size: 11px; letter-spacing: .18em; color: var(--faint); font-weight: 600; margin-left: 12px; }
+  .badge { display: inline-flex; margin-left: 10px; padding: 2px 6px; border: 1px solid var(--warn); color: var(--warn); font-size: 10px; letter-spacing: .14em; vertical-align: middle; }
   .status { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--dim); white-space: nowrap; }
   .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--ok); box-shadow: 0 0 8px var(--ok); animation: pulse 1.6s ease-in-out infinite; }
   .dot.off { background: #6b6257; box-shadow: none; animation: none; }
+  .dot.wait { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
   @keyframes pulse { 50% { opacity: .35; } }
 
   /* ── lockout banner ──────────────────────────────────────── */
@@ -76,6 +78,11 @@
   }
   .ban .dim { color: #b06a5c; letter-spacing: .1em; font-weight: 400; text-transform: none; margin-left: 10px; }
   .hidden { display: none; }
+  .error-box { margin-top: 10px; padding: 10px 12px; color: var(--warn); border: 1px solid rgba(240,179,78,.35); background: rgba(240,179,78,.06); font-size: 12px; }
+  .error-box button { margin-left: 10px; }
+  .auth-prompt { margin-top: 14px; padding-bottom: 16px; }
+  .auth-row { display: flex; gap: 8px; align-items: center; margin-top: 10px; flex-wrap: wrap; }
+  .auth-row input { flex: 1; min-width: min(100%, 260px); min-height: 44px; padding: 8px 10px; border: 1px solid var(--line); background: #0c0906; color: var(--text); font: 14px var(--mono); }
 
   /* ── hero readout ────────────────────────────────────────── */
   .hero {
@@ -98,8 +105,8 @@
   .stat .val { font-size: 24px; font-weight: 700; margin-top: 4px; font-variant-numeric: tabular-nums; }
 
   /* ── fuse bar (budget) ───────────────────────────────────── */
-  .fuse-head { display: flex; justify-content: space-between; margin-bottom: 8px; }
-  .fuse-head .right { color: var(--text); }
+  .fuse-head { display: flex; justify-content: space-between; gap: 8px 18px; flex-wrap: wrap; margin-bottom: 8px; }
+  .fuse-head .right { color: var(--text); overflow-wrap: anywhere; }
   .track {
     position: relative; height: 26px; border: 1px solid var(--line);
     background: #120d08; overflow: hidden;
@@ -117,14 +124,18 @@
   /* ── panels ──────────────────────────────────────────────── */
   .chartp { margin-top: 26px; }
   .chartp svg { width: 100%; height: 120px; display: block; margin-top: 10px; }
-  .grid { display: grid; grid-template-columns: 1.4fr 1fr; gap: 14px; margin-top: 14px; }
+  .grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
   @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } .hero { align-items: flex-start; flex-direction: column; } }
-  .panel { background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 10px; }
+  .panel { min-width: 0; background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 10px; }
+  /* Stale state is announced in text; ancestor opacity would make otherwise
+     accessible text fail contrast in offline/auth states. */
+  .last-update { margin-top: 6px; color: var(--faint); font-size: 11px; }
   .panel h2 {
     font-family: var(--cond); font-size: 11px; letter-spacing: .18em; font-weight: 700;
     color: var(--dim); padding-bottom: 10px; border-bottom: 1px solid var(--line-soft);
   }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  .table-scroll table { min-width: 640px; }
   th {
     font-family: var(--cond); font-size: 10px; letter-spacing: .14em; text-transform: uppercase;
     color: var(--faint); font-weight: 600; text-align: right; padding: 9px 0 5px 12px;
@@ -142,7 +153,7 @@
   .windows { display: flex; border: 1px solid var(--line); }
   .windows button {
     appearance: none; border: 0; border-right: 1px solid var(--line); background: #100c08;
-    color: var(--dim); padding: 7px 10px; font: 600 10px var(--cond); letter-spacing: .12em;
+    color: var(--dim); padding: 9px 12px; min-height: 44px; font: 600 10px var(--cond); letter-spacing: .12em;
     text-transform: uppercase; cursor: pointer;
   }
   .windows button:last-child { border-right: 0; }
@@ -157,7 +168,7 @@
   .source-chip.on { color: var(--ok); border-color: rgba(157,199,108,.22); }
   .source-chip.err { color: var(--warn); border-color: rgba(240,179,78,.3); }
   .sub-note { color: var(--faint); font-size: 11px; margin: 8px 0 3px; }
-  .table-scroll { overflow-x: auto; }
+  .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
   .source-name { color: var(--dim); }
   .model-indent { padding-left: 10px; }
   .section-kicker { margin-top: 28px; display: flex; align-items: center; gap: 10px; color: var(--faint); }
@@ -170,14 +181,27 @@
   .connect summary::-webkit-details-marker { display: none; }
   .connect summary::before { content: "+"; color: var(--ember); margin-right: 9px; }
   .connect[open] summary::before { content: "−"; }
-  .connect-body { border-top: 1px solid var(--line-soft); padding: 13px 16px 15px; display: grid; gap: 8px; }
-  .route { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: baseline; }
-  .route code { color: var(--ember-hi); overflow-wrap: anywhere; user-select: all; }
+  .connect-body { min-width: 0; border-top: 1px solid var(--line-soft); padding: 13px 16px 15px; display: grid; gap: 8px; }
+  .route { min-width: 0; display: grid; grid-template-columns: 150px minmax(0, 1fr); gap: 12px; align-items: baseline; }
+  .route-value { display: flex; gap: 8px; align-items: center; min-width: 0; }
+  .route code { min-width: 0; color: var(--ember-hi); overflow-wrap: anywhere; user-select: all; flex: 1; }
+  button { font-family: var(--mono); }
+  .copy, .retry {
+    appearance: none; border: 1px solid var(--line); background: #100c08; color: var(--text);
+    min-height: 36px; padding: 7px 10px; cursor: pointer; white-space: nowrap;
+  }
+  .copy:hover, .retry:hover { border-color: var(--ember); color: var(--ember-hi); }
+  :focus-visible { outline: 3px solid var(--ember-hi); outline-offset: 3px; }
+  .platforms { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
+  .platforms button[aria-pressed="true"] { color: var(--ember-hi); border-color: var(--ember); background: rgba(255,122,47,.12); }
+  .verify { margin-top: 6px; color: var(--dim); font-size: 12px; }
   .compatible { color: var(--faint); font-size: 11px; margin-top: 4px; }
   @media (max-width: 720px) {
     .local-head { flex-direction: column; }
     .token-grid { grid-template-columns: repeat(2, 1fr); }
     .token-cell { min-height: 48px; }
+    .route { grid-template-columns: 1fr; gap: 4px; }
+    .route-value { align-items: flex-start; }
   }
 
   /* ── waste receipt ───────────────────────────────────────── */
@@ -200,38 +224,63 @@
   footer { margin-top: 26px; color: var(--faint); font-size: 12px; text-align: center; letter-spacing: .04em; }
 
   /* ── load + update motion ────────────────────────────────── */
-  .reveal { opacity: 0; transform: translateY(10px); animation: rise .55s cubic-bezier(.2,.7,.2,1) forwards; }
+  .reveal { opacity: 1; transform: translateY(10px); animation: rise .55s cubic-bezier(.2,.7,.2,1) forwards; }
   .d1 { animation-delay: .06s } .d2 { animation-delay: .12s } .d3 { animation-delay: .18s }
   .d4 { animation-delay: .24s } .d5 { animation-delay: .30s }
-  @keyframes rise { to { opacity: 1; transform: none; } }
+  @keyframes rise { to { transform: none; } }
   .flash { animation: flash .45s ease-out; }
   @keyframes flash { 0% { color: var(--ember-hi); } }
-  @media (prefers-reduced-motion: reduce) { .reveal { animation: none; opacity: 1; transform: none; } .dot { animation: none; } }
+  @media (max-width: 430px) {
+    main { padding: 18px 12px 36px; }
+    header { align-items: flex-start; flex-direction: column; }
+    .brand .tag { display: block; margin: 5px 0 0; }
+    .stats { width: 100%; gap: 18px; flex-wrap: wrap; }
+    .stat .val { font-size: 20px; }
+    .windows { width: 100%; }
+    .windows button { flex: 1; }
+    .panel { padding-left: 12px; padding-right: 12px; }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; transition-duration: .01ms !important; }
+    .reveal { animation: none; opacity: 1; transform: none; }
+  }
 </style>
 </head>
 <body>
 <div class="scan" aria-hidden="true"></div>
 <main>
   <header class="reveal">
-    <div class="brand">🔥 BURN<em>BAN</em><span class="tag">MODEL SPEND METER</span></div>
-    <div class="status"><span id="dot" class="dot"></span><span id="statusText">LIVE</span>&nbsp;·&nbsp;<span id="clock">—</span></div>
+    <div class="brand">🔥 BURN<em>BAN</em><span class="tag">MODEL SPEND METER</span><span id="demoBadge" class="badge hidden">DEMO DATA</span></div>
+    <div class="status" role="status" aria-live="polite"><span id="dot" class="dot wait"></span><span id="statusText">LOADING</span>&nbsp;·&nbsp;<span id="clock">—</span></div>
   </header>
 
-  <section id="banBanner" class="ban hidden">🚫 Burn ban in effect — all agent spend paused<span class="dim">lift with: burnban lift</span></section>
+  <section id="banBanner" class="ban hidden" role="alert" aria-live="assertive"><span id="banText">🚫 Burn ban in effect — all agent spend paused</span><span id="banHint" class="dim">lift with: burnban lift</span></section>
 
-  <section class="panel local-usage reveal d1">
+  <section id="authPrompt" class="panel auth-prompt hidden" aria-labelledby="authTitle">
+    <h2 id="authTitle">Team gateway authentication</h2>
+    <p class="sub-note">Enter the shared Burnban token. It stays in this tab's session storage and is sent only in the <code>x-burnban-token</code> header—never in the URL.</p>
+    <div class="auth-row">
+      <label class="label" for="authToken">Burnban token</label>
+      <input id="authToken" type="password" autocomplete="off" spellcheck="false">
+      <button id="authSubmit" class="copy" type="button">Connect dashboard</button>
+    </div>
+    <div id="authError" class="sub-note" role="alert" aria-live="polite"></div>
+  </section>
+
+  <section id="localUsagePanel" class="panel local-usage reveal d1 hidden">
     <div class="local-head">
       <div>
         <div class="label">Auto-detected local agent logs</div>
         <div class="local-title">SUBSCRIPTION USAGE</div>
       </div>
       <div class="windows" aria-label="Subscription usage window">
-        <button type="button" data-window="today" class="active">today</button>
-        <button type="button" data-window="7d">7 days</button>
-        <button type="button" data-window="30d">30 days</button>
+        <button type="button" data-window="today" class="active" aria-pressed="true">today</button>
+        <button type="button" data-window="7d" aria-pressed="false">7 days</button>
+        <button type="button" data-window="30d" aria-pressed="false">30 days</button>
       </div>
     </div>
-    <div id="subLoading" class="sub-note">scanning Claude Code, Codex, Hermes Agent, OpenClaw, and Goose…</div>
+    <div id="subLoading" class="sub-note" role="status" aria-live="polite">scanning Claude Code, Codex, Hermes Agent, OpenClaw, and Goose…</div>
+    <div id="subError" class="error-box hidden" role="alert"><span id="subErrorText"></span><button id="subRetry" class="retry" type="button">Retry scan</button></div>
     <div id="subContent" class="hidden">
       <div class="sub-hero">
         <div>
@@ -247,7 +296,7 @@
         </div>
       </div>
       <div id="subSources" class="source-list"></div>
-      <div class="table-scroll">
+      <div class="table-scroll" role="region" aria-label="Subscription usage by source and model" tabindex="0">
         <table>
           <thead><tr><th>source</th><th>model</th><th>calls</th><th>input</th><th>output</th><th>cache r/w</th><th>API equiv.</th></tr></thead>
           <tbody id="subModels"></tbody>
@@ -259,26 +308,38 @@
 
   <div class="label section-kicker reveal d1">LIVE API-KEY PROXY · TODAY</div>
 
-  <details class="panel connect reveal d2">
+  <details id="connectPanel" class="panel connect reveal d2">
     <summary>Connect an API-key agent</summary>
     <div class="connect-body">
-      <div class="route"><span class="label">Claude Code</span><code id="routeAnthropic"></code></div>
-      <div class="route"><span class="label">Codex / OpenAI</span><code id="routeOpenAI"></code></div>
-      <div class="route"><span class="label">Hermes Agent</span><code id="routeHermes"></code></div>
-      <div class="route"><span class="label">Aider</span><code id="routeAider"></code></div>
-      <div class="route"><span class="label">Local Ollama</span><code id="routeOllama"></code></div>
-      <div class="route"><span class="label">Local vLLM</span><code id="routeVLLM"></code></div>
-      <div class="compatible">Also works with OpenClaw, Goose, Cline, Roo Code, Continue, Cursor, Windsurf, OpenCode, OpenRouter, Groq, Mistral, DeepSeek, and any OpenAI-compatible client. Set <code>x-burnban-agent</code> when a client supports custom headers for exact attribution.</div>
+      <div class="platforms" aria-label="Command shell">
+        <span class="label">Copy commands for</span>
+        <button id="platformPosix" class="copy" type="button" aria-pressed="true">macOS / Linux</button>
+        <button id="platformWindows" class="copy" type="button" aria-pressed="false">PowerShell</button>
+        <button id="copyAll" class="copy" type="button">Copy core setup</button>
+      </div>
+      <div id="teamAuthNote" class="error-box hidden">
+        Team authentication is required: a base URL alone is not enough. Every client must support the <code>x-burnban-token</code> custom header.
+        <div class="route" style="margin-top:8px"><span class="label">Claude Code auth</span><span class="route-value"><code id="routeAuth"></code><button class="copy" type="button" data-copy="routeAuth" aria-label="Copy Claude Code authentication command">Copy</button></span></div>
+      </div>
+      <div class="route"><span class="label">Claude Code</span><span class="route-value"><code id="routeAnthropic"></code><button class="copy" type="button" data-copy="routeAnthropic" aria-label="Copy Claude Code command">Copy</button></span></div>
+      <div class="route"><span class="label">Codex / OpenAI</span><span class="route-value"><code id="routeOpenAI"></code><button class="copy" type="button" data-copy="routeOpenAI" aria-label="Copy Codex or OpenAI command">Copy</button></span></div>
+      <div class="route"><span class="label">Hermes Agent</span><span class="route-value"><code id="routeHermes"></code><button class="copy" type="button" data-copy="routeHermes" aria-label="Copy Hermes command">Copy</button></span></div>
+      <div class="route"><span class="label">Aider</span><span class="route-value"><code id="routeAider"></code><button class="copy" type="button" data-copy="routeAider" aria-label="Copy Aider command">Copy</button></span></div>
+      <div class="route"><span class="label">Local Ollama</span><span class="route-value"><code id="routeOllama"></code><button class="copy" type="button" data-copy="routeOllama" aria-label="Copy Ollama command">Copy</button></span></div>
+      <div class="route"><span class="label">Local vLLM</span><span class="route-value"><code id="routeVLLM"></code><button class="copy" type="button" data-copy="routeVLLM" aria-label="Copy vLLM command">Copy</button></span></div>
+      <div id="compatibleNote" class="compatible">Also works with OpenClaw, Goose, Cline, Roo Code, Continue, Cursor, Windsurf, OpenCode, OpenRouter, Groq, Mistral, DeepSeek, and OpenAI-compatible clients. Set <code>x-burnban-agent</code> when a client supports custom headers for exact attribution.</div>
+      <div id="routeVerify" class="verify">After restarting your agent, run <code>burnban doctor</code>; this panel will also show when the first request arrives.</div>
     </div>
   </details>
 
+  <div id="proxyData" aria-busy="true">
   <section class="hero reveal d1">
     <div>
       <div class="label">Billed API-key spend today</div>
       <div id="total" class="big" aria-live="polite">$0.0000</div>
     </div>
     <div class="stats">
-      <div class="stat"><div class="label">Rate / hr</div><div id="rate" class="val">$0.0000</div></div>
+      <div class="stat"><div class="label">Last hour</div><div id="rate" class="val">$0.0000</div></div>
       <div class="stat"><div class="label">Requests</div><div id="reqs" class="val">0</div></div>
       <div class="stat"><div class="label">Cache hit</div><div id="cache" class="val">–</div></div>
     </div>
@@ -286,29 +347,29 @@
 
   <section class="reveal d2">
     <div class="fuse-head"><span id="fuseLabel" class="label">Daily budget</span><span id="fuseText" class="label right"></span></div>
-    <div class="track"><div id="fill" class="fill ok"></div></div>
+    <div id="budgetTrack" class="track" role="progressbar" aria-label="Budget utilization" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="fill" class="fill ok"></div></div>
     <div id="windows" class="label" style="margin-top:8px"></div>
   </section>
 
   <section class="panel chartp reveal d3">
     <h2>Burn — last 24h <span id="chartMax" style="float:right;color:var(--faint);letter-spacing:.08em"></span></h2>
-    <svg id="chart" viewBox="0 0 600 120" preserveAspectRatio="none" aria-label="hourly spend chart"></svg>
+    <svg id="chart" viewBox="0 0 600 120" preserveAspectRatio="none" role="img" aria-label="Hourly spend over the last 24 hours"></svg>
   </section>
 
   <section class="grid reveal d3">
     <div class="panel">
       <h2>By model — today</h2>
-      <table>
+      <div class="table-scroll" role="region" aria-label="API spend by model" tabindex="0"><table>
         <thead><tr><th>model</th><th>req</th><th>in</th><th>out</th><th>cache r/w</th><th>cost</th></tr></thead>
         <tbody id="models"></tbody>
-      </table>
+      </table></div>
     </div>
     <div class="panel">
       <h2>By agent — today</h2>
-      <table>
-        <thead><tr><th>agent</th><th>req</th><th>cost</th></tr></thead>
+      <div class="table-scroll" role="region" aria-label="API spend by agent" tabindex="0"><table>
+        <thead><tr><th>agent</th><th>req</th><th>cost</th><th>daily cap / left</th></tr></thead>
         <tbody id="agents"></tbody>
-      </table>
+      </table></div>
     </div>
   </section>
 
@@ -317,106 +378,178 @@
     <ul id="receipts"></ul>
   </section>
 
-  <footer class="reveal d5">localhost only · zero telemetry · keys pass through, never stored · <span id="ver">burnban</span></footer>
+  <div id="lastUpdate" class="last-update" role="status" aria-live="polite">Waiting for the first meter update…</div>
+  </div>
+
+  <footer class="reveal d5"><span id="exposure">local listener</span> · no additional telemetry · <span id="trafficMode">provider-bound traffic passes through</span> · keys never stored · <span id="ver">burnban</span></footer>
 </main>
 
 <script>
   const $ = id => document.getElementById(id);
-	  const TOKEN = (() => {
-	    const q = new URLSearchParams(location.search).get("token");
-	    if (q) {
-	      sessionStorage.setItem("bb_token", q);
-	      const clean = new URL(location.href);
-	      clean.searchParams.delete("token");
-	      history.replaceState(null, "", clean.pathname + clean.search + clean.hash);
-	    }
-	    return q || sessionStorage.getItem("bb_token") || "";
-	  })();
-  const fmt$ = v => "$" + (v >= 10 ? v.toFixed(2) : v.toFixed(4));
-  const fmtTok = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
-  const esc = s => s.replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  // Query-string tokens were accepted by older prereleases. Never consume a
+  // bookmarked value, but remove it from the current address/history entry
+  // before making any API request so it cannot linger or be copied onward.
+  try {
+    const legacyURL = new URL(window.location.href);
+    if (legacyURL.searchParams.has("token")) {
+      legacyURL.searchParams.delete("token");
+      const query = legacyURL.searchParams.toString();
+      history.replaceState(history.state, "", legacyURL.pathname + (query ? "?" + query : "") + legacyURL.hash);
+    }
+  } catch (_) { /* an unusual embedded browser may not expose history */ }
+  let TOKEN = (() => {
+    try {
+      return sessionStorage.getItem("bb_token") || "";
+    } catch (_) {
+      return "";
+    }
+  })();
+  const fmt$ = value => {
+    const v = Number(value || 0);
+    return "$" + (v >= 10 ? v.toFixed(2) : v.toFixed(4));
+  };
+  const fmtTok = value => {
+    const n = Number(value || 0);
+    return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e3 ? (n / 1e3).toFixed(1) + "K" : String(n);
+  };
+  const exactTok = value => Number(value || 0).toLocaleString();
+  const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const requestOptions = signal => ({
+    signal, cache: "no-store", credentials: "same-origin",
+    headers: TOKEN ? { "x-burnban-token": TOKEN } : {}
+  });
 
-  function setText(id, v) {
+  function setText(id, value) {
     const el = $(id);
-    if (el.textContent !== v) {
-      el.textContent = v;
-      el.classList.remove("flash"); void el.offsetWidth; el.classList.add("flash");
+    if (el.textContent !== value) {
+      el.textContent = value;
+      el.classList.remove("flash");
+      void el.offsetWidth;
+      el.classList.add("flash");
     }
   }
 
-  function online(ok) {
-    $("dot").className = "dot" + (ok ? "" : " off");
-    $("statusText").textContent = ok ? "LIVE" : "METER OFFLINE";
+  function connection(state, detail = "") {
+    const labels = {
+      loading: "LOADING", live: "LIVE", degraded: "DEGRADED",
+      auth: "AUTH REQUIRED", server: "SERVER ERROR", offline: "METER OFFLINE"
+    };
+    $("statusText").textContent = labels[state] || "UNKNOWN";
+    $("statusText").title = detail;
+    $("dot").className = "dot" + (state === "live" ? "" : state === "loading" || state === "degraded" ? " wait" : " off");
+    const loading = state === "loading";
+    $("proxyData").setAttribute("aria-busy", String(loading));
+    $("proxyData").classList.toggle("stale", !loading && state !== "live" && state !== "degraded");
+    $("authPrompt").classList.toggle("hidden", state !== "auth");
+    if (state === "auth") {
+      $("teamAuthNote").classList.remove("hidden");
+      $("authError").textContent = detail || "A valid Burnban token is required.";
+    }
   }
 
-  function renderModels(models) {
+  $("authSubmit").addEventListener("click", () => {
+    const value = $("authToken").value.trim();
+    if (!value) {
+      $("authError").textContent = "Enter the token configured on the Burnban server.";
+      return;
+    }
+    TOKEN = value;
+    try { sessionStorage.setItem("bb_token", TOKEN); } catch (_) { /* tab storage can be disabled */ }
+    $("authToken").value = "";
+    $("authError").textContent = "";
+    connection("loading");
+    tick();
+    series();
+    subscription();
+  });
+  $("authToken").addEventListener("keydown", event => {
+    if (event.key === "Enter") $("authSubmit").click();
+  });
+
+  function renderModels(models = []) {
     const tb = $("models");
     if (!models.length) {
       tb.innerHTML = '<tr class="empty"><td colspan="6">no proxied API-key traffic yet</td></tr>';
       return;
     }
     tb.innerHTML = models.map(m =>
-      `<tr><td class="name">${esc(m.model)}</td><td>${m.requests}</td><td>${fmtTok(m.in_tokens)}</td><td>${fmtTok(m.out_tokens)}</td><td>${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td><td class="cost">${fmt$(m.cost_usd)}</td></tr>`
+      `<tr><td class="name">${esc(m.model)}</td><td>${Number(m.requests || 0)}</td><td>${fmtTok(m.in_tokens)}</td><td>${fmtTok(m.out_tokens)}</td><td>${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td><td class="cost">${fmt$(m.cost_usd)}</td></tr>`
     ).join("");
   }
 
-  function renderAgents(agents) {
+  function renderAgents(agents = []) {
     const tb = $("agents");
     if (!agents.length) {
-      tb.innerHTML = '<tr class="empty"><td colspan="3">nobody is burning</td></tr>';
+      tb.innerHTML = '<tr class="empty"><td colspan="4">no attributed agents yet</td></tr>';
       return;
     }
-    tb.innerHTML = agents.map(a =>
-      `<tr><td class="name">${esc(a.agent)}</td><td>${a.requests}</td><td class="cost">${fmt$(a.cost_usd)}</td></tr>`
-    ).join("");
+    tb.innerHTML = agents.map(a => {
+      const cap = Number(a.cap_usd || 0);
+      const capText = cap > 0 ? `${fmt$(cap)} / ${fmt$(a.remaining_usd)} left` : "—";
+      return `<tr><td class="name">${esc(a.agent)}</td><td>${Number(a.requests || 0)}</td><td class="cost">${fmt$(a.cost_usd)}</td><td>${capText}</td></tr>`;
+    }).join("");
   }
 
   function renderReceipts(d) {
     const items = [];
+    if (d.health && !d.health.ok)
+      items.push(`meter is fail-closed: ${esc(d.health.detail || d.health.state || "health check failed")} — run burnban doctor`);
     if (d.dup_groups > 0)
-      items.push(`${d.dup_groups} duplicate request group(s) — <em>${fmt$(d.dup_wasted_usd)}</em> burned on identical calls`);
+      items.push(`${d.dup_groups} potential duplicate group(s) — <em>${fmt$(d.dup_wasted_usd)}</em> spent on repeated matching calls`);
     if (d.has_traffic && d.cache_hit_pct < 50 && d.requests >= 20)
-      items.push(`cache hit rate ${d.cache_hit_pct.toFixed(0)}% — paying full price for context the provider re-serves at a 90% discount`);
-    if (d.unpriced > 0)
-      items.push(`${d.unpriced} request(s) hit models with unknown pricing — recorded at $0, add them to ~/.burnban/pricing.json`);
-    if (d.estimated > 0)
-      items.push(`${d.estimated} response(s) carried no usage frame — output tokens estimated`);
+      items.push(`cache hit rate ${Number(d.cache_hit_pct).toFixed(0)}% — stable prompt prefixes may qualify for provider/model-specific cache discounts`);
+    if ((d.unknown_pricing || d.unpriced || 0) > 0)
+      items.push(`${d.unknown_pricing || d.unpriced} request(s) carried usage for unknown-price models — inspect with burnban pricing`);
+    if ((d.unmetered || 0) > 0)
+      items.push(`${d.unmetered} response(s) had no usable accounting; active caps fail safe until health is restored`);
+    if ((d.incomplete || 0) > 0)
+      items.push(`${d.incomplete} response(s) were partial or cancelled — recorded cost is a lower-bound estimate`);
+    if ((d.estimated || 0) > 0)
+      items.push(`${d.estimated} response(s) used estimated token counts`);
+    if ((d.enforcement_gaps || 0) > 0)
+      items.push(`${d.enforcement_gaps} enforcement-safety event(s) need attention — run burnban doctor`);
+    if ((d.fee_unpriced || 0) > 0)
+      items.push(`${d.fee_unpriced} call(s) used provider-hosted fee dimensions that are tracked but not priced`);
     $("receipts").innerHTML = items.length
-      ? items.map(i => `<li>${i}</li>`).join("")
-      : '<li class="clean">none — clean burn 🔥</li>';
+      ? items.map(item => `<li>${item}</li>`).join("")
+      : '<li class="clean">no issues detected by the current checks</li>';
   }
 
   const sourceNames = {
     "claude-code": "Claude Code", codex: "Codex", hermes: "Hermes Agent", openclaw: "OpenClaw", goose: "Goose"
   };
   let subWindow = "today";
-
-  function exactTok(n) { return Number(n || 0).toLocaleString(); }
+  let subController = null;
+  let subSequence = 0;
+  let localUsageEnabled = false;
 
   function renderSubscription(d) {
     $("subLoading").classList.add("hidden");
+    $("subError").classList.add("hidden");
     $("subContent").classList.remove("hidden");
-    setText("subCost", fmt$(d.api_usd || 0));
+    setText("subCost", fmt$(d.api_usd));
     setText("subCalls", exactTok(d.calls));
-    setText("subIn", fmtTok(d.in_tokens || 0));
-    setText("subOut", fmtTok(d.out_tokens || 0));
-    setText("subCacheRead", fmtTok(d.cache_read_tokens || 0));
-    setText("subCacheWrite", fmtTok(d.cache_write_tokens || 0));
+    setText("subIn", fmtTok(d.in_tokens));
+    setText("subOut", fmtTok(d.out_tokens));
+    setText("subCacheRead", fmtTok(d.cache_read_tokens));
+    setText("subCacheWrite", fmtTok(d.cache_write_tokens));
     $("subIn").title = exactTok(d.in_tokens) + " input tokens";
     $("subOut").title = exactTok(d.out_tokens) + " output tokens";
     $("subCacheRead").title = exactTok(d.cache_read_tokens) + " cache-read tokens";
     $("subCacheWrite").title = exactTok(d.cache_write_tokens) + " cache-write tokens";
     $("subCostLabel").textContent = "API equivalent · " + d.label;
 
-    const detected = d.providers.filter(p => p.detected);
-    $("subSources").innerHTML = d.providers.map(p => {
-      const cls = p.error ? "source-chip err" : "source-chip" + (p.detected ? " on" : "");
-      const state = p.error ? "scan issue" : p.detected ? `${p.sessions} session${p.sessions === 1 ? "" : "s"}` : "not found";
-      return `<span class="${cls}"${p.error ? ` title="${esc(p.error)}"` : ""}>${esc(sourceNames[p.provider] || p.provider)} · ${state}</span>`;
+    const providers = Array.isArray(d.providers) ? d.providers : [];
+    const detected = providers.filter(p => p.detected);
+    $("subSources").innerHTML = providers.map(p => {
+      const hasIssue = Boolean(p.error || p.partial || (p.warnings && p.warnings.length));
+      const cls = hasIssue ? "source-chip err" : "source-chip" + (p.detected ? " on" : "");
+      const state = hasIssue ? "partial scan" : p.detected ? `${Number(p.sessions || 0)} session${p.sessions === 1 ? "" : "s"}` : "not found";
+      return `<span class="${cls}">${esc(sourceNames[p.provider] || p.provider)} · ${state}</span>`;
     }).join("");
 
     const rows = [];
-    d.providers.forEach(p => p.models.forEach(m => rows.push(
+    providers.forEach(p => (p.models || []).forEach(m => rows.push(
       `<tr><td class="source-name">${esc(sourceNames[p.provider] || p.provider)}</td>` +
       `<td class="name model-indent">${esc(m.model)}</td><td>${exactTok(m.calls)}</td>` +
       `<td title="${exactTok(m.in_tokens)}">${fmtTok(m.in_tokens)}</td>` +
@@ -428,114 +561,250 @@
       `<tr class="empty"><td colspan="7">${detected.length ? "no local usage in this window" : "no supported local agent logs found"}</td></tr>`;
     const notes = ["Local subscription usage is not a per-token bill. Dollar values show what the same tokens would cost at API prices."];
     if (d.unpriced_tokens > 0) notes.push(exactTok(d.unpriced_tokens) + " tokens use models not yet in the pricing table.");
+    if (Number(d.server_tool_usd || 0) > 0) notes.push(fmt$(d.server_tool_usd) + " of API equivalent came from provider-hosted tools.");
+    if (d.service_tiers && Object.keys(d.service_tiers).length) notes.push("Service tiers: " + Object.entries(d.service_tiers).map(([name, count]) => `${name} ${count}`).join(", ") + ".");
+    if (d.inference_geos && Object.keys(d.inference_geos).length) notes.push("Inference geographies: " + Object.entries(d.inference_geos).map(([name, count]) => `${name} ${count}`).join(", ") + ".");
+    providers.forEach(p => {
+      if (p.error) notes.push(`${sourceNames[p.provider] || p.provider}: ${p.error}`);
+      (p.warnings || []).forEach(warning => notes.push(`${sourceNames[p.provider] || p.provider}: ${warning}`));
+      if (p.skipped_files > 0) notes.push(`${sourceNames[p.provider] || p.provider}: ${p.skipped_files} file(s) skipped.`);
+    });
     $("subNote").textContent = notes.join(" ");
   }
 
   async function subscription() {
+    if (!localUsageEnabled) return;
+    const sequence = ++subSequence;
+    if (subController) subController.abort();
+    subController = new AbortController();
+    $("subLoading").textContent = "scanning local agent logs…";
+    $("subLoading").classList.remove("hidden");
+    $("subError").classList.add("hidden");
     try {
-      const opts = TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined;
-      const r = await fetch("/api/subsidy?window=" + encodeURIComponent(subWindow), opts);
-      if (!r.ok) throw new Error(r.status);
-      renderSubscription(await r.json());
-    } catch (e) {
-      $("subLoading").textContent = "could not scan local agent logs — the live proxy is still running";
+      const response = await fetch("/api/subsidy?window=" + encodeURIComponent(subWindow), requestOptions(subController.signal));
+      if (!response.ok) throw new Error(response.status === 401 ? "authentication required" : `scan returned HTTP ${response.status}`);
+      const data = await response.json();
+      if (sequence === subSequence) renderSubscription(data);
+    } catch (error) {
+      if (error.name === "AbortError" || sequence !== subSequence) return;
+      $("subLoading").classList.add("hidden");
+      $("subErrorText").textContent = "Local log scan failed: " + error.message + ". Proxy metering continues independently.";
+      $("subError").classList.remove("hidden");
     }
   }
 
   document.querySelectorAll("[data-window]").forEach(button => button.addEventListener("click", () => {
     subWindow = button.dataset.window;
-    document.querySelectorAll("[data-window]").forEach(b => b.classList.toggle("active", b === button));
-    $("subLoading").textContent = "scanning local agent logs…";
-    $("subLoading").classList.remove("hidden");
+    document.querySelectorAll("[data-window]").forEach(other => {
+      const selected = other === button;
+      other.classList.toggle("active", selected);
+      other.setAttribute("aria-pressed", String(selected));
+    });
+    $("subContent").classList.add("hidden");
     subscription();
   }));
+  $("subRetry").addEventListener("click", subscription);
 
-  $("routeAnthropic").textContent = "ANTHROPIC_BASE_URL=" + location.origin + "/anthropic";
-  $("routeOpenAI").textContent = "OPENAI_BASE_URL=" + location.origin + "/openai/v1";
-  $("routeHermes").textContent = "OPENAI_BASE_URL=" + location.origin + "/openrouter/v1";
-  $("routeAider").textContent = "AIDER_OPENAI_API_BASE=" + location.origin + "/openrouter/v1";
-  $("routeOllama").textContent = "OPENAI_BASE_URL=" + location.origin + "/ollama/v1";
-  $("routeVLLM").textContent = "OPENAI_BASE_URL=" + location.origin + "/vllm/v1";
+  let platform = "posix";
+  let authRequired = false;
+  const routes = [
+    ["routeAnthropic", "ANTHROPIC_BASE_URL", "/anthropic"],
+    ["routeOpenAI", "OPENAI_BASE_URL", "/openai/v1"],
+    ["routeHermes", "OPENAI_BASE_URL", "/openrouter/v1"],
+    ["routeAider", "AIDER_OPENAI_API_BASE", "/openrouter/v1"],
+    ["routeOllama", "OPENAI_BASE_URL", "/ollama/v1"],
+    ["routeVLLM", "OPENAI_BASE_URL", "/vllm/v1"]
+  ];
 
-  async function tick() {
+  function routeCommand(key, path) {
+    const value = location.origin + path;
+    return platform === "powershell" ? `$env:${key}='${value}'` : `export ${key}='${value}'`;
+  }
+
+  function renderRoutes() {
+    routes.forEach(([id, key, path]) => { $(id).textContent = routeCommand(key, path); });
+    $("routeAuth").textContent = platform === "powershell"
+      ? '$env:ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: $env:BURNBAN_TOKEN"'
+      : 'export ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ${BURNBAN_TOKEN:?set BURNBAN_TOKEN}"';
+    $("platformPosix").setAttribute("aria-pressed", String(platform === "posix"));
+    $("platformWindows").setAttribute("aria-pressed", String(platform === "powershell"));
+    $("teamAuthNote").classList.toggle("hidden", !authRequired);
+    $("compatibleNote").textContent = authRequired
+      ? "Team mode requires custom-header support in every client. Clients that cannot send x-burnban-token cannot use this gateway. Set x-burnban-agent as a second custom header for exact attribution."
+      : "Also works with OpenClaw, Goose, Cline, Roo Code, Continue, Cursor, Windsurf, OpenCode, OpenRouter, Groq, Mistral, DeepSeek, and OpenAI-compatible clients. Set x-burnban-agent when a client supports custom headers for exact attribution.";
+  }
+
+  async function copyText(value, button) {
     try {
-      const r = await fetch("/api/summary", TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined);
-      if (!r.ok) throw new Error(r.status);
-      const d = await r.json();
-      online(true);
-      setText("total", fmt$(d.total_cost));
-      setText("rate", fmt$(d.last_hour_cost));
-      setText("reqs", String(d.requests));
-      setText("cache", d.has_traffic ? d.cache_hit_pct.toFixed(0) + "%" : "–");
-      $("clock").textContent = new Date().toLocaleTimeString();
-      $("ver").textContent = "burnban " + d.version;
-      $("banBanner").classList.toggle("hidden", !d.ban_active);
-
-      const fill = $("fill"), ftext = $("fuseText"), big = $("total");
-      // The fuse shows the tightest configured window, so a weekly- or
-      // monthly-only budget never reads as "no cap set" while it enforces.
-      const fuse =
-	        d.cap_daily_usd > 0   ? {label: "Daily budget",   spent: d.cap_daily_cost, cap: d.cap_daily_usd} :
-        d.cap_weekly_usd > 0  ? {label: "Weekly budget",  spent: d.week_cost,  cap: d.cap_weekly_usd} :
-        d.cap_monthly_usd > 0 ? {label: "Monthly budget", spent: d.month_cost, cap: d.cap_monthly_usd} : null;
-      if (fuse) {
-        const frac = Math.min(1, fuse.spent / fuse.cap);
-        $("fuseLabel").textContent = fuse.label;
-        fill.style.width = (frac * 100).toFixed(1) + "%";
-        fill.className = "fill " + (frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok");
-        ftext.textContent = fmt$(fuse.spent) + " / " + fmt$(fuse.cap) + (d.override_today ? " · local caps overridden" : "") + (d.external_policy ? " · org policy" : "");
-        big.classList.toggle("hot", frac >= .9);
+      if (navigator.clipboard && window.isSecureContext) {
+        await navigator.clipboard.writeText(value);
       } else {
-        $("fuseLabel").textContent = "Daily budget";
-        fill.style.width = "0%";
-        ftext.textContent = "no cap set — burnban cap --daily 10";
-        big.classList.remove("hot");
+        const field = document.createElement("textarea");
+        field.value = value;
+        field.setAttribute("readonly", "");
+        field.style.position = "fixed";
+        field.style.opacity = "0";
+        document.body.appendChild(field);
+        field.select();
+        if (!document.execCommand("copy")) throw new Error("copy unavailable");
+        field.remove();
       }
-      const wins = [];
-      if (d.cap_weekly_usd > 0) wins.push("week " + fmt$(d.week_cost) + " / " + fmt$(d.cap_weekly_usd));
-      if (d.cap_monthly_usd > 0) wins.push("month " + fmt$(d.month_cost) + " / " + fmt$(d.cap_monthly_usd));
-      $("windows").textContent = wins.join(" · ");
-      renderModels(d.models);
-      renderAgents(d.agents);
-      renderReceipts(d);
-    } catch (e) {
-      online(false);
+      const old = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = old; }, 1200);
+    } catch (_) {
+      button.textContent = "Select text";
     }
   }
 
-  function drawChart(pts) {
+  $("platformPosix").addEventListener("click", () => { platform = "posix"; renderRoutes(); });
+  $("platformWindows").addEventListener("click", () => { platform = "powershell"; renderRoutes(); });
+  document.querySelectorAll("[data-copy]").forEach(button => button.addEventListener("click", () => copyText($(button.dataset.copy).textContent, button)));
+  $("copyAll").addEventListener("click", event => {
+    const commands = [$("routeAnthropic").textContent, $("routeOpenAI").textContent];
+    if (authRequired) commands.push($("routeAuth").textContent);
+    copyText(commands.join("\n"), event.currentTarget);
+  });
+  renderRoutes();
+
+  function legacyBudgets(d) {
+    const budgets = [];
+    if (d.cap_daily_usd > 0) budgets.push({ name: "daily", spent_usd: d.cap_daily_cost, cap_usd: d.cap_daily_usd, pct: d.cap_daily_cost / d.cap_daily_usd * 100, reset: "at midnight" });
+    if (d.cap_weekly_usd > 0) budgets.push({ name: "weekly", spent_usd: d.week_cost, cap_usd: d.cap_weekly_usd, pct: d.week_cost / d.cap_weekly_usd * 100, reset: "Monday" });
+    if (d.cap_monthly_usd > 0) budgets.push({ name: "monthly", spent_usd: d.month_cost, cap_usd: d.cap_monthly_usd, pct: d.month_cost / d.cap_monthly_usd * 100, reset: "on the 1st" });
+    return budgets;
+  }
+
+  function renderBudgets(d) {
+    const budgets = Array.isArray(d.budgets) && d.budgets.length ? d.budgets : legacyBudgets(d);
+    const fill = $("fill"), text = $("fuseText"), big = $("total"), track = $("budgetTrack");
+    if (!budgets.length) {
+      $("fuseLabel").textContent = "Budget guardrail";
+      fill.style.width = "0%";
+      fill.className = "fill ok";
+      text.textContent = "no cap set — burnban cap --daily 10";
+      $("windows").textContent = "";
+      big.classList.remove("hot");
+      track.setAttribute("aria-valuenow", "0");
+      track.setAttribute("aria-valuetext", "No cap configured");
+      return;
+    }
+    const fuse = budgets.reduce((tightest, item) => Number(item.pct || 0) > Number(tightest.pct || 0) ? item : tightest);
+    const pct = Math.max(0, Number(fuse.pct || (fuse.spent_usd / fuse.cap_usd * 100)));
+    const frac = Math.min(1, pct / 100);
+    $("fuseLabel").textContent = fuse.name[0].toUpperCase() + fuse.name.slice(1) + " budget · tightest window";
+    fill.style.width = (frac * 100).toFixed(1) + "%";
+    fill.className = "fill " + (frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok");
+    text.textContent = fmt$(fuse.spent_usd) + " / " + fmt$(fuse.cap_usd) + (d.override_today ? " · local caps overridden" : "") + (fuse.source === "external" || fuse.source === "both" ? " · org policy" : "");
+    big.classList.toggle("hot", frac >= .9);
+    track.setAttribute("aria-valuenow", Math.min(100, pct).toFixed(1));
+    track.setAttribute("aria-valuetext", `${fuse.name} budget ${pct.toFixed(1)} percent used; ${fmt$(fuse.remaining_usd)} remaining`);
+    $("windows").textContent = budgets.map(item => `${item.name} ${fmt$(item.spent_usd)} / ${fmt$(item.cap_usd)} · ${Number(item.pct || 0).toFixed(0)}% · resets ${item.reset}`).join("   |   ");
+  }
+
+  let tickRunning = false;
+  let lastSuccess = null;
+  async function tick() {
+    if (tickRunning) return;
+    tickRunning = true;
+    try {
+      const response = await fetch("/api/summary", requestOptions());
+      if (!response.ok) {
+        const error = new Error(`HTTP ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
+      const d = await response.json();
+      connection(d.health && !d.health.ok ? "degraded" : "live", d.health ? d.health.detail : "");
+      lastSuccess = new Date();
+      setText("total", fmt$(d.total_cost));
+      setText("rate", fmt$(d.last_hour_cost));
+      setText("reqs", String(d.requests || 0));
+      setText("cache", d.has_traffic ? Number(d.cache_hit_pct).toFixed(0) + "%" : "–");
+      $("clock").textContent = lastSuccess.toLocaleTimeString();
+      $("lastUpdate").textContent = "Last successful update " + lastSuccess.toLocaleTimeString();
+      $("ver").textContent = "burnban " + d.version;
+      authRequired = Boolean(d.auth_required);
+      renderRoutes();
+      $("exposure").textContent = d.exposure === "team/network" ? (d.auth_required ? "team/network listener · token protected" : "team/network listener") : "localhost listener";
+      $("demoBadge").classList.toggle("hidden", !d.demo);
+      $("connectPanel").classList.toggle("hidden", Boolean(d.demo));
+      $("trafficMode").textContent = d.demo ? "provider traffic disabled in demo" : "provider-bound traffic passes through";
+      const localUsageWasEnabled = localUsageEnabled;
+      localUsageEnabled = Boolean(d.local_usage_enabled);
+      $("localUsagePanel").classList.toggle("hidden", !localUsageEnabled);
+      if (localUsageEnabled && !localUsageWasEnabled) subscription();
+      $("banBanner").classList.toggle("hidden", !d.ban_active);
+      $("banText").textContent = d.external_ban ? "🚫 Organization burn ban — all agent spend paused" : "🚫 Burn ban in effect — all agent spend paused";
+      $("banHint").textContent = d.external_ban ? "external policy · contact your administrator" : "lift with: burnban lift";
+      if (d.last_request_at) {
+        $("routeVerify").textContent = "Routing verified · last proxied request " + new Date(d.last_request_at).toLocaleString() + ".";
+      } else {
+        $("routeVerify").textContent = "Waiting for the first proxied request. Restart your agent, then run burnban doctor.";
+      }
+      renderBudgets(d);
+      renderModels(d.models);
+      renderAgents(d.agents);
+      renderReceipts(d);
+    } catch (error) {
+      if (error.status === 401) {
+        TOKEN = "";
+        authRequired = true;
+        try { sessionStorage.removeItem("bb_token"); } catch (_) { /* tab storage can be disabled */ }
+        renderRoutes();
+        connection("auth", "Enter the Burnban token configured by the gateway operator.");
+      }
+      else if (error.status >= 500) connection("server", error.message);
+      else connection("offline", error.message);
+      $("clock").textContent = new Date().toLocaleTimeString();
+      $("lastUpdate").textContent = lastSuccess ? "Data is stale · last successful update " + lastSuccess.toLocaleTimeString() : "No successful meter update yet";
+    } finally {
+      tickRunning = false;
+    }
+  }
+
+  function drawChart(points) {
+    const pts = Array.isArray(points) ? points : [];
     if (!pts.length) return;
     const svg = $("chart");
     const W = 600, H = 120, P = 6;
-    const max = Math.max(...pts.map(p => p.cost), 0.0001);
-    const x = i => P + i * (W - 2 * P) / Math.max(pts.length - 1, 1);
-    const y = c => H - P - (c / max) * (H - 2 * P);
-    let d = "";
-    pts.forEach((p, i) => { d += (i ? "L" : "M") + x(i).toFixed(1) + "," + y(p.cost).toFixed(1); });
-    const area = d + `L${x(pts.length - 1).toFixed(1)},${H - P}L${x(0).toFixed(1)},${H - P}Z`;
+    const maxCost = Math.max(...pts.map(point => Number(point.cost || 0)), 0.0001);
+    const x = index => P + index * (W - 2 * P) / Math.max(pts.length - 1, 1);
+    const y = cost => H - P - (cost / maxCost) * (H - 2 * P);
+    let path = "";
+    pts.forEach((point, index) => { path += (index ? "L" : "M") + x(index).toFixed(1) + "," + y(Number(point.cost || 0)).toFixed(1); });
+    const area = path + `L${x(pts.length - 1).toFixed(1)},${H - P}L${x(0).toFixed(1)},${H - P}Z`;
     svg.innerHTML =
       '<defs><linearGradient id="g" x1="0" y1="0" x2="0" y2="1">' +
       '<stop offset="0" stop-color="#ff7a2f" stop-opacity=".4"/>' +
       '<stop offset="1" stop-color="#ff7a2f" stop-opacity="0"/>' +
       "</linearGradient></defs>" +
-      `<path d="${area}" fill="url(#g)"/>` +
-      `<path d="${d}" fill="none" stroke="#ff7a2f" stroke-width="2" stroke-linejoin="round"/>`;
-    $("chartMax").textContent = "peak " + fmt$(max) + "/hr";
+      `<path d="${area}" fill="url(#g)"/><path d="${path}" fill="none" stroke="#ff7a2f" stroke-width="2" stroke-linejoin="round"/>`;
+    $("chartMax").textContent = "peak " + fmt$(maxCost) + "/hr";
+    svg.setAttribute("aria-label", "Hourly spend over the last 24 hours; peak " + fmt$(maxCost) + " per hour");
   }
 
+  let seriesRunning = false;
   async function series() {
+    if (seriesRunning) return;
+    seriesRunning = true;
     try {
-      const r = await fetch("/api/series", TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined);
-      if (r.ok) drawChart(await r.json());
-    } catch (e) { /* chart is decorative; the tick loop owns the offline state */ }
+      const response = await fetch("/api/series", requestOptions());
+      if (response.ok) drawChart(await response.json());
+    } catch (_) {
+      // Summary polling owns connection state; the chart may remain stale.
+    } finally {
+      seriesRunning = false;
+    }
   }
 
+  connection("loading");
   tick();
   series();
-  subscription();
-  setInterval(tick, 2000);
-  setInterval(series, 15000);
-  setInterval(subscription, 30000);
+  setInterval(() => { if (!document.hidden) tick(); }, 2000);
+  setInterval(() => { if (!document.hidden) series(); }, 15000);
+  setInterval(() => { if (!document.hidden) subscription(); }, 30000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) { tick(); series(); } });
 </script>
 </body>
 </html>

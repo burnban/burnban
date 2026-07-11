@@ -1,6 +1,7 @@
 // Package mcp exposes burnban over the Model Context Protocol (stdio), so
 // Claude Code, Claude Desktop, Cursor — anything that speaks MCP — can ask
-// about spend and control budgets. Registration is one line:
+// about spend. Budget mutations are available only when the operator starts
+// the server with the explicit --allow-budget-admin capability.
 //
 //	claude mcp add burnban -- burnban mcp
 package mcp
@@ -11,20 +12,26 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
+	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 )
 
 const protocolVersion = "2025-06-18"
 
 type Server struct {
-	S       *store.Store
-	Version string
-	In      io.Reader
-	Out     io.Writer
+	S                *store.Store
+	Prices           *pricing.Table
+	Version          string
+	In               io.Reader
+	Out              io.Writer
+	AllowBudgetAdmin bool
 }
 
 type request struct {
@@ -79,14 +86,19 @@ func (s *Server) handle(req *request) *response {
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": toolDefs()}
+		resp.Result = map[string]any{"tools": toolDefs(s.AllowBudgetAdmin)}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
-			Arguments json.RawMessage `json:"arguments"`
+			Arguments json.RawMessage `json:"arguments,omitempty"`
+			Meta      json.RawMessage `json:"_meta,omitempty"`
 		}
-		if err := json.Unmarshal(req.Params, &p); err != nil {
+		if err := decodeObject(req.Params, &p); err != nil {
 			resp.Error = &rpcError{Code: -32602, Message: "bad params: " + err.Error()}
+			break
+		}
+		if strings.TrimSpace(p.Name) == "" {
+			resp.Error = &rpcError{Code: -32602, Message: "bad params: name is required"}
 			break
 		}
 		text, err := s.call(p.Name, p.Arguments)
@@ -109,15 +121,15 @@ func result(text string, isErr bool) map[string]any {
 	}
 }
 
-func toolDefs() []map[string]any {
+func toolDefs(allowBudgetAdmin bool) []map[string]any {
 	obj := func(props map[string]any, required ...string) map[string]any {
-		schema := map[string]any{"type": "object", "properties": props}
+		schema := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
 		if len(required) > 0 {
 			schema["required"] = required
 		}
 		return schema
 	}
-	return []map[string]any{
+	tools := []map[string]any{
 		{
 			"name":        "spend_summary",
 			"description": "Spend across all metered AI agents: totals, per-model and per-agent breakdown, cache economics, and waste receipts.",
@@ -127,31 +139,43 @@ func toolDefs() []map[string]any {
 		},
 		{
 			"name":        "burn_status",
-			"description": "Current budget state: today's spend, last-hour rate, daily cap, and whether a burn ban is in effect.",
-			"inputSchema": obj(map[string]any{}),
+			"description": "Current global and per-agent budget state, including spent, cap, remaining, overrides, and burn bans.",
+			"inputSchema": obj(map[string]any{
+				"agent": map[string]any{"type": "string", "minLength": 1, "description": "optional: return status for one reported agent name"},
+			}),
 		},
 		{
+			"name":        "pricing_diagnostics",
+			"description": "Pricing-table version, verification date, provenance, overrides, and any entries past their verified validity window.",
+			"inputSchema": obj(map[string]any{}),
+		},
+	}
+	if !allowBudgetAdmin {
+		return tools
+	}
+	return append(tools,
+		map[string]any{
 			"name":        "set_daily_cap",
-			"description": "Set a USD spend cap enforced by the proxy (requests past it get a 402). Pass 0 to remove the cap. With agent set, caps only that agent (daily window only). Window may be daily (default), weekly (resets Monday), or monthly (resets the 1st).",
+			"description": "Set the USD threshold after which new proxy requests get a 402. Pass 0 to remove it. In-flight requests can finish above the threshold. With agent set, applies to that agent's daily window only.",
 			"inputSchema": obj(map[string]any{
 				"usd":    map[string]any{"type": "number", "description": "cap in USD; 0 removes it"},
 				"window": map[string]any{"type": "string", "enum": []string{"daily", "weekly", "monthly"}, "description": "budget window (default daily)"},
 				"agent":  map[string]any{"type": "string", "description": "optional: cap a single agent by its reported name (e.g. claude-cli)"},
 			}, "usd"),
 		},
-		{
+		map[string]any{
 			"name":        "burn_ban",
 			"description": "Emergency stop: immediately pause ALL agent spend until the ban is lifted.",
 			"inputSchema": obj(map[string]any{}),
 		},
-		{
+		map[string]any{
 			"name":        "lift_burn_ban",
 			"description": "Lift the burn ban so spend can resume.",
 			"inputSchema": obj(map[string]any{
 				"today_override": map[string]any{"type": "boolean", "description": "also override ALL budget caps (daily, weekly, monthly, per-agent) for the rest of today"},
 			}),
 		},
-	}
+	)
 }
 
 func (s *Server) call(name string, args json.RawMessage) (string, error) {
@@ -160,27 +184,49 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		var a struct {
 			Since string `json:"since"`
 		}
-		if len(args) > 0 {
-			if err := json.Unmarshal(args, &a); err != nil {
-				return "", fmt.Errorf("bad arguments: %w", err)
-			}
+		if err := decodeObject(args, &a); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
 		}
 		return s.spendSummary(a.Since)
 	case "burn_status":
-		return s.burnStatus()
-	case "set_daily_cap":
 		var a struct {
-			USD    float64 `json:"usd"`
-			Window string  `json:"window"`
-			Agent  string  `json:"agent"`
+			Agent string `json:"agent"`
 		}
-		if err := json.Unmarshal(args, &a); err != nil {
+		if err := decodeObject(args, &a); err != nil {
 			return "", fmt.Errorf("bad arguments: %w", err)
 		}
-		if a.USD < 0 {
+		if a.Agent != "" && strings.TrimSpace(a.Agent) == "" {
+			return "", fmt.Errorf("agent must not be blank")
+		}
+		return s.burnStatus(a.Agent)
+	case "pricing_diagnostics":
+		if err := decodeObject(args, &struct{}{}); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
+		}
+		return s.pricingDiagnostics()
+	case "set_daily_cap":
+		if err := s.requireBudgetAdmin(); err != nil {
+			return "", err
+		}
+		var a struct {
+			USD    *float64 `json:"usd"`
+			Window string   `json:"window"`
+			Agent  string   `json:"agent"`
+		}
+		if err := decodeObject(args, &a); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
+		}
+		if a.USD == nil {
+			return "", fmt.Errorf("bad arguments: usd is required")
+		}
+		usd := *a.USD
+		if math.IsNaN(usd) || math.IsInf(usd, 0) {
+			return "", fmt.Errorf("cap must be finite")
+		}
+		if usd < 0 {
 			return "", fmt.Errorf("cap must be >= 0")
 		}
-		if a.USD != 0 && a.USD < 0.01 {
+		if usd != 0 && usd < 0.01 {
 			return "", fmt.Errorf("caps below $0.01 are not enforceable — use burn_ban to stop all spend")
 		}
 		win, ok := budget.WindowByName(a.Window)
@@ -189,12 +235,15 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		}
 		key, scope := win.Key, win.Name+" cap"
 		if a.Agent != "" {
+			if strings.TrimSpace(a.Agent) == "" {
+				return "", fmt.Errorf("agent must not be blank")
+			}
 			if win.Name != "daily" {
 				return "", fmt.Errorf("per-agent caps are daily-only for now")
 			}
 			key, scope = budget.KeyAgentCapPrefix+a.Agent, fmt.Sprintf("daily cap for agent %q", a.Agent)
 		}
-		if a.USD == 0 {
+		if usd == 0 {
 			if err := s.S.DeleteSetting(key); err != nil {
 				return "", err
 			}
@@ -205,7 +254,7 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 			}
 			return scope + " removed", nil
 		}
-		if err := s.S.SetSetting(key, strconv.FormatFloat(a.USD, 'f', -1, 64)); err != nil {
+		if err := s.S.SetSetting(key, strconv.FormatFloat(usd, 'f', -1, 64)); err != nil {
 			return "", err
 		}
 		if a.Agent == "" {
@@ -214,20 +263,27 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 				return "", err
 			}
 		}
-		return fmt.Sprintf("%s set to $%.2f — the proxy refuses spend past it with a 402", scope, a.USD), nil
+		return fmt.Sprintf("%s set to $%.2f — new requests get a 402 after recorded spend reaches it", scope, usd), nil
 	case "burn_ban":
+		if err := s.requireBudgetAdmin(); err != nil {
+			return "", err
+		}
+		if err := decodeObject(args, &struct{}{}); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
+		}
 		if err := s.S.SetSetting(budget.KeyBanActive, "1"); err != nil {
 			return "", err
 		}
 		return "🚫 local burn ban in effect — all agent spend is paused until lifted", nil
 	case "lift_burn_ban":
+		if err := s.requireBudgetAdmin(); err != nil {
+			return "", err
+		}
 		var a struct {
 			TodayOverride bool `json:"today_override"`
 		}
-		if len(args) > 0 {
-			if err := json.Unmarshal(args, &a); err != nil {
-				return "", fmt.Errorf("bad arguments: %w", err)
-			}
+		if err := decodeObject(args, &a); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
 		}
 		if err := s.S.DeleteSetting(budget.KeyBanActive); err != nil {
 			return "", err
@@ -248,6 +304,87 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func decodeObject(raw json.RawMessage, dst any) error {
+	if len(bytes.TrimSpace(raw)) == 0 {
+		raw = json.RawMessage(`{}`)
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '{' {
+		return fmt.Errorf("arguments must be a JSON object")
+	}
+	if err := rejectDuplicateKeys(trimmed); err != nil {
+		return err
+	}
+	dec := json.NewDecoder(bytes.NewReader(trimmed))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		if err == nil {
+			return fmt.Errorf("multiple JSON values are not allowed")
+		}
+		return fmt.Errorf("trailing data: %w", err)
+	}
+	return nil
+}
+
+func rejectDuplicateKeys(data []byte) error {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	return scanJSONValue(dec)
+}
+
+func scanJSONValue(dec *json.Decoder) error {
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, ok := token.(json.Delim)
+	if !ok {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := map[string]struct{}{}
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("object key must be a string")
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate JSON field %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	case '[':
+		for dec.More() {
+			if err := scanJSONValue(dec); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+}
+
+func (s *Server) requireBudgetAdmin() error {
+	if s.AllowBudgetAdmin {
+		return nil
+	}
+	return fmt.Errorf("budget mutation disabled: restart burnban mcp with --allow-budget-admin to enable it")
 }
 
 func (s *Server) spendSummary(since string) (string, error) {
@@ -308,7 +445,7 @@ func (s *Server) spendSummary(since string) (string, error) {
 	return string(b), nil
 }
 
-func (s *Server) burnStatus() (string, error) {
+func (s *Server) burnStatus(agentFilter string) (string, error) {
 	now := time.Now()
 	today, err := s.S.SpentSince(budget.DayStart(now))
 	if err != nil {
@@ -358,12 +495,68 @@ func (s *Server) burnStatus() (string, error) {
 	if len(windows) > 0 {
 		out["budget_windows"] = windows
 	}
+	overridden := false
 	if ov, err := s.S.GetSetting(budget.KeyOverrideDay); err != nil {
 		return "", err
 	} else if ov == now.Format("2006-01-02") {
 		out["cap_overridden_today"] = true
+		overridden = true
+	}
+	agentCaps, err := s.S.SettingsWithPrefix(budget.KeyAgentCapPrefix)
+	if err != nil {
+		return "", err
+	}
+	if agentFilter != "" {
+		if _, ok := agentCaps[agentFilter]; !ok {
+			agentCaps[agentFilter] = ""
+		}
+	}
+	agentNames := make([]string, 0, len(agentCaps))
+	for name := range agentCaps {
+		if agentFilter == "" || name == agentFilter {
+			agentNames = append(agentNames, name)
+		}
+	}
+	sort.Strings(agentNames)
+	agentStates := map[string]any{}
+	for _, name := range agentNames {
+		spent, err := s.S.SpentSinceForAgent(budget.DayStart(now), name)
+		if err != nil {
+			return "", err
+		}
+		state := map[string]any{"spent_usd": spent, "cap_set": false}
+		rawCap := agentCaps[name]
+		if rawCap != "" {
+			capUSD, err := strconv.ParseFloat(rawCap, 64)
+			if err != nil || math.IsNaN(capUSD) || math.IsInf(capUSD, 0) || capUSD <= 0 {
+				return "", fmt.Errorf("invalid stored cap for agent %q", name)
+			}
+			state["cap_set"] = true
+			out["has_agent_cap"] = true
+			state["cap_usd"] = capUSD
+			state["remaining_usd"] = max(0, capUSD-spent)
+			state["active"] = !overridden
+			if overridden {
+				state["overridden_today"] = true
+			}
+		}
+		agentStates[name] = state
+	}
+	if len(agentStates) > 0 {
+		out["agent_budgets"] = agentStates
 	}
 	b, err := json.MarshalIndent(out, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+func (s *Server) pricingDiagnostics() (string, error) {
+	if s.Prices == nil {
+		return "", fmt.Errorf("pricing diagnostics unavailable")
+	}
+	b, err := json.MarshalIndent(s.Prices.Diagnostics(), "", "  ")
 	if err != nil {
 		return "", err
 	}

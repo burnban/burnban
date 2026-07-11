@@ -1,8 +1,10 @@
 package pricing
 
 import (
-	"encoding/json"
 	"math"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,26 +89,85 @@ func TestReprice(t *testing.T) {
 	if got, want := Reprice(long, 100, 100, 0, 0), 300.0/1e6; math.Abs(got-want) > 1e-12 {
 		t.Fatalf("aggregate reprice applied request tier: %v, want %v", got, want)
 	}
+	if got, want := RepriceRequest(long, 100, 100, 0, 0), 500.0/1e6; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("per-request reprice omitted long-context tier: %v, want %v", got, want)
+	}
 }
 
 func TestEmbeddedTableParses(t *testing.T) {
 	var tb Table
-	if err := json.Unmarshal(embedded, &tb); err != nil {
+	if err := decodeStrict(embedded, &tb); err != nil {
 		t.Fatal(err)
 	}
-	if len(tb.Models) == 0 {
+	if err := validateMetadata(tb.Metadata, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateModels(tb.Models); err != nil {
+		t.Fatal(err)
+	}
+	if len(tb.Models) == 0 || tb.Metadata.VerifiedDate == "" {
 		t.Fatal("embedded table is empty")
+	}
+	sonnet, ok := tb.Models["claude-sonnet-5"]
+	if !ok || sonnet.InputPerMTok != 2 || sonnet.OutputPerMTok != 10 || sonnet.ValidThrough != "2026-08-31" {
+		t.Fatalf("Sonnet 5 current pricing metadata missing: %+v", sonnet)
 	}
 }
 
 func TestValidateModelsRejectsUnsafeRates(t *testing.T) {
 	for name, price := range map[string]Price{
-		"negative rate":       {InputPerMTok: -1},
-		"negative multiplier": {InputPerMTok: 1, CacheReadMult: -0.1},
-		"incomplete long tier": {InputPerMTok: 1, LongContextThreshold: 100, LongInputMult: 2},
+		"negative rate":        {InputPerMTok: -1, OutputPerMTok: 1},
+		"missing output":       {InputPerMTok: 1},
+		"negative multiplier":  {InputPerMTok: 1, OutputPerMTok: 1, CacheReadMult: -0.1},
+		"incomplete long tier": {InputPerMTok: 1, OutputPerMTok: 1, LongContextThreshold: 100, LongInputMult: 2},
+		"free with rate":       {Free: true, InputPerMTok: 1},
+		"partial provenance":   {InputPerMTok: 1, OutputPerMTok: 1, Source: "https://example.test"},
 	} {
 		if err := validateModels(map[string]Price{"bad": price}); err == nil {
 			t.Errorf("%s was accepted", name)
 		}
+	}
+	if err := validateModels(map[string]Price{"local": {Free: true}}); err != nil {
+		t.Fatalf("explicit free model rejected: %v", err)
+	}
+}
+
+func TestLoadRejectsLooseOrAccidentallyFreeOverride(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".burnban")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "pricing.json")
+	for name, body := range map[string]string{
+		"unknown field":  `{"models":{"x":{"input_per_mtok":1,"output_per_mtok":2,"typo":3}}}`,
+		"missing rate":   `{"models":{"x":{"input_per_mtok":1}}}`,
+		"trailing JSON":  `{"models":{"x":{"input_per_mtok":1,"output_per_mtok":2}}} {}`,
+		"duplicate rate": `{"models":{"x":{"input_per_mtok":1,"input_per_mtok":0,"output_per_mtok":2}}}`,
+	} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := Load(); err == nil {
+			t.Errorf("%s override was accepted", name)
+		}
+	}
+	if err := os.WriteFile(path, []byte(`{"models":{"local":{"free":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	table, err := Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p, ok := table.Lookup("local"); !ok || !p.Free {
+		t.Fatalf("explicit free override missing: %+v ok=%v", p, ok)
+	}
+	d := table.Diagnostics()
+	if d.OverrideFile != "~/.burnban/pricing.json" || len(d.OverrideModels) != 1 || d.OverrideModels[0] != "local" {
+		t.Fatalf("override diagnostics = %+v", d)
+	}
+	if strings.Contains(d.OverrideFile, home) {
+		t.Fatalf("diagnostics leaked absolute home: %+v", d)
 	}
 }

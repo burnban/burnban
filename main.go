@@ -21,6 +21,10 @@ func main() {
 		err = cmdServe(os.Args[2:])
 	case "desktop":
 		err = cmdDesktop(os.Args[2:])
+	case "status":
+		err = cmdStatus(os.Args[2:])
+	case "stop":
+		err = cmdStop(os.Args[2:])
 	case "top":
 		err = cmdTop(os.Args[2:])
 	case "report":
@@ -45,6 +49,12 @@ func main() {
 		err = cmdSubsidy(os.Args[2:])
 	case "bench":
 		err = cmdBench(os.Args[2:])
+	case "doctor":
+		err = cmdDoctor(os.Args[2:])
+	case "pricing":
+		err = cmdPricing(os.Args[2:])
+	case "prune":
+		err = cmdPrune(os.Args[2:])
 	case "version", "--version", "-v":
 		fmt.Println("burnban", version)
 	case "help", "--help", "-h":
@@ -55,7 +65,7 @@ func main() {
 		os.Exit(2)
 	}
 	if err != nil {
-		fmt.Fprintln(os.Stderr, "burnban:", err)
+		fmt.Fprintln(os.Stderr, "burnban:", terminalText(err.Error(), 500))
 		os.Exit(1)
 	}
 }
@@ -67,6 +77,8 @@ usage: burnban <command> [flags]
 
   serve    run the metering proxy (point your agents at it)
   desktop  run the real meter and open its dashboard (desktop launcher)
+  status   show the running meter, URL, database, and health
+  stop     gracefully stop the meter using its private local control file
   demo     seed fake traffic and serve the dashboard — see it alive in 5s
   top      live spend view, refreshed in place
   report   spend + waste receipts for a window (--since today|24h|7d)
@@ -79,9 +91,13 @@ usage: burnban <command> [flags]
   export   dump raw request rows for finance (--since 7d --format csv|json)
   alert    webhook for cap alerts and 80% warnings (--webhook URL | --off)
   bench    measure burnban's own added latency against a loopback upstream
+  doctor   verify pricing, database health, server health, and agent routing
+  pricing  inspect the effective price table and its provenance
+  prune    delete old ledger rows after an explicit retention window
   version  print version
 
-Every command accepts --db (default ~/.burnban/burnban.db, or $BURNBAN_DB).
+Commands that use the ledger accept --db (default ~/.burnban/burnban.db, or $BURNBAN_DB).
+Run burnban <command> --help for command-specific flags.
 `)
 }
 

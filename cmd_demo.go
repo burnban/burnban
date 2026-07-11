@@ -22,10 +22,28 @@ func cmdDemo(args []string) error {
 	port := fs.Int("port", 4242, "port for the demo server")
 	dbPath := fs.String("db", filepath.Join(os.TempDir(), "burnban-demo.db"), "demo database path")
 	force := fs.Bool("force", false, "replace an existing custom demo database")
+	noOpen := fs.Bool("no-open", false, "do not open the demo dashboard in a browser")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	customDB := false
 	fs.Visit(func(f *flag.Flag) { customDB = customDB || f.Name == "db" })
+	statePath := serverStatePath(*dbPath)
+	if state, stateErr := readServerState(statePath); stateErr == nil {
+		if serverStateAlive(state) {
+			return fmt.Errorf("refusing to replace demo database while Burnban pid %d is serving it; run `burnban stop --db %s` first", state.PID, *dbPath)
+		}
+		// A process killed without graceful cleanup can leave state behind. The
+		// private control endpoint is authoritative; remove only an unreachable,
+		// well-formed stale record before replacing the throwaway demo DB.
+		if err := os.Remove(statePath); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	} else if !os.IsNotExist(stateErr) {
+		return fmt.Errorf("refusing to replace demo database with unreadable lifecycle state: %w", stateErr)
+	}
 	if customDB && !*force {
 		for _, suffix := range []string{"", "-wal", "-shm"} {
 			if _, err := os.Lstat(*dbPath + suffix); err == nil {
@@ -63,7 +81,7 @@ func cmdDemo(args []string) error {
 	}
 
 	fmt.Printf("🔥 demo traffic seeded (fake data, fresh every run) → %s\n\n", *dbPath)
-	return cmdServe([]string{"--db", *dbPath, "--port", fmt.Sprint(*port)})
+	return cmdServeWithOptions([]string{"--db", *dbPath, "--port", fmt.Sprint(*port)}, !*noOpen, true)
 }
 
 func seedDemo(s *store.Store) error {

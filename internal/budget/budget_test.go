@@ -3,6 +3,7 @@ package budget_test
 import (
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,6 +19,103 @@ func newStore(t *testing.T) *store.Store {
 	}
 	t.Cleanup(func() { s.Close() })
 	return s
+}
+
+func TestConcurrentAdmissionsReserveCapHeadroom(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "0.05"); err != nil {
+		t.Fatal(err)
+	}
+	g := &budget.Guard{S: s}
+	estimate := budget.AdmissionEstimate{USD: 0.01, Priced: true, Bounded: true}
+
+	var wg sync.WaitGroup
+	reservations := make(chan *budget.Reservation, 20)
+	denials := make(chan *budget.Denial, 20)
+	for i := 0; i < 20; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reservation, denial, err := g.Admit(now, "agent", estimate)
+			if err != nil {
+				t.Errorf("admit: %v", err)
+				return
+			}
+			if reservation != nil {
+				reservations <- reservation
+			} else {
+				denials <- denial
+			}
+		}()
+	}
+	wg.Wait()
+	close(reservations)
+	close(denials)
+	var admitted int
+	for reservation := range reservations {
+		admitted++
+		reservation.Release()
+	}
+	if admitted != 5 || len(denials) != 15 {
+		t.Fatalf("admitted=%d denied=%d, want 5/15", admitted, len(denials))
+	}
+	if snapshot := g.Reservations(); snapshot.InFlight != 0 || snapshot.ReservedUSD != 0 {
+		t.Fatalf("reservations leaked: %+v", snapshot)
+	}
+}
+
+func TestUnboundedAdmissionIsExclusiveAndUnknownPriceFailsClosed(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	g := &budget.Guard{S: s}
+	first, denial, err := g.Admit(now, "", budget.AdmissionEstimate{USD: 0.1, Priced: true, Bounded: false})
+	if err != nil || denial != nil || first == nil {
+		t.Fatalf("first unbounded admission = reservation=%v denial=%v err=%v", first, denial, err)
+	}
+	if got := first.AmountUSD(); got != 10 {
+		t.Fatalf("exclusive reservation = %v, want 10", got)
+	}
+	if second, denial, err := g.Admit(now, "", budget.AdmissionEstimate{USD: 0.1, Priced: true, Bounded: false}); err != nil || second != nil || denial == nil || denial.Type != "burnban_inflight_headroom" || denial.AlertMark() != "" {
+		t.Fatalf("second admission = reservation=%v denial=%v err=%v", second, denial, err)
+	}
+	first.Release()
+
+	if reservation, denial, err := g.Admit(now, "", budget.AdmissionEstimate{Priced: false, Description: `model "future"`}); err != nil || reservation != nil || denial == nil || denial.Type != "burnban_unpriced_request" {
+		t.Fatalf("unknown-price admission = reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+}
+
+func TestEnforcementGapFailsClosedAndTinyGuidanceKeepsCents(t *testing.T) {
+	s := newStore(t)
+	if err := s.Insert(store.Request{
+		Ts: now.Add(-time.Minute), Provider: "openai", Model: "known", Status: 200,
+		UsageState: store.UsagePartial, PricingState: store.PricingPriced,
+		EnforcementUnsafe: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "1"); err != nil {
+		t.Fatal(err)
+	}
+	g := &budget.Guard{S: s}
+	if denial, err := g.Check(now, ""); err != nil || denial == nil || denial.Type != "burnban_metering_gap" {
+		t.Fatalf("metering gap denial=%+v err=%v", denial, err)
+	}
+
+	s2 := newStore(t)
+	spend(t, s2, now.Add(-time.Minute), 0.02)
+	if err := s2.SetSetting(budget.KeyDailyCapUSD, "0.01"); err != nil {
+		t.Fatal(err)
+	}
+	denial, err := (&budget.Guard{S: s2}).Check(now, "")
+	if err != nil || denial == nil {
+		t.Fatalf("tiny cap denial=%+v err=%v", denial, err)
+	}
+	if !strings.Contains(denial.Message, "--daily 0.02") || strings.Contains(denial.Message, "--daily 0)") {
+		t.Fatalf("unsafe tiny-cap guidance: %s", denial.Message)
+	}
 }
 
 func spend(t *testing.T, s *store.Store, ts time.Time, usd float64) {

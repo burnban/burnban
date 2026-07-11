@@ -31,6 +31,9 @@ func cmdBench(args []string) error {
 	n := fs.Int("requests", 500, "requests per pass")
 	conc := fs.Int("concurrency", 4, "parallel clients")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	if *n < 1 || *conc < 1 {
 		return fmt.Errorf("requests and concurrency must be >= 1")

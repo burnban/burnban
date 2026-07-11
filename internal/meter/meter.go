@@ -14,40 +14,107 @@ import (
 // output counts derived from character heuristics rather than a usage
 // frame, so reports never present a guess as a measurement.
 type Usage struct {
-	Model      string
-	In         int64
-	Out        int64
-	CacheRead  int64
-	CacheWrite int64
-	Estimated  bool
-	Found      bool
+	Model           string
+	In              int64
+	Out             int64
+	CacheRead       int64
+	CacheWrite      int64
+	CacheWrite1h    int64
+	ServiceTier     string
+	InferenceGeo    string
+	ServerToolCalls int64
+	FeeUnknown      bool
+	Estimated       bool
+	Exact           bool
+	Incomplete      bool
+	Found           bool
 }
 
 type anthropicUsage struct {
-	InputTokens   int64 `json:"input_tokens"`
-	OutputTokens  int64 `json:"output_tokens"`
-	CacheCreation int64 `json:"cache_creation_input_tokens"`
-	CacheRead     int64 `json:"cache_read_input_tokens"`
+	InputTokens         int64 `json:"input_tokens"`
+	OutputTokens        int64 `json:"output_tokens"`
+	CacheCreation       int64 `json:"cache_creation_input_tokens"`
+	CacheRead           int64 `json:"cache_read_input_tokens"`
+	CacheCreationDetail struct {
+		Ephemeral5m int64 `json:"ephemeral_5m_input_tokens"`
+		Ephemeral1h int64 `json:"ephemeral_1h_input_tokens"`
+	} `json:"cache_creation"`
+	ServiceTier   string           `json:"service_tier"`
+	InferenceGeo  string           `json:"inference_geo"`
+	ServerToolUse map[string]int64 `json:"server_tool_use"`
+}
+
+func applyAnthropicUsage(dst *Usage, u anthropicUsage) {
+	dst.In = max(dst.In, u.InputTokens, 0)
+	dst.Out = max(dst.Out, u.OutputTokens, 0)
+	dst.CacheRead = max(dst.CacheRead, u.CacheRead, 0)
+	dst.CacheWrite = max(dst.CacheWrite, u.CacheCreation, 0)
+	detailTotal := max(u.CacheCreationDetail.Ephemeral5m, 0) + max(u.CacheCreationDetail.Ephemeral1h, 0)
+	if detailTotal > dst.CacheWrite {
+		dst.CacheWrite = detailTotal
+	}
+	dst.CacheWrite1h = max(dst.CacheWrite1h, min(max(u.CacheCreationDetail.Ephemeral1h, 0), dst.CacheWrite))
+	if u.ServiceTier != "" {
+		dst.ServiceTier = u.ServiceTier
+	}
+	if u.InferenceGeo != "" {
+		dst.InferenceGeo = u.InferenceGeo
+	}
+	var toolCalls int64
+	for _, count := range u.ServerToolUse {
+		toolCalls += max(count, 0)
+	}
+	dst.ServerToolCalls = max(dst.ServerToolCalls, toolCalls)
+	dst.FeeUnknown = dst.FeeUnknown || dst.ServerToolCalls > 0 ||
+		tierFeeUnknown(dst.ServiceTier) || geoFeeUnknown(dst.InferenceGeo)
+}
+
+func anthropicUsageFound(u anthropicUsage) bool {
+	return u.InputTokens != 0 || u.OutputTokens != 0 || u.CacheCreation != 0 || u.CacheRead != 0 ||
+		u.CacheCreationDetail.Ephemeral5m != 0 || u.CacheCreationDetail.Ephemeral1h != 0 ||
+		u.ServiceTier != "" || u.InferenceGeo != "" || len(u.ServerToolUse) > 0
+}
+
+func tierFeeUnknown(tier string) bool {
+	switch string(bytes.ToLower(bytes.TrimSpace([]byte(tier)))) {
+	case "", "default", "standard", "standard_only":
+		return false
+	default:
+		return true
+	}
+}
+
+func geoFeeUnknown(geo string) bool {
+	switch string(bytes.ToLower(bytes.TrimSpace([]byte(geo)))) {
+	case "", "global", "us":
+		return false
+	default:
+		return true
+	}
 }
 
 // ParseAnthropicJSON reads usage from a non-streamed Messages API response.
 // Anthropic's input_tokens already exclude cache reads and writes.
 func ParseAnthropicJSON(body []byte) Usage {
 	var v struct {
-		Model string         `json:"model"`
-		Usage anthropicUsage `json:"usage"`
+		Model        string         `json:"model"`
+		ServiceTier  string         `json:"service_tier"`
+		InferenceGeo string         `json:"inference_geo"`
+		Usage        anthropicUsage `json:"usage"`
 	}
-	if json.Unmarshal(body, &v) != nil || v.Usage == (anthropicUsage{}) {
+	if json.Unmarshal(body, &v) != nil || !anthropicUsageFound(v.Usage) {
 		return Usage{}
 	}
-	return Usage{
-		Model:      v.Model,
-		In:         v.Usage.InputTokens,
-		Out:        v.Usage.OutputTokens,
-		CacheRead:  v.Usage.CacheRead,
-		CacheWrite: v.Usage.CacheCreation,
-		Found:      true,
+	u := Usage{Model: v.Model, ServiceTier: v.ServiceTier, InferenceGeo: v.InferenceGeo, Found: true, Exact: true}
+	applyAnthropicUsage(&u, v.Usage)
+	if u.ServiceTier == "" {
+		u.ServiceTier = v.ServiceTier
 	}
+	if u.InferenceGeo == "" {
+		u.InferenceGeo = v.InferenceGeo
+	}
+	u.FeeUnknown = u.FeeUnknown || tierFeeUnknown(u.ServiceTier) || geoFeeUnknown(u.InferenceGeo)
+	return u
 }
 
 type openAIUsage struct {
@@ -70,8 +137,9 @@ type openAIUsage struct {
 // cached and cache-write subsets, so both are subtracted from full-price In.
 func ParseOpenAIJSON(body []byte) Usage {
 	var v struct {
-		Model string      `json:"model"`
-		Usage openAIUsage `json:"usage"`
+		Model       string      `json:"model"`
+		ServiceTier string      `json:"service_tier"`
+		Usage       openAIUsage `json:"usage"`
 	}
 	if json.Unmarshal(body, &v) != nil {
 		return Usage{}
@@ -80,7 +148,8 @@ func ParseOpenAIJSON(body []byte) Usage {
 	if !ok {
 		return Usage{}
 	}
-	return Usage{Model: v.Model, In: in, Out: out, CacheRead: cached, CacheWrite: writes, Found: true}
+	return Usage{Model: v.Model, In: in, Out: out, CacheRead: cached, CacheWrite: writes,
+		ServiceTier: v.ServiceTier, FeeUnknown: tierFeeUnknown(v.ServiceTier), Found: true, Exact: true}
 }
 
 func normalizeOpenAIUsage(u openAIUsage) (in, out, cached, writes int64, ok bool) {
@@ -118,7 +187,11 @@ type geminiBody struct {
 	Candidates   []struct {
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text         string `json:"text"`
+				FunctionCall *struct {
+					Name string          `json:"name"`
+					Args json.RawMessage `json:"args"`
+				} `json:"functionCall"`
 			} `json:"parts"`
 		} `json:"content"`
 	} `json:"candidates"`
@@ -159,7 +232,11 @@ type Tracker interface {
 // model plus input and cache counts, message_delta carries the cumulative
 // output count.
 type AnthropicSSE struct {
-	u Usage
+	u        Usage
+	chars    int64
+	sawStart bool
+	sawDelta bool
+	sawStop  bool
 }
 
 func (t *AnthropicSSE) Feed(line []byte) {
@@ -170,10 +247,17 @@ func (t *AnthropicSSE) Feed(line []byte) {
 	var v struct {
 		Type    string `json:"type"`
 		Message *struct {
-			Model string         `json:"model"`
-			Usage anthropicUsage `json:"usage"`
+			Model        string         `json:"model"`
+			ServiceTier  string         `json:"service_tier"`
+			InferenceGeo string         `json:"inference_geo"`
+			Usage        anthropicUsage `json:"usage"`
 		} `json:"message"`
 		Usage *anthropicUsage `json:"usage"`
+		Delta *struct {
+			Text        string `json:"text"`
+			Thinking    string `json:"thinking"`
+			PartialJSON string `json:"partial_json"`
+		} `json:"delta"`
 	}
 	if json.Unmarshal(data, &v) != nil {
 		return
@@ -182,19 +266,40 @@ func (t *AnthropicSSE) Feed(line []byte) {
 	case "message_start":
 		if v.Message != nil {
 			t.u.Model = v.Message.Model
-			t.u.In = v.Message.Usage.InputTokens
-			t.u.CacheRead = v.Message.Usage.CacheRead
-			t.u.CacheWrite = v.Message.Usage.CacheCreation
+			t.u.ServiceTier = v.Message.ServiceTier
+			t.u.InferenceGeo = v.Message.InferenceGeo
+			applyAnthropicUsage(&t.u, v.Message.Usage)
 			t.u.Found = true
+			t.sawStart = true
 		}
 	case "message_delta":
-		if v.Usage != nil && v.Usage.OutputTokens > 0 {
-			t.u.Out = v.Usage.OutputTokens
+		if v.Usage != nil {
+			applyAnthropicUsage(&t.u, *v.Usage)
+			t.sawDelta = true
 		}
+	case "content_block_delta":
+		if v.Delta != nil {
+			deltaChars := int64(len(v.Delta.Text) + len(v.Delta.Thinking) + len(v.Delta.PartialJSON))
+			t.chars += deltaChars
+			if deltaChars > 0 {
+				t.u.Found = true
+			}
+		}
+	case "message_stop":
+		t.sawStop = true
 	}
 }
 
-func (t *AnthropicSSE) Usage() Usage { return t.u }
+func (t *AnthropicSSE) Usage() Usage {
+	u := t.u
+	u.Exact = t.sawStart && t.sawDelta && t.sawStop
+	if !u.Exact && u.Found {
+		u.Out = max(u.Out, (t.chars+3)/4)
+		u.Estimated = true
+		u.Incomplete = true
+	}
+	return u
+}
 
 // OpenAISSE tracks Chat Completions and Responses API streams. An exact
 // final usage frame wins; otherwise output is estimated from streamed
@@ -211,16 +316,29 @@ func (t *OpenAISSE) Feed(line []byte) {
 		return
 	}
 	var v struct {
-		Model    string       `json:"model"`
-		Usage    *openAIUsage `json:"usage"`
-		Delta    string       `json:"delta"`
-		Response *struct {
-			Model string       `json:"model"`
-			Usage *openAIUsage `json:"usage"`
+		Model       string       `json:"model"`
+		ServiceTier string       `json:"service_tier"`
+		Usage       *openAIUsage `json:"usage"`
+		Delta       string       `json:"delta"`
+		Response    *struct {
+			Model       string       `json:"model"`
+			ServiceTier string       `json:"service_tier"`
+			Usage       *openAIUsage `json:"usage"`
 		} `json:"response"`
 		Choices []struct {
 			Delta struct {
-				Content string `json:"content"`
+				Content          json.RawMessage `json:"content"`
+				Reasoning        string          `json:"reasoning"`
+				ReasoningContent string          `json:"reasoning_content"`
+				Refusal          string          `json:"refusal"`
+				FunctionCall     *struct {
+					Arguments string `json:"arguments"`
+				} `json:"function_call"`
+				ToolCalls []struct {
+					Function struct {
+						Arguments string `json:"arguments"`
+					} `json:"function"`
+				} `json:"tool_calls"`
 			} `json:"delta"`
 		} `json:"choices"`
 	}
@@ -231,13 +349,32 @@ func (t *OpenAISSE) Feed(line []byte) {
 		t.u.Model = v.Model
 		t.u.Found = true
 	}
+	if v.ServiceTier != "" {
+		t.u.ServiceTier = v.ServiceTier
+		t.u.FeeUnknown = t.u.FeeUnknown || tierFeeUnknown(v.ServiceTier)
+	}
 	if v.Response != nil && v.Response.Model != "" {
 		t.u.Model = v.Response.Model
 		t.u.Found = true
 	}
+	if v.Response != nil && v.Response.ServiceTier != "" {
+		t.u.ServiceTier = v.Response.ServiceTier
+		t.u.FeeUnknown = t.u.FeeUnknown || tierFeeUnknown(v.Response.ServiceTier)
+	}
+	charsBefore := t.chars
 	t.chars += int64(len(v.Delta))
 	for _, c := range v.Choices {
-		t.chars += int64(len(c.Delta.Content))
+		t.chars += rawStringLen(c.Delta.Content)
+		t.chars += int64(len(c.Delta.Reasoning) + len(c.Delta.ReasoningContent) + len(c.Delta.Refusal))
+		if c.Delta.FunctionCall != nil {
+			t.chars += int64(len(c.Delta.FunctionCall.Arguments))
+		}
+		for _, call := range c.Delta.ToolCalls {
+			t.chars += int64(len(call.Function.Arguments))
+		}
+	}
+	if t.chars > charsBefore {
+		t.u.Found = true
 	}
 	if v.Usage != nil {
 		t.setExact(*v.Usage)
@@ -256,17 +393,32 @@ func (t *OpenAISSE) setExact(raw openAIUsage) {
 	t.u.CacheRead, t.u.CacheWrite = cached, writes
 	t.u.Estimated = false
 	t.u.Found = true
+	t.u.Exact = true
+	t.u.Incomplete = false
 	t.exact = true
 }
 
 func (t *OpenAISSE) Usage() Usage {
 	u := t.u
-	if !t.exact && u.Out == 0 && t.chars > 0 {
+	if !t.exact && u.Found {
 		// No usage frame: estimate at ~4 chars/token and say so.
-		u.Out = t.chars / 4
+		u.Out = max(u.Out, (t.chars+3)/4)
 		u.Estimated = true
+		u.Incomplete = true
+		u.Exact = false
 	}
 	return u
+}
+
+func rawStringLen(raw json.RawMessage) int64 {
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return 0
+	}
+	var value string
+	if json.Unmarshal(raw, &value) != nil {
+		return 0
+	}
+	return int64(len(value))
 }
 
 // GeminiSSE tracks streamGenerateContent?alt=sse. Chunks carry cumulative
@@ -280,6 +432,7 @@ type GeminiSSE struct {
 	found                                bool
 	prompt, candidates, thoughts, cached int64
 	chars                                int64
+	usageSeen                            bool
 }
 
 func (t *GeminiSSE) Feed(line []byte) {
@@ -302,9 +455,17 @@ func (t *GeminiSSE) merge(v *geminiBody) {
 	for _, c := range v.Candidates {
 		for _, p := range c.Content.Parts {
 			t.chars += int64(len(p.Text))
+			if p.Text != "" {
+				t.found = true
+			}
+			if p.FunctionCall != nil {
+				t.chars += int64(len(p.FunctionCall.Name) + len(p.FunctionCall.Args))
+				t.found = true
+			}
 		}
 	}
 	if u := v.Usage; u != nil {
+		t.usageSeen = true
 		if u.PromptTokenCount > 0 || u.CandidatesTokenCount > 0 {
 			t.found = true
 		}
@@ -321,14 +482,16 @@ func (t *GeminiSSE) merge(v *geminiBody) {
 func (t *GeminiSSE) Usage() Usage {
 	u := Usage{
 		Model:     t.model,
-		In:        t.prompt - t.cached,
+		In:        max(t.prompt-t.cached, 0),
 		Out:       t.candidates + t.thoughts,
 		CacheRead: t.cached,
 		Found:     t.found,
+		Exact:     t.usageSeen,
 	}
-	if u.Out == 0 && t.chars > 0 {
-		u.Out = t.chars / 4
+	if !t.usageSeen && u.Found {
+		u.Out = max(u.Out, (t.chars+3)/4)
 		u.Estimated = true
+		u.Incomplete = true
 	}
 	return u
 }

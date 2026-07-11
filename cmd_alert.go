@@ -15,6 +15,9 @@ func cmdAlert(args []string) error {
 	off := fs.Bool("off", false, "remove the webhook")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {

@@ -21,6 +21,9 @@ func cmdCap(args []string) error {
 	off := fs.Bool("off", false, "remove the cap(s)")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -139,7 +142,7 @@ func capAgent(s *store.Store, agent string, daily, weekly, monthly, warn float64
 			return err
 		}
 		if v == "" {
-			fmt.Printf("no cap set for agent %q. Set one: burnban cap --agent %s --daily 5\n", agent, agent)
+			fmt.Printf("no cap set for agent %q. Set one: burnban cap --agent %q --daily 5\n", terminalText(agent, 100), terminalText(agent, 100))
 			return nil
 		}
 		spent, err := s.SpentSinceForAgent(budget.DayStart(time.Now()), agent)
@@ -181,7 +184,7 @@ func printCapStatus(s *store.Store) error {
 		return err
 	}
 	for name, cap := range agents {
-		fmt.Printf("agent %-24s $%s/day\n", name, cap)
+		fmt.Printf("agent %-24s $%s/day\n", terminalText(name, 80), terminalText(cap, 40))
 	}
 	return nil
 }
@@ -190,6 +193,9 @@ func cmdBan(args []string) error {
 	fs := flag.NewFlagSet("ban", flag.ExitOnError)
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -209,6 +215,9 @@ func cmdLift(args []string) error {
 	today := fs.Bool("today", false, "also override all caps for the rest of today")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {

@@ -18,6 +18,9 @@ func cmdExport(args []string) error {
 	format := fs.String("format", "csv", "csv or json")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -38,18 +41,24 @@ func cmdExport(args []string) error {
 	case "csv":
 		w := csv.NewWriter(os.Stdout)
 		if err := w.Write([]string{"ts", "provider", "model", "agent", "session",
-			"in_tokens", "out_tokens", "cache_read_tokens", "cache_write_tokens",
-			"cost_usd", "latency_ms", "status", "streamed", "estimated", "priced"}); err != nil {
+			"in_tokens", "out_tokens", "cache_read_tokens", "cache_write_tokens", "cache_write_1h_tokens",
+			"cost_usd", "latency_ms", "status", "streamed", "usage_state", "pricing_state",
+			"incomplete", "enforcement_unsafe", "route", "service_tier", "inference_geo",
+			"server_tool_calls", "fee_unpriced"}); err != nil {
 			return err
 		}
 		for _, r := range rows {
 			if err := w.Write([]string{
-				r.Ts.UTC().Format(time.RFC3339), r.Provider, r.Model, r.Agent, r.Session,
+				r.Ts.UTC().Format(time.RFC3339), spreadsheetText(r.Provider), spreadsheetText(r.Model), spreadsheetText(r.Agent), spreadsheetText(r.Session),
 				strconv.FormatInt(r.InTokens, 10), strconv.FormatInt(r.OutTokens, 10),
 				strconv.FormatInt(r.CacheReadTokens, 10), strconv.FormatInt(r.CacheWriteTokens, 10),
+				strconv.FormatInt(r.CacheWrite1hTokens, 10),
 				strconv.FormatFloat(r.CostUSD, 'f', -1, 64), strconv.FormatInt(r.LatencyMs, 10),
 				strconv.Itoa(r.Status), strconv.FormatBool(r.Streamed),
-				strconv.FormatBool(r.Estimated), strconv.FormatBool(r.Priced),
+				string(r.UsageState), string(r.PricingState), strconv.FormatBool(r.Incomplete),
+				strconv.FormatBool(r.EnforcementUnsafe), spreadsheetText(r.Route),
+				spreadsheetText(r.ServiceTier), spreadsheetText(r.InferenceGeo),
+				strconv.FormatInt(r.ServerToolCalls, 10), strconv.FormatBool(r.FeeUnpriced),
 			}); err != nil {
 				return err
 			}

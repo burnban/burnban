@@ -1,9 +1,11 @@
 package subsidy
 
 import (
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -37,7 +39,7 @@ func TestScanClaude(t *testing.T) {
 	// One message rendered as two JSONL lines (one per content block) plus a
 	// synthetic error line, a malformed line, and a pre-window message.
 	writeLog(t, filepath.Join(root, "proj-a"), "s1.jsonl", `{"type":"user","message":{"role":"user","content":"hi"},"timestamp":"2026-07-05T10:00:00.000Z"}
-{"type":"assistant","requestId":"req_1","timestamp":"2026-07-05T10:00:01.123Z","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":30}}}}
+{"type":"assistant","requestId":"req_1","timestamp":"2026-07-05T10:00:01.123Z","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":10,"ephemeral_1h_input_tokens":20},"service_tier":"standard","inference_geo":"us","server_tool_use":{"web_search_requests":2,"web_fetch_requests":1}}}}
 {"type":"assistant","requestId":"req_1","timestamp":"2026-07-05T10:00:01.123Z","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":30}}}}
 {"type":"assistant","requestId":"req_x","timestamp":"2026-07-05T10:01:00.000Z","message":{"id":"msg_x","model":"<synthetic>","usage":{"input_tokens":1,"output_tokens":1,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
 {"type":"assistant","malformed "usage" json
@@ -64,12 +66,36 @@ func TestScanClaude(t *testing.T) {
 		byModel[e.Model] = e
 	}
 	s := byModel["claude-sonnet-4-6"]
-	if s.In != 100 || s.Out != 200 || s.CacheRead != 50 || s.CacheWrite5m != 0 || s.CacheWrite1h != 30 {
+	if s.In != 100 || s.Out != 200 || s.CacheRead != 50 || s.CacheWrite5m != 10 || s.CacheWrite1h != 20 {
 		t.Errorf("sonnet event mispriced fields: %+v", s)
+	}
+	if s.ServiceTier != "standard" || s.InferenceGeo != "us" || s.ServerToolUse.WebSearchRequests != 2 || s.ServerToolUse.WebFetchRequests != 1 {
+		t.Errorf("sonnet nested usage metadata missing: %+v", s)
 	}
 	h := byModel["claude-haiku-4-5-20251001"]
 	if h.CacheWrite5m != 40 || h.CacheWrite1h != 0 {
 		t.Errorf("haiku cache split without detail: %+v", h)
+	}
+}
+
+func TestBoundedScanReportsPartial(t *testing.T) {
+	root := t.TempDir()
+	for i := 0; i < 2; i++ {
+		writeLog(t, root, fmt.Sprintf("s%d.jsonl", i), fmt.Sprintf(
+			`{"type":"assistant","requestId":"r%d","timestamp":"2026-07-05T10:00:01Z","message":{"id":"m%d","model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n", i, i))
+	}
+	var events []Event
+	result, err := scanClaude(root, since, ScanLimits{MaxFiles: 1, MaxBytes: 1 << 20, MaxLineBytes: 1 << 20, MaxRecords: 100}, func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Stats.Partial || result.Stats.FilesScanned != 1 || len(events) != 1 {
+		t.Fatalf("bounded result = %+v events=%d", result, len(events))
+	}
+	if len(result.Stats.Warnings) == 0 || strings.Contains(strings.Join(result.Stats.Warnings, " "), root) {
+		t.Fatalf("unsafe or missing scan warning: %+v", result.Stats)
 	}
 }
 

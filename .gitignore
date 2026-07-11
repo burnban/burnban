@@ -3,7 +3,17 @@
 *.db-wal
 *.db-shm
 .env
+.env.*
+!.env.example
 *.pem
 *.key
 *.crt
+.DS_Store
+.idea/
+.vscode/
+coverage.out
 dist/
+/third_party_licenses/
+/qa/browser/node_modules/
+/qa/browser/playwright-report/
+/qa/browser/test-results/

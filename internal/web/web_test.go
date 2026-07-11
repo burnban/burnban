@@ -4,8 +4,11 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/http/httptest"
+	"net/http/httputil"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -47,21 +50,143 @@ func TestDashboardServes(t *testing.T) {
 		t.Fatalf("status = %d", resp.StatusCode)
 	}
 	body, _ := io.ReadAll(resp.Body)
-	if !strings.Contains(string(body), "MODEL SPEND METER") {
+	page := string(body)
+	if !strings.Contains(page, "MODEL SPEND METER") {
 		t.Fatal("dashboard HTML missing")
+	}
+	for _, want := range []string{`aria-valuenow="0"`, `aria-live="assertive"`, `aria-pressed="true"`, `focus-visible`, `DEMO DATA`, `AUTH REQUIRED`, `history.replaceState`, `trafficMode`} {
+		if !strings.Contains(page, want) {
+			t.Errorf("dashboard is missing accessibility/state marker %q", want)
+		}
+	}
+}
+
+func TestLocalSafetyRejectsDNSRebindingAndCrossSiteRequests(t *testing.T) {
+	inner := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })
+	handler := web.LocalSafety("127.0.0.1", true, inner)
+
+	tests := []struct {
+		name       string
+		host       string
+		origin     string
+		fetchSite  string
+		wantStatus int
+	}{
+		{name: "localhost", host: "localhost:4141", wantStatus: http.StatusNoContent},
+		{name: "loopback ipv4", host: "127.8.2.1:4141", wantStatus: http.StatusNoContent},
+		{name: "rebound host", host: "attacker.example", wantStatus: http.StatusMisdirectedRequest},
+		{name: "evil origin", host: "localhost:4141", origin: "https://attacker.example", wantStatus: http.StatusForbidden},
+		{name: "cross site metadata", host: "localhost:4141", fetchSite: "cross-site", wantStatus: http.StatusForbidden},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "http://localhost:4141/api/summary", nil)
+			req.Host = tt.host
+			if tt.origin != "" {
+				req.Header.Set("Origin", tt.origin)
+			}
+			if tt.fetchSite != "" {
+				req.Header.Set("Sec-Fetch-Site", tt.fetchSite)
+			}
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != tt.wantStatus {
+				t.Fatalf("status=%d, want %d; body=%q", rr.Code, tt.wantStatus, rr.Body.String())
+			}
+		})
+	}
+}
+
+func TestConfiguredPublicOriginSurvivesTLSProxyHostRewrite(t *testing.T) {
+	proxyServer := httptest.NewUnstartedServer(nil)
+	publicOrigin := "https://" + proxyServer.Listener.Addr().String()
+	backend := httptest.NewServer(web.LocalSafetyWithPublicOrigin(
+		"127.0.0.1", false, publicOrigin,
+		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+	))
+	t.Cleanup(backend.Close)
+	target, err := url.Parse(backend.URL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reverse := httputil.NewSingleHostReverseProxy(target)
+	director := reverse.Director
+	reverse.Director = func(r *http.Request) {
+		director(r)
+		// Simulate a common ingress default: public TLS terminates here and
+		// the backend Host is rewritten to its loopback upstream authority.
+		r.Host = target.Host
+	}
+	proxyServer.Config.Handler = reverse
+	proxyServer.StartTLS()
+	t.Cleanup(proxyServer.Close)
+	if proxyServer.URL != publicOrigin {
+		t.Fatalf("test proxy origin=%q, configured=%q", proxyServer.URL, publicOrigin)
+	}
+
+	req, _ := http.NewRequest(http.MethodGet, proxyServer.URL+"/api/summary", nil)
+	req.Header.Set("Origin", proxyServer.URL)
+	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	resp, err := proxyServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("public-origin request through Host-rewriting TLS proxy = %d, want 204", resp.StatusCode)
+	}
+
+	req, _ = http.NewRequest(http.MethodGet, proxyServer.URL+"/api/summary", nil)
+	req.Header.Set("Origin", "https://attacker.example")
+	resp, err = proxyServer.Client().Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("unconfigured origin through proxy = %d, want 403", resp.StatusCode)
 	}
 }
 
 func TestMetrics(t *testing.T) {
-	srv, _ := newServer(t)
+	srv, s := newServer(t)
+	if err := s.Insert(store.Request{
+		Ts: time.Now(), Provider: "openai", Model: "evil\"\\line\n\t\r\x1b☃",
+		Agent: "agent\t\r\x1b\"\\☃", InTokens: 1, CostUSD: .01, Status: 200, Priced: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
 	resp, err := http.Get(srv.URL + "/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer resp.Body.Close()
 	body, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK || !strings.Contains(string(body), "burnban_requests_total") {
+	metrics := string(body)
+	if resp.StatusCode != http.StatusOK || !strings.Contains(metrics, "burnban_ledger_requests") {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
+	}
+	for _, name := range []string{"burnban_ledger_unknown_pricing", "burnban_ledger_unmetered", "burnban_ledger_incomplete", "burnban_ledger_enforcement_gaps"} {
+		if !strings.Contains(metrics, name) {
+			t.Errorf("metrics missing %s", name)
+		}
+	}
+	for _, line := range strings.Split(metrics, "\n") {
+		if strings.HasPrefix(line, "#") || line == "" {
+			continue
+		}
+		if strings.ContainsAny(line, "\r\t\x1b") {
+			t.Fatalf("metric line contains a raw control character: %q", line)
+		}
+		for i := 0; i < len(line); i++ {
+			if line[i] != '\\' {
+				continue
+			}
+			i++
+			if i >= len(line) || !strings.ContainsRune(`\"n`, rune(line[i])) {
+				t.Fatalf("metric line contains an unsupported label escape: %q", line)
+			}
+		}
 	}
 }
 
@@ -75,7 +200,16 @@ func TestWithAuth(t *testing.T) {
 	srv := httptest.NewServer(web.WithAuth("sekret", inner))
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Get(srv.URL + "/x")
+	resp, err := http.Get(srv.URL + "/")
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("public dashboard shell: status = %d, want 200", resp.StatusCode)
+	}
+
+	resp, err = http.Get(srv.URL + "/x")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -100,8 +234,8 @@ func TestWithAuth(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp.Body.Close()
-	if resp.StatusCode != http.StatusOK {
-		t.Fatalf("query token: status = %d, want 200", resp.StatusCode)
+	if resp.StatusCode != http.StatusUnauthorized {
+		t.Fatalf("query token: status = %d, want 401 (tokens must not travel in URLs)", resp.StatusCode)
 	}
 	resp, err = http.Get(srv.URL + "/openai/v1/models?token=sekret")
 	if err != nil {
@@ -149,15 +283,244 @@ func TestSummaryAPI(t *testing.T) {
 	}
 	defer resp.Body.Close()
 	var d struct {
-		TotalCost float64 `json:"total_cost"`
-		BanActive bool    `json:"ban_active"`
-		Models    []any   `json:"models"`
+		TotalCost   float64 `json:"total_cost"`
+		BanActive   bool    `json:"ban_active"`
+		ExternalBan bool    `json:"external_ban"`
+		Models      []any   `json:"models"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&d); err != nil {
 		t.Fatal(err)
 	}
-	if d.TotalCost != 0 || !d.BanActive || d.Models == nil {
+	if d.TotalCost != 0 || !d.BanActive || d.ExternalBan || d.Models == nil {
 		t.Fatalf("summary = %+v", d)
+	}
+	if err := s.DeleteSetting(budget.KeyBanActive); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyExternalBanActive, "1"); err != nil {
+		t.Fatal(err)
+	}
+	// Summary feeds coalesce synchronized dashboard tabs for one second.
+	time.Sleep(1100 * time.Millisecond)
+	resp2, err := http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp2.Body.Close()
+	if err := json.NewDecoder(resp2.Body).Decode(&d); err != nil {
+		t.Fatal(err)
+	}
+	if !d.BanActive || !d.ExternalBan {
+		t.Fatalf("external ban summary = %+v", d)
+	}
+}
+
+func TestSummaryIncludesCappedAgentOutsideTopTwentyWithActualUsage(t *testing.T) {
+	srv, s := newServer(t)
+	now := time.Now()
+	for i := 0; i < 25; i++ {
+		if err := s.Insert(store.Request{
+			Ts: now, Provider: "openai", Model: fmt.Sprintf("model-%02d", i), Agent: fmt.Sprintf("top-%02d", i),
+			CostUSD: float64(100 - i), PricingState: store.PricingPriced,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, cost := range []float64{0.50, 0.75} {
+		if err := s.Insert(store.Request{
+			Ts: now, Provider: "openai", Model: "capped-model", Agent: "capped-low", CostUSD: cost,
+			PricingState: store.PricingPriced,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.SetSetting(budget.KeyAgentCapPrefix+"capped-low", "1.50"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		TotalCost float64 `json:"total_cost"`
+		Models    []struct {
+			Cost    float64 `json:"cost_usd"`
+			IsOther bool    `json:"is_other"`
+		} `json:"models"`
+		Agents []struct {
+			Agent        string  `json:"agent"`
+			Requests     int64   `json:"requests"`
+			Cost         float64 `json:"cost_usd"`
+			CapUSD       float64 `json:"cap_usd"`
+			RemainingUSD float64 `json:"remaining_usd"`
+			IsOther      bool    `json:"is_other"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	var modelCost, agentCost float64
+	var modelOther, agentOther bool
+	for _, model := range data.Models {
+		modelCost += model.Cost
+		modelOther = modelOther || model.IsOther
+	}
+	for _, agent := range data.Agents {
+		agentCost += agent.Cost
+		agentOther = agentOther || agent.IsOther
+		if agent.Agent == "capped-low" {
+			if agent.Requests != 2 || agent.Cost != 1.25 || agent.CapUSD != 1.50 || agent.RemainingUSD != 0.25 {
+				t.Fatalf("capped agent usage = %+v", agent)
+			}
+		}
+	}
+	if math.Abs(modelCost-data.TotalCost) > 1e-8 || math.Abs(agentCost-data.TotalCost) > 1e-8 || !modelOther || !agentOther {
+		t.Fatalf("category rows do not reconcile: total=%v models=%v other=%t agents=%v other=%t", data.TotalCost, modelCost, modelOther, agentCost, agentOther)
+	}
+	for _, agent := range data.Agents {
+		if agent.Agent == "capped-low" {
+			return
+		}
+	}
+	t.Fatalf("capped agent outside top 20 missing from summary: %+v", data.Agents)
+}
+
+func TestSummaryIncludesAllBudgetsAndAgentCaps(t *testing.T) {
+	srv, s := newServer(t)
+	for key, value := range map[string]string{
+		budget.KeyDailyCapUSD:              "10",
+		budget.KeyWeeklyCapUSD:             "20",
+		budget.KeyMonthlyCapUSD:            "30",
+		budget.KeyAgentCapPrefix + "codex": "2.5",
+	} {
+		if err := s.SetSetting(key, value); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resp, err := http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Budgets []struct {
+			Name string `json:"name"`
+		} `json:"budgets"`
+		Agents []struct {
+			Agent  string  `json:"agent"`
+			CapUSD float64 `json:"cap_usd"`
+		} `json:"agents"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if len(data.Budgets) != 3 {
+		t.Fatalf("budgets=%+v, want all three windows", data.Budgets)
+	}
+	if len(data.Agents) != 1 || data.Agents[0].Agent != "codex" || data.Agents[0].CapUSD != 2.5 {
+		t.Fatalf("agents=%+v, want capped codex agent", data.Agents)
+	}
+}
+
+func TestDemoSubscriptionNeverScansRealHome(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "projects", "private")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf(`{"type":"assistant","requestId":"private","timestamp":%q,"message":{"id":"private","model":"claude-opus-4-8","usage":{"input_tokens":999999999,"output_tokens":999999999}}}`+"\n", time.Now().UTC().Format(time.RFC3339))
+	if err := os.WriteFile(filepath.Join(dir, "private.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	s, err := store.Open(filepath.Join(t.TempDir(), "demo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	prices, err := pricing.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	web.RegisterWithConfig(mux, s, web.Config{Version: "test", Prices: prices, Demo: true, Exposure: "localhost"})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Calls     int64 `json:"calls"`
+		Providers []struct {
+			Provider string `json:"provider"`
+			Dir      string `json:"dir"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if data.Calls != 78 {
+		t.Fatalf("demo calls=%d, want fixed fixture 78 (real log must not leak in)", data.Calls)
+	}
+	for _, provider := range data.Providers {
+		if provider.Dir != "" {
+			t.Fatalf("provider %s leaked source directory %q", provider.Provider, provider.Dir)
+		}
+	}
+}
+
+func TestTeamGatewayDisablesHostLocalUsageScanning(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "projects", "private")
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "private.jsonl"), []byte("private operator log"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(filepath.Join(t.TempDir(), "team.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	prices, err := pricing.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	web.RegisterWithConfig(mux, s, web.Config{
+		Version: "test", Prices: prices, Exposure: "team/network", AuthRequired: true,
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+
+	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusForbidden || strings.Contains(string(body), "private") {
+		t.Fatalf("team subsidy route status=%d body=%q", resp.StatusCode, body)
+	}
+	resp, err = http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var summary struct {
+		LocalUsageEnabled bool `json:"local_usage_enabled"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&summary); err != nil {
+		t.Fatal(err)
+	}
+	if summary.LocalUsageEnabled {
+		t.Fatal("team summary advertised host-local usage scanning")
 	}
 }
 

@@ -7,6 +7,8 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"text/tabwriter"
 	"time"
 
@@ -29,7 +31,21 @@ func cmdSubsidy(args []string) error {
 	planCost := fs.Float64("plan-cost", 0, "what you pay per month across plans, for a single subsidy multiple")
 	daily := fs.Bool("daily", false, "per-day breakdown")
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
+	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
+	maxLineMB := fs.Int("max-line-mb", 32, "maximum size of one JSONL record in MiB")
+	maxRecords := fs.Int("max-records", 1_000_000, "maximum records scanned per source")
+	scanTimeout := fs.Duration("scan-timeout", 10*time.Second, "maximum scan time per local source")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
+	if *maxFiles <= 0 || *maxScanMB <= 0 || *maxLineMB <= 0 || *maxRecords <= 0 || *scanTimeout <= 0 {
+		return fmt.Errorf("scan limits must all be greater than zero")
+	}
+	if *maxScanMB > int64(^uint64(0)>>1)>>20 || uint64(*maxLineMB) > uint64(^uint(0)>>1)>>20 {
+		return fmt.Errorf("scan size limit is too large for this platform")
+	}
 
 	from, label, err := parseSince(*sinceArg)
 	if err != nil {
@@ -44,6 +60,10 @@ func cmdSubsidy(args []string) error {
 		Since: from, Until: until,
 		ClaudeDir: *claudeDir, CodexDir: *codexDir,
 		HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
+		ScanLimits: subsidy.ScanLimits{
+			MaxFiles: *maxFiles, MaxBytes: *maxScanMB << 20, MaxLineBytes: *maxLineMB << 20,
+			MaxRecords: *maxRecords, MaxDuration: *scanTimeout,
+		},
 	})
 	if err != nil {
 		return err
@@ -55,15 +75,27 @@ func cmdSubsidy(args []string) error {
 		return enc.Encode(map[string]any{
 			"since": report.Since, "until": report.Until,
 			"providers": report.Providers, "totals": report.Totals,
-			"api_usd_total": report.APIUSD, "unpriced_tokens": report.UnpricedTokens,
+			"api_usd_total": report.APIUSD, "partial": report.Partial,
+			"unpriced_calls": report.UnpricedCalls, "unpriced_tokens": report.UnpricedTokens,
+			"unpriced_models": report.UnpricedModels, "pricing": prices.Diagnostics(),
 		})
 	}
 
 	if !report.HasUsage {
 		fmt.Printf("no local agent usage in %s — checked:\n", label)
 		for _, provider := range report.Providers {
-			fmt.Printf("  %-12s %s\n", subsidyTitle(provider.Provider), provider.Dir)
+			fmt.Printf("  %-12s %s\n", subsidyTitle(provider.Provider), terminalText(provider.Dir, 240))
+			if provider.Detail != "" {
+				fmt.Printf("    scan issue: %s\n", terminalText(provider.Detail, 240))
+			}
+			for _, warning := range provider.Scan.Warnings {
+				fmt.Printf("    partial scan: %s\n", terminalText(warning, 200))
+			}
 		}
+		if report.Partial {
+			fmt.Println("PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
+		}
+		printPricingDiagnostics(prices)
 		return nil
 	}
 
@@ -74,9 +106,14 @@ func cmdSubsidy(args []string) error {
 		if provider.Sessions == 0 && provider.Error == "" {
 			continue
 		}
-		fmt.Printf("\n%s  %s · %d sessions\n", subsidyTitle(provider.Provider), provider.Dir, provider.Sessions)
-		if provider.Error != "" {
-			fmt.Printf("  scan issue: %s\n", provider.Error)
+		fmt.Printf("\n%s  %s · %d sessions\n", subsidyTitle(provider.Provider), terminalText(provider.Dir, 240), provider.Sessions)
+		if provider.Detail != "" {
+			fmt.Printf("  scan issue: %s\n", terminalText(provider.Detail, 240))
+		} else if provider.Error != "" {
+			fmt.Printf("  scan issue: %s\n", terminalText(provider.Error, 200))
+		}
+		for _, warning := range provider.Scan.Warnings {
+			fmt.Printf("  partial scan: %s\n", terminalText(warning, 200))
 		}
 		if len(provider.Models) == 0 {
 			continue
@@ -88,12 +125,22 @@ func cmdSubsidy(args []string) error {
 			if !model.Priced {
 				cost = "unpriced"
 			}
-			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\t%s\t%s\t%s\n", model.Model, model.Calls,
+			fmt.Fprintf(w, "  %s\t%d\t%s\t%s\t%s\t%s\t%s\n", terminalText(model.Model, 100), model.Calls,
 				fmtTok(model.In), fmtTok(model.Out), fmtTok(model.CacheRead), fmtTok(model.CacheWrite), cost)
 		}
 		fmt.Fprintf(w, "  subtotal\t\t%s\t%s\t%s\t%s\t$%.2f\n",
 			fmtTok(provider.In), fmtTok(provider.Out), fmtTok(provider.CacheRead), fmtTok(provider.CacheWrite), provider.APIUSD)
 		w.Flush()
+		if len(provider.ServiceTiers) > 0 {
+			fmt.Printf("  service tiers  %s\n", formatCounts(provider.ServiceTiers))
+		}
+		if len(provider.InferenceGeos) > 0 {
+			fmt.Printf("  inference geo  %s\n", formatCounts(provider.InferenceGeos))
+		}
+		if provider.ServerToolUse.WebSearchRequests > 0 || provider.ServerToolUse.WebFetchRequests > 0 {
+			fmt.Printf("  server tools   web-search %d · web-fetch %d\n",
+				provider.ServerToolUse.WebSearchRequests, provider.ServerToolUse.WebFetchRequests)
+		}
 		if *daily {
 			dw := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', 0)
 			fmt.Fprintln(dw, "\n  day\tcalls\ttokens\tAPI equiv.")
@@ -162,12 +209,47 @@ func cmdSubsidy(args []string) error {
 		}
 	}
 	if report.UnpricedTokens > 0 {
-		fmt.Printf("\n  %s tokens ran on models with no known price. Add them to\n", fmtTok(report.UnpricedTokens))
+		fmt.Printf("\n  UNKNOWN PRICING: %d call(s), %s tokens across %s. Add them to\n",
+			report.UnpricedCalls, fmtTok(report.UnpricedTokens), safeNames(report.UnpricedModels))
 		fmt.Println("  ~/.burnban/pricing.json to include them in the dollar equivalent.")
 	}
+	if report.Partial {
+		fmt.Println("\n  PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
+	}
+	printPricingDiagnostics(prices)
 	fmt.Println("\n  source logs are read-only · no traffic or usage leaves this machine")
 	fmt.Println("  API-key agents routed through `burnban serve` appear separately as live spend.")
 	return nil
+}
+
+func printPricingDiagnostics(prices *pricing.Table) {
+	diagnostics := prices.Diagnostics()
+	fmt.Printf("\n  pricing table %s · effective %s · verified %s\n",
+		diagnostics.Version, diagnostics.EffectiveDate, diagnostics.VerifiedDate)
+	if len(diagnostics.ExpiredModels) > 0 {
+		fmt.Printf("  pricing warning: validity window expired for %s\n", safeNames(diagnostics.ExpiredModels))
+	}
+}
+
+func formatCounts(counts map[string]int64) string {
+	keys := make([]string, 0, len(counts))
+	for key := range counts {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		parts = append(parts, fmt.Sprintf("%s %d", terminalText(key, 80), counts[key]))
+	}
+	return strings.Join(parts, " · ")
+}
+
+func safeNames(names []string) string {
+	safe := make([]string, 0, len(names))
+	for _, name := range names {
+		safe = append(safe, terminalText(name, 100))
+	}
+	return strings.Join(safe, ", ")
 }
 
 func defaultHermesDB(home string) string {

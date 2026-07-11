@@ -11,13 +11,21 @@ import (
 
 	"github.com/burnban/burnban/internal/budget"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/mattn/go-isatty"
 )
 
 func cmdTop(args []string) error {
 	fs := flag.NewFlagSet("top", flag.ExitOnError)
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	interval := fs.Duration("interval", 2*time.Second, "refresh interval")
+	once := fs.Bool("once", false, "print one plain-text snapshot and exit")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
+	if *interval <= 0 {
+		return fmt.Errorf("--interval must be greater than zero")
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -25,15 +33,25 @@ func cmdTop(args []string) error {
 	}
 	defer s.Close()
 
+	isTTY := stdoutIsTerminal()
+	if *once || !isTTY {
+		frame, err := renderTop(s, false)
+		if err == nil {
+			fmt.Print(frame)
+		}
+		return err
+	}
+
 	sig := make(chan os.Signal, 1)
 	signal.Notify(sig, os.Interrupt, syscall.SIGTERM)
+	defer signal.Stop(sig)
 	tick := time.NewTicker(*interval)
 	defer tick.Stop()
 
 	fmt.Print("\033[?25l")
 	defer fmt.Print("\033[?25h\n")
 	for {
-		frame, err := renderTop(s)
+		frame, err := renderTop(s, true)
 		if err != nil {
 			return err
 		}
@@ -54,7 +72,7 @@ const (
 	cDim    = "\033[2m"
 )
 
-func renderTop(s *store.Store) (string, error) {
+func renderTop(s *store.Store, color bool) (string, error) {
 	now := time.Now()
 	sum, err := s.Summarize(budget.DayStart(now))
 	if err != nil {
@@ -77,7 +95,7 @@ func renderTop(s *store.Store) (string, error) {
 		if external {
 			message = "🚫 ORGANIZATION BURN BAN — external policy; contact your administrator"
 		}
-		b.WriteString(cRed + message + cReset + "\n\n")
+		b.WriteString(colorize(message, cRed, color) + "\n\n")
 	} else if states, err := budget.Status(s, now); err != nil {
 		return "", err
 	} else {
@@ -87,20 +105,20 @@ func renderTop(s *store.Store) (string, error) {
 				continue
 			}
 			frac := st.Spent / st.CapUSD
-			color := cGreen
+			barColor := cGreen
 			switch {
 			case frac >= 0.9:
-				color = cRed
+				barColor = cRed
 			case frac >= 0.6:
-				color = cYellow
+				barColor = cYellow
 			}
-			fmt.Fprintf(&b, "%-7s %s%s%s $%.2f / $%.2f (%s)\n", st.Name, color, bar(frac, 30), cReset, st.Spent, st.CapUSD, st.Source)
+			fmt.Fprintf(&b, "%-7s %s $%.2f / $%.2f (%s)\n", st.Name, colorize(bar(frac, 30), barColor, color), st.Spent, st.CapUSD, terminalText(st.Source, 40))
 			any = true
 		}
 		if any {
 			b.WriteString("\n")
 		} else {
-			b.WriteString(cDim + "budget  no cap set — burnban cap --daily 10" + cReset + "\n\n")
+			b.WriteString(colorize("budget  no cap set — burnban cap --daily 10", cDim, color) + "\n\n")
 		}
 	}
 
@@ -110,7 +128,7 @@ func renderTop(s *store.Store) (string, error) {
 			if i == 5 {
 				break
 			}
-			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", m.Model, m.Requests, m.Cost)
+			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", terminalText(m.Model, 34), m.Requests, m.Cost)
 		}
 		b.WriteString("\n")
 	}
@@ -120,12 +138,33 @@ func renderTop(s *store.Store) (string, error) {
 			if i == 5 {
 				break
 			}
-			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", a.Agent, a.Requests, a.Cost)
+			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", terminalText(a.Agent, 34), a.Requests, a.Cost)
 		}
 		b.WriteString("\n")
 	}
-	b.WriteString(cDim + "ctrl+c to quit" + cReset + "\n")
+	if color {
+		b.WriteString(colorize("ctrl+c to quit", cDim, true) + "\n")
+	}
 	return b.String(), nil
+}
+
+func colorize(value, code string, enabled bool) string {
+	if !enabled {
+		return value
+	}
+	return code + value + cReset
+}
+
+func stdoutIsTerminal() bool {
+	return fileIsTerminal(os.Stdout)
+}
+
+func fileIsTerminal(file *os.File) bool {
+	if file == nil {
+		return false
+	}
+	fd := file.Fd()
+	return isatty.IsTerminal(fd) || isatty.IsCygwinTerminal(fd)
 }
 
 func bar(frac float64, width int) string {

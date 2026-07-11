@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"math"
 	"strconv"
+	"sync"
 	"time"
 
 	"github.com/burnban/burnban/internal/store"
@@ -97,6 +98,79 @@ func MonthStart(now time.Time) time.Time {
 
 type Guard struct {
 	S *store.Store
+
+	mu              sync.Mutex
+	reservedUSD     float64
+	reservedByAgent map[string]float64
+	inFlight        int
+}
+
+// AdmissionEstimate is a conservative preflight cost bound derived from the
+// request. Priced is false when the request's model cannot be priced. Bounded
+// is false when the provider request omitted an output-token ceiling; such a
+// call is admitted exclusively against any active cap so concurrent calls
+// cannot multiply an unknown overshoot.
+type AdmissionEstimate struct {
+	USD         float64
+	Priced      bool
+	Bounded     bool
+	Description string
+}
+
+// Reservation accounts for admitted work that has not reached the durable
+// ledger yet. Release must be called after the request row is inserted (or
+// after the persistence failure has been latched fail-closed).
+type Reservation struct {
+	guard     *Guard
+	agent     string
+	amount    float64
+	capActive bool
+	once      sync.Once
+}
+
+func (r *Reservation) Release() {
+	if r == nil || r.guard == nil {
+		return
+	}
+	r.once.Do(func() {
+		g := r.guard
+		g.mu.Lock()
+		defer g.mu.Unlock()
+		g.reservedUSD = max(0, g.reservedUSD-r.amount)
+		if r.agent != "" {
+			left := max(0, g.reservedByAgent[r.agent]-r.amount)
+			if left == 0 {
+				delete(g.reservedByAgent, r.agent)
+			} else {
+				g.reservedByAgent[r.agent] = left
+			}
+		}
+		if g.inFlight > 0 {
+			g.inFlight--
+		}
+	})
+}
+
+func (r *Reservation) AmountUSD() float64 {
+	if r == nil {
+		return 0
+	}
+	return r.amount
+}
+
+func (r *Reservation) CapActive() bool {
+	return r != nil && r.capActive
+}
+
+type ReservationSnapshot struct {
+	InFlight    int
+	ReservedUSD float64
+}
+
+func (g *Guard) Reservations() ReservationSnapshot {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return ReservationSnapshot{InFlight: g.inFlight, ReservedUSD: g.reservedUSD}
 }
 
 // Denial explains why spend is paused, in words an agent's error surface
@@ -187,6 +261,106 @@ func Status(s *store.Store, now time.Time) ([]WindowState, error) {
 // window's spend has reached its cap, or the calling agent has reached its
 // own daily cap. A nil, nil return means proceed.
 func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	denial, _, err := g.checkLocked(now, agent)
+	return denial, err
+}
+
+// Admit atomically checks durable spend plus every in-flight reservation and
+// reserves room for this request. Admissions within one proxy process are
+// serialized, closing the check-then-forward race that allowed a burst of
+// concurrent requests to all observe the same stale ledger balance.
+func (g *Guard) Admit(now time.Time, agent string, estimate AdmissionEstimate) (*Reservation, *Denial, error) {
+	if math.IsNaN(estimate.USD) || math.IsInf(estimate.USD, 0) || estimate.USD < 0 {
+		return nil, nil, fmt.Errorf("invalid admission estimate %v", estimate.USD)
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	denial, state, err := g.checkLocked(now, agent)
+	if err != nil || denial != nil {
+		return nil, denial, err
+	}
+
+	amount := 0.0
+	if state.active() {
+		if !estimate.Priced {
+			detail := estimate.Description
+			if detail == "" {
+				detail = "request model"
+			}
+			return nil, &Denial{
+				Type: "burnban_unpriced_request",
+				Message: fmt.Sprintf(
+					"cannot safely enforce an active dollar cap because %s has no known price. Add pricing or remove/override the local cap before sending it.", detail),
+			}, nil
+		}
+		if estimate.Bounded {
+			amount = estimate.USD
+			if limit, ok := state.firstCrossed(amount); ok {
+				return nil, &Denial{
+					Type: "burnban_request_exceeds_remaining",
+					Message: fmt.Sprintf(
+						"request's conservative cost bound $%.4f exceeds the $%.4f remaining on the %s cap; lower max tokens, raise the cap, or override local caps for today.",
+						amount, max(0, limit.remaining()), limit.name),
+				}, nil
+			}
+		} else {
+			// No declared output ceiling: allow one call, but reserve every active
+			// window's remaining headroom so another call cannot race alongside it.
+			amount = state.maxRemaining()
+		}
+	}
+	if g.reservedByAgent == nil {
+		g.reservedByAgent = map[string]float64{}
+	}
+	g.reservedUSD += amount
+	if agent != "" {
+		g.reservedByAgent[agent] += amount
+	}
+	g.inFlight++
+	return &Reservation{guard: g, agent: agent, amount: amount, capActive: state.active()}, nil, nil
+}
+
+type capPosition struct {
+	name     string
+	cap      float64
+	spent    float64
+	reserved float64
+	unsafe   int64
+	window   Window
+	start    time.Time
+	source   string
+	agent    string
+}
+
+func (p capPosition) remaining() float64 { return p.cap - p.spent - p.reserved }
+
+type admissionState struct {
+	positions []capPosition
+}
+
+func (s admissionState) active() bool { return len(s.positions) > 0 }
+
+func (s admissionState) firstCrossed(amount float64) (capPosition, bool) {
+	for _, p := range s.positions {
+		if amount > p.remaining()+1e-12 {
+			return p, true
+		}
+	}
+	return capPosition{}, false
+}
+
+func (s admissionState) maxRemaining() float64 {
+	var out float64
+	for _, p := range s.positions {
+		out = max(out, p.remaining())
+	}
+	return max(0, out)
+}
+
+func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionState, error) {
+	state := admissionState{}
 	keys := []string{KeyBanActive, KeyExternalBanActive, KeyOverrideDay}
 	agentKey := ""
 	if agent != "" {
@@ -198,20 +372,20 @@ func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 	}
 	vals, err := g.S.GetSettings(keys...)
 	if err != nil {
-		return nil, err
+		return nil, state, err
 	}
 
 	if vals[KeyBanActive] == "1" {
 		return &Denial{
 			Type:    "burnban_banned",
 			Message: "burn ban in effect: all agent spend is paused. Lift it with `burnban lift`.",
-		}, nil
+		}, state, nil
 	}
 	if vals[KeyExternalBanActive] == "1" {
 		return &Denial{
 			Type:    "burnban_external_ban",
 			Message: "organization burn ban in effect: spend is paused by external policy. Contact your Burnban administrator.",
-		}, nil
+		}, state, nil
 	}
 	overrideLocal := vals[KeyOverrideDay] == now.Format("2006-01-02")
 
@@ -228,14 +402,14 @@ func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 	for _, w := range Windows() {
 		local, localSet, err := parseCap(w.Key, vals[w.Key])
 		if err != nil {
-			return nil, err
+			return nil, state, err
 		}
 		if overrideLocal {
 			local, localSet = 0, false
 		}
 		external, externalSet, err := parseCap(w.ExternalKey, vals[w.ExternalKey])
 		if err != nil {
-			return nil, err
+			return nil, state, err
 		}
 		if localSet {
 			checks = append(checks, capCheck{window: w, cap: local, start: w.Start(now), source: "local"})
@@ -249,53 +423,100 @@ func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 		for i, check := range checks {
 			starts[i] = check.start
 		}
-		spents, err := g.S.SpentSinceMulti(starts)
+		usages, err := g.S.BudgetUsageSinceMulti(starts)
 		if err != nil {
-			return nil, err
+			return nil, state, err
 		}
 		for i, check := range checks {
-			if spents[i] >= check.cap {
+			position := capPosition{
+				name: check.window.Name, cap: check.cap, spent: usages[i].SpentUSD,
+				reserved: g.reservedUSD, unsafe: usages[i].EnforcementGaps,
+				window: check.window, start: check.start, source: check.source,
+			}
+			state.positions = append(state.positions, position)
+			if position.unsafe > 0 {
+				return &Denial{
+					Type: "burnban_metering_gap",
+					Message: fmt.Sprintf(
+						"%s cap enforcement is paused fail-closed: %d successful request(s) in this window had incomplete usage or unknown pricing. Correct pricing/accounting or override/remove the local cap.",
+						check.window.Name, position.unsafe),
+				}, state, nil
+			}
+			if position.spent >= check.cap {
+				spentText := fmt.Sprintf("$%.2f spent", position.spent)
 				if check.source == "external" {
 					return &Denial{
 						Type: "burnban_external_cap_reached",
 						Message: fmt.Sprintf(
-							"organization %s burn allocation reached: $%.2f spent of $%.2f (resets on the UTC boundary). Contact your Burnban administrator.",
-							check.window.Name, spents[i], check.cap),
+							"organization %s burn allocation reached: %s of $%.2f (resets on the UTC boundary). Contact your Burnban administrator.",
+							check.window.Name, spentText, check.cap),
 						Window: check.window.Name, WindowStart: check.start,
-					}, nil
+					}, state, nil
 				}
 				return &Denial{
 					Type: "burnban_cap_reached",
 					Message: fmt.Sprintf(
-						"%s burn cap reached: $%.2f spent of $%.2f (resets %s). Raise it (`burnban cap --%s %.0f`) or override for today (`burnban lift --today`).",
-						check.window.Name, spents[i], check.cap, check.window.Reset, check.window.Name, check.cap*2),
+						"%s burn cap reached: %s of $%.2f (resets %s). Raise it (`burnban cap --%s %.2f`) or override for today (`burnban lift --today`).",
+						check.window.Name, spentText, check.cap, check.window.Reset, check.window.Name, check.cap*2),
 					Window:      check.window.Name,
 					WindowStart: check.start,
-				}, nil
+				}, state, nil
+			}
+			if position.spent+position.reserved >= check.cap {
+				// Reservations are temporary and may settle far below their
+				// conservative bound. Refuse the concurrent call without firing a
+				// durable "cap reached" webhook for spend that has not happened.
+				return &Denial{
+					Type: "burnban_inflight_headroom",
+					Message: fmt.Sprintf(
+						"the %s cap's remaining headroom is reserved by in-flight work ($%.2f spent + $%.4f reserved of $%.2f); retry after it completes or lower max tokens.",
+						check.window.Name, position.spent, position.reserved, check.cap),
+				}, state, nil
 			}
 		}
 	}
 
 	if agentKey == "" || overrideLocal {
-		return nil, nil
+		return nil, state, nil
 	}
 	capUSD, ok, err := parseCap(agentKey, vals[agentKey])
 	if err != nil || !ok {
-		return nil, err
+		return nil, state, err
 	}
-	spent, err := g.S.SpentSinceForAgent(DayStart(now), agent)
+	usage, err := g.S.BudgetUsageSinceForAgent(DayStart(now), agent)
 	if err != nil {
-		return nil, err
+		return nil, state, err
 	}
-	if spent >= capUSD {
+	position := capPosition{
+		name: "daily agent", cap: capUSD, spent: usage.SpentUSD,
+		reserved: g.reservedByAgent[agent], unsafe: usage.EnforcementGaps,
+		start: DayStart(now), source: "local", agent: agent,
+	}
+	state.positions = append(state.positions, position)
+	if position.unsafe > 0 {
+		return &Denial{
+			Type: "burnban_metering_gap",
+			Message: fmt.Sprintf(
+				"daily cap for agent %q is paused fail-closed: %d successful request(s) had incomplete usage or unknown pricing.", agent, position.unsafe),
+		}, state, nil
+	}
+	if position.spent >= capUSD {
 		return &Denial{
 			Type: "burnban_agent_cap_reached",
 			Message: fmt.Sprintf(
-				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent %s --daily %.0f`.",
-				agent, spent, capUSD, agent, capUSD*2),
-		}, nil
+				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent AGENT_NAME --daily %.2f`.",
+				agent, position.spent, capUSD, capUSD*2),
+		}, state, nil
 	}
-	return nil, nil
+	if position.spent+position.reserved >= capUSD {
+		return &Denial{
+			Type: "burnban_inflight_headroom",
+			Message: fmt.Sprintf(
+				"the daily cap for agent %q is reserved by in-flight work ($%.2f spent + $%.4f reserved of $%.2f); retry after it completes or lower max tokens.",
+				agent, position.spent, position.reserved, capUSD),
+		}, state, nil
+	}
+	return nil, state, nil
 }
 
 // BanStatus reports the independently managed local and external ban states.

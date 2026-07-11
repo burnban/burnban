@@ -1,17 +1,27 @@
 version: 2
 project_name: burnban
 
+before:
+  hooks:
+    - go mod verify
+    - sh scripts/collect_licenses.sh third_party_licenses
+
 builds:
-  - env:
+  - id: burnban
+    binary: burnban
+    env:
       - CGO_ENABLED=0
     goos: [linux, darwin, windows]
     goarch: [amd64, arm64]
+    flags:
+      - -trimpath
     ldflags:
       - -s -w -X main.version={{ .Version }}
 
 archives:
-  - formats: [tar.gz]
-    # Versionless names so install.sh can always fetch .../latest/download/
+  - ids: [burnban]
+    formats: [tar.gz]
+    # Versionless names let the installer resolve releases/latest/download.
     name_template: "burnban_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
@@ -19,11 +29,29 @@ archives:
     files:
       - LICENSE
       - README.md
+      - CODE_OF_CONDUCT.md
+      - CONTRIBUTING.md
+      - DATA_AND_PRIVACY.md
+      - GOVERNANCE.md
+      - RELEASING.md
+      - SECURITY.md
+      - SUPPORT.md
+      - THIRD_PARTY_NOTICES.md
       - install.sh
       - install.ps1
+      - third_party_licenses/**/*
+
+sboms:
+  - id: archives
+    artifacts: archive
+    documents:
+      - "{{ .ArtifactName }}.sbom.spdx.json"
 
 checksum:
   name_template: checksums.txt
+  algorithm: sha256
+
+report_sizes: true
 
 changelog:
   sort: asc
@@ -31,3 +59,4 @@ changelog:
     exclude:
       - "^docs"
       - "^chore"
+      - "^build\\(deps\\)"

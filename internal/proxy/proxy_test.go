@@ -1,12 +1,17 @@
 package proxy_test
 
 import (
+	"bufio"
+	"context"
+	"encoding/json"
 	"io"
 	"math"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -81,12 +86,97 @@ func TestPassthroughAndMetering(t *testing.T) {
 	}
 }
 
+func TestHealthIdentifiesBurnbanService(t *testing.T) {
+	srv, _ := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		io.WriteString(w, anthropicJSON)
+	}))
+	resp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health proxy.HealthSnapshot
+	if err := json.Unmarshal(body, &health); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || health.Service != "burnban" || !health.OK || !health.PersistenceOK {
+		t.Fatalf("health status=%d snapshot=%+v", resp.StatusCode, health)
+	}
+	var raw map[string]any
+	if err := json.Unmarshal(body, &raw); err != nil {
+		t.Fatal(err)
+	}
+	if _, present := raw["last_failure"]; present {
+		t.Fatalf("clean health emitted last_failure: %s", body)
+	}
+}
+
+func TestAnthropicCacheTierAndToolFeesArePreservedAndFailClosedUnderCap(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"claude-opus-4-7": {InputPerMTok: 5, OutputPerMTok: 25, CacheWriteMult: 1.25},
+	}}
+	providerBody := `{"model":"claude-opus-4-7","service_tier":"priority","inference_geo":"us",` +
+		`"usage":{"input_tokens":1000,"output_tokens":500,"cache_creation_input_tokens":100,` +
+		`"cache_creation":{"ephemeral_5m_input_tokens":60,"ephemeral_1h_input_tokens":40},` +
+		`"server_tool_use":{"web_search_requests":2}}}`
+	srv, s := newProxyFor(t, "anthropic", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, providerBody)
+	}), prices)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "1"); err != nil {
+		t.Fatal(err)
+	}
+	call := func() (*http.Response, string) {
+		resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(
+			`{"model":"claude-opus-4-7","max_tokens":500,"service_tier":"priority","inference_geo":"us","messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(body)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, body)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("rows = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.CacheWriteTokens != 100 || row.CacheWrite1hTokens != 40 || row.ServiceTier != "priority" ||
+		row.InferenceGeo != "us" || row.ServerToolCalls != 2 || !row.FeeUnpriced ||
+		!row.EnforcementUnsafe {
+		t.Fatalf("stored anthropic metadata = %+v", row)
+	}
+	// Ordinary cache writes are 1.25x input; the nested one-hour subset is
+	// corrected to Anthropic's 2x rate.
+	wantCost := (1000*5.0 + 500*25.0 + 100*5.0*1.25 + 40*5.0*(2-1.25)) * 1.1 / 1e6
+	if math.Abs(row.CostUSD-wantCost) > 1e-12 {
+		t.Fatalf("cost = %.12f, want %.12f", row.CostUSD, wantCost)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusPaymentRequired ||
+		!strings.Contains(body, "burnban_metering_gap") {
+		t.Fatalf("second status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
 func TestBurnbanHeadersStayLocal(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		for _, name := range []string{"x-burnban-token", "x-burnban-agent", "x-burnban-session"} {
 			if got := r.Header.Get(name); got != "" {
 				t.Errorf("upstream received %s=%q", name, got)
 			}
+		}
+		if got := r.Header.Get("X-Private-Hop"); got != "" {
+			t.Errorf("upstream received Connection-nominated header %q", got)
 		}
 		w.Header().Set("Content-Type", "application/json")
 		io.WriteString(w, anthropicJSON)
@@ -98,6 +188,8 @@ func TestBurnbanHeadersStayLocal(t *testing.T) {
 	req.Header.Set("x-burnban-token", "gateway-secret")
 	req.Header.Set("x-burnban-agent", "payments-agent")
 	req.Header.Set("x-burnban-session", "private-session")
+	req.Header.Set("Connection", "keep-alive, X-Private-Hop")
+	req.Header.Set("X-Private-Hop", "local-secret")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -106,6 +198,23 @@ func TestBurnbanHeadersStayLocal(t *testing.T) {
 	resp.Body.Close()
 	if got := summarize(t, s).Agents[0].Agent; got != "payments-agent" {
 		t.Fatalf("local attribution = %q", got)
+	}
+}
+
+func TestUpstreamConnectionHeadersStayHopLocal(t *testing.T) {
+	srv, _ := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Connection", "X-Upstream-Hop")
+		w.Header().Set("X-Upstream-Hop", "provider-secret")
+		w.Header().Set("X-End-To-End", "keep")
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	resp, _ := post(t, srv.URL)
+	if resp.Header.Get("Connection") != "" || resp.Header.Get("X-Upstream-Hop") != "" {
+		t.Fatalf("upstream hop headers leaked: %v", resp.Header)
+	}
+	if got := resp.Header.Get("X-End-To-End"); got != "keep" {
+		t.Fatalf("end-to-end response header = %q", got)
 	}
 }
 
@@ -189,6 +298,75 @@ func TestStreamMetering(t *testing.T) {
 	want := (300*5.0 + 42*25.0 + 100*5.0*0.1 + 50*5.0*1.25) / 1e6
 	if math.Abs(sum.Cost-want) > 1e-9 {
 		t.Fatalf("cost = %v, want %v", sum.Cost, want)
+	}
+}
+
+func TestCancelledAnthropicStreamPersistsPartialUsage(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/event-stream")
+		flusher := w.(http.Flusher)
+		io.WriteString(w, "event: message_start\n"+
+			`data: {"type":"message_start","message":{"model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":1}}}`+"\n\n")
+		io.WriteString(w, "event: content_block_delta\n"+
+			`data: {"type":"content_block_delta","delta":{"type":"text_delta","text":"partial streamed answer from provider"}}`+"\n\n")
+		flusher.Flush()
+		select {
+		case <-r.Context().Done():
+		case <-time.After(2 * time.Second):
+		}
+	}))
+
+	ctx, cancel := context.WithCancel(context.Background())
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, srv.URL+"/anthropic/v1/messages",
+		strings.NewReader(`{"model":"claude-opus-4-7","max_tokens":100,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reader := bufio.NewReader(resp.Body)
+	observed := false
+	for i := 0; i < 12; i++ {
+		line, readErr := reader.ReadString('\n')
+		if strings.Contains(line, "partial streamed answer") {
+			observed = true
+			break
+		}
+		if readErr != nil {
+			break
+		}
+	}
+	if !observed {
+		cancel()
+		resp.Body.Close()
+		t.Fatal("client did not observe streamed output before cancellation")
+	}
+	cancel()
+	resp.Body.Close()
+
+	deadline := time.Now().Add(3 * time.Second)
+	var rows []store.Request
+	for time.Now().Before(deadline) {
+		rows, err = s.Export(time.Unix(0, 0))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(rows) > 0 {
+			break
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("cancelled stream receipts = %d, want 1", len(rows))
+	}
+	row := rows[0]
+	if row.UsageState != store.UsagePartial || !row.Incomplete || !row.Estimated ||
+		row.InTokens == 0 || row.OutTokens == 0 || row.PricingState != store.PricingPriced ||
+		row.CostUSD <= 0 {
+		t.Fatalf("cancelled stream receipt = %+v", row)
 	}
 }
 
@@ -545,7 +723,7 @@ func TestOversizeResponsePassesThroughInFull(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || body != want {
 		t.Fatalf("response status=%d bytes=%d, want %d", resp.StatusCode, len(body), len(want))
 	}
-	if sum := summarize(t, s); sum.Requests != 1 || sum.Unpriced != 1 {
+	if sum := summarize(t, s); sum.Requests != 1 || sum.Unpriced != 0 || sum.Incomplete != 1 {
 		t.Fatalf("summary = %+v", sum)
 	}
 }
@@ -597,6 +775,54 @@ func TestWarnWebhookFiresOnce(t *testing.T) {
 	}
 }
 
+func TestWarnWebhookRetriesNon2xxBeforeMarkingDelivered(t *testing.T) {
+	var attempts atomic.Int64
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt := attempts.Add(1)
+		io.Copy(io.Discard, r.Body)
+		r.Body.Close()
+		if attempt < 3 {
+			http.Error(w, "try again", http.StatusInternalServerError)
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(hook.Close)
+
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyWebhookURL, hook.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Insert(store.Request{Ts: time.Now(), Provider: "anthropic", CostUSD: 9, Priced: true}); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusOK {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	deadline := time.Now().Add(3 * time.Second)
+	for attempts.Load() < 3 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("webhook attempts = %d, want 3", got)
+	}
+	// The successful third attempt marks this window only after delivery, so
+	// another request must not enqueue a fourth call.
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusOK {
+		t.Fatalf("second status = %d", resp.StatusCode)
+	}
+	time.Sleep(300 * time.Millisecond)
+	if got := attempts.Load(); got != 3 {
+		t.Fatalf("delivered webhook retried again: attempts=%d", got)
+	}
+}
+
 func TestDuplicateWasteReceipt(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -610,5 +836,316 @@ func TestDuplicateWasteReceipt(t *testing.T) {
 	}
 	if want := 0.0185; math.Abs(sum.DupWastedUSD-want) > 1e-9 {
 		t.Fatalf("wasted = %v, want %v", sum.DupWastedUSD, want)
+	}
+}
+
+func TestFailedResponseIsUnmeteredNotUnknownPrice(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "provider unavailable", http.StatusServiceUnavailable)
+	}))
+	resp, _ := post(t, srv.URL)
+	if resp.StatusCode != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d", resp.StatusCode)
+	}
+	sum := summarize(t, s)
+	if sum.Unmetered != 1 || sum.UnknownPricing != 0 || sum.Unpriced != 0 {
+		t.Fatalf("failed response classification = %+v", sum)
+	}
+}
+
+func TestFailedResponseWithProviderUsageIsStillMetered(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		io.WriteString(w, `{"model":"claude-opus-4-7","usage":{"input_tokens":100,"output_tokens":20}}`)
+	}))
+	resp, _ := post(t, srv.URL)
+	if resp.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("status = %d", resp.StatusCode)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].UsageState != store.UsageExact ||
+		rows[0].PricingState != store.PricingPriced || rows[0].CostUSD <= 0 ||
+		rows[0].EnforcementUnsafe {
+		t.Fatalf("failed response usage receipt = %+v", rows)
+	}
+}
+
+func TestUnknownRequestModelFailsClosedUnderCap(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+		strings.NewReader(`{"model":"future-model","messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(string(body), "burnban_unpriced_request") || hits.Load() != 0 {
+		t.Fatalf("status=%d hits=%d body=%s", resp.StatusCode, hits.Load(), body)
+	}
+}
+
+func TestUnknownResponsePriceCreatesPersistentEnforcementGap(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"known-model": {InputPerMTok: 1, OutputPerMTok: 2},
+	}}
+	srv, s := newProxyFor(t, "anthropic", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, `{"model":"provider-switched-model","usage":{"input_tokens":100,"output_tokens":20}}`)
+	}), prices)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "10"); err != nil {
+		t.Fatal(err)
+	}
+	call := func() (*http.Response, string) {
+		resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+			strings.NewReader(`{"model":"known-model","max_tokens":100,"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(body)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, body)
+	}
+	if sum := summarize(t, s); sum.UnknownPricing != 1 || sum.EnforcementGaps != 1 {
+		t.Fatalf("gap summary=%+v", sum)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(body, "burnban_metering_gap") {
+		t.Fatalf("second status=%d body=%s", resp.StatusCode, body)
+	}
+}
+
+func TestUpstreamTransportFailureCreatesPersistentEnforcementGap(t *testing.T) {
+	var hits atomic.Int64
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"known-model": {InputPerMTok: 1, OutputPerMTok: 2},
+	}}
+	srv, s := newProxyFor(t, "anthropic", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		hijacker, ok := w.(http.Hijacker)
+		if !ok {
+			t.Error("test server does not support hijacking")
+			return
+		}
+		conn, _, err := hijacker.Hijack()
+		if err != nil {
+			t.Errorf("hijack: %v", err)
+			return
+		}
+		conn.Close()
+	}), prices)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "1"); err != nil {
+		t.Fatal(err)
+	}
+	call := func() (*http.Response, string) {
+		resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+			strings.NewReader(`{"model":"known-model","max_tokens":100,"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(body)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, body)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].UsageState != store.UsageMissing ||
+		rows[0].PricingState != store.PricingUnmetered || !rows[0].Incomplete ||
+		!rows[0].EnforcementUnsafe {
+		t.Fatalf("transport-failure receipt = %+v", rows)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusPaymentRequired ||
+		!strings.Contains(body, "burnban_metering_gap") || hits.Load() != 1 {
+		t.Fatalf("second status=%d hits=%d body=%s", resp.StatusCode, hits.Load(), body)
+	}
+}
+
+func TestUnboundedConcurrentRequestsAreExclusivelyAdmitted(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		time.Sleep(150 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "1"); err != nil {
+		t.Fatal(err)
+	}
+	start := make(chan struct{})
+	statuses := make(chan int, 10)
+	var wg sync.WaitGroup
+	for i := 0; i < 10; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json",
+				strings.NewReader(`{"model":"claude-opus-4-7","messages":[]}`))
+			if err != nil {
+				t.Errorf("post: %v", err)
+				return
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			statuses <- resp.StatusCode
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(statuses)
+	counts := map[int]int{}
+	for status := range statuses {
+		counts[status]++
+	}
+	if hits.Load() != 1 || counts[http.StatusOK] != 1 || counts[http.StatusPaymentRequired] != 9 {
+		t.Fatalf("hits=%d statuses=%v", hits.Load(), counts)
+	}
+}
+
+func TestPersistenceFailureLatchesProxyFailClosed(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"claude-opus-4-7": {InputPerMTok: 5, OutputPerMTok: 25, CacheReadMult: 0.1, CacheWriteMult: 1.25},
+	}}
+	s, err := store.Open(filepath.Join(t.TempDir(), "health.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_ = s.Close() // admission succeeded; force the post-response insert to fail
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	defer upstream.Close()
+	p, err := proxy.New(s, prices, map[string]proxy.Upstream{"anthropic": {URL: upstream.URL, Shape: "anthropic"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	p.Logf = func(string, ...any) {}
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+
+	resp, _ := post(t, srv.URL)
+	if resp.StatusCode != http.StatusOK || p.Health().OK {
+		t.Fatalf("first status=%d health=%+v", resp.StatusCode, p.Health())
+	}
+	healthResp, err := http.Get(srv.URL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health proxy.HealthSnapshot
+	_ = json.NewDecoder(healthResp.Body).Decode(&health)
+	healthResp.Body.Close()
+	if healthResp.StatusCode != http.StatusServiceUnavailable || health.OK || health.PersistenceOK {
+		t.Fatalf("health status=%d body=%+v", healthResp.StatusCode, health)
+	}
+	resp, _ = post(t, srv.URL)
+	if resp.StatusCode != http.StatusServiceUnavailable || hits.Load() != 1 {
+		t.Fatalf("second status=%d upstream hits=%d", resp.StatusCode, hits.Load())
+	}
+}
+
+func TestAdmissionPersistenceFailureLatchesBeforeUpstream(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "preflight-health.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var hits atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, anthropicJSON)
+	}))
+	defer upstream.Close()
+	p, err := proxy.New(s, &pricing.Table{Models: map[string]pricing.Price{
+		"claude-opus-4-7": {InputPerMTok: 5, OutputPerMTok: 25},
+	}}, map[string]proxy.Upstream{"anthropic": {URL: upstream.URL, Shape: "anthropic"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+	resp, body := post(t, srv.URL)
+	if resp.StatusCode != http.StatusServiceUnavailable || hits.Load() != 0 || p.Health().OK ||
+		!strings.Contains(body, "fail-closed") {
+		t.Fatalf("status=%d hits=%d health=%+v body=%s", resp.StatusCode, hits.Load(), p.Health(), body)
+	}
+}
+
+func TestDuplicateFingerprintIncludesRouteAndProvider(t *testing.T) {
+	up := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	defer up.Close()
+	s, err := store.Open(filepath.Join(t.TempDir(), "fingerprints.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"claude-opus-4-7": {InputPerMTok: 5, OutputPerMTok: 25, CacheReadMult: 0.1, CacheWriteMult: 1.25},
+	}}
+	p, err := proxy.New(s, prices, map[string]proxy.Upstream{
+		"anthropic": {URL: up.URL, Shape: "anthropic"},
+		"mirror":    {URL: up.URL, Shape: "anthropic"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+	body := `{"model":"claude-opus-4-7","messages":[]}`
+	for _, route := range []string{"/anthropic/v1/messages", "/mirror/v1/messages"} {
+		resp, err := http.Post(srv.URL+route, "application/json", strings.NewReader(body))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	if sum := summarize(t, s); sum.DupGroups != 0 {
+		t.Fatalf("cross-provider calls grouped as duplicates: %+v", sum)
+	}
+	resp, _ := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(body))
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if sum := summarize(t, s); sum.DupGroups != 1 {
+		t.Fatalf("same-route duplicate not found: %+v", sum)
+	}
+	req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("x-burnban-session", "independent-session")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	io.Copy(io.Discard, resp.Body)
+	resp.Body.Close()
+	if sum := summarize(t, s); sum.DupGroups != 1 {
+		t.Fatalf("cross-session call grouped as a duplicate: %+v", sum)
 	}
 }

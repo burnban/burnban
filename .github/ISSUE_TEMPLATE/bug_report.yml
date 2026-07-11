@@ -1,0 +1,68 @@
+name: Bug report
+description: Report a reproducible problem in the open-source Burnban meter.
+title: "bug: "
+labels: [bug, triage]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Never paste API keys, BURNBAN_TOKEN, webhook URLs, prompts, databases, or raw agent logs. Report security issues through the private Security tab.
+  - type: input
+    id: version
+    attributes:
+      label: Burnban version
+      description: Output of `burnban version`.
+      placeholder: burnban 0.4.0
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: Operating system, version, architecture, and install method.
+      placeholder: macOS 15 arm64, install.sh
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Deployment mode
+      options:
+        - localhost CLI or desktop
+        - Docker on loopback
+        - TLS team gateway
+        - reverse proxy with allow-insecure-http
+        - other custom deployment
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: What happened, what you expected, and the impact.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Minimal reproduction
+      description: Use synthetic model names, traffic, tokens, and paths where possible.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Sanitized diagnostics
+      description: Relevant errors only. Remove credentials, URLs with secrets, prompts, agents, sessions, and account identifiers.
+      render: text
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Safety checks
+      options:
+        - label: I searched existing issues.
+          required: true
+        - label: I removed credentials and private usage data.
+          required: true
+        - label: This is not a privately reportable security vulnerability.
+          required: true

@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/url"
 	"os/exec"
 	"runtime"
 	"time"
@@ -31,10 +30,10 @@ func openDashboard(url string) error {
 }
 
 func dashboardURL(base, token string) string {
-	if token == "" {
-		return base
-	}
-	return base + "/?token=" + url.QueryEscape(token)
+	// Never put the long-lived team token in a URL, browser history, reverse-
+	// proxy log, or opener process arguments. The public dashboard shell asks
+	// for it and keeps it in tab-scoped session storage.
+	return base
 }
 
 // burnbanRunning distinguishes an already-running desktop meter from an

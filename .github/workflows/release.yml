@@ -1,26 +1,316 @@
 name: release
+
 on:
   push:
     tags: ["v*"]
 
 permissions:
-  contents: write
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
-  goreleaser:
+  preflight:
     runs-on: ubuntu-latest
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           fetch-depth: 0
+          persist-credentials: false
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version: "1.25"
-      # A tag must never publish binaries the test suite wouldn't pass.
-      - run: go vet ./...
-      - run: go test -race ./...
-      - uses: goreleaser/goreleaser-action@e435ccd777264be153ace6237001ef4d979d3a7a # v6
+          go-version-file: go.mod
+      - name: Source and tag preflight
+        shell: bash
+        run: |
+          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          mapfile -t gofiles < <(git ls-files '*.go')
+          test -z "$(gofmt -l "${gofiles[@]}")"
+          go mod tidy -diff
+          go mod verify
+          go vet ./...
+          go test -race ./...
+          CGO_ENABLED=0 go build -trimpath -o /tmp/burnban .
+      - name: Vulnerability preflight
+        env:
+          GOBIN: ${{ runner.temp }}/tools
+        run: |
+          go install golang.org/x/vuln/cmd/govulncheck@v1.1.4
+          "${GOBIN}/govulncheck" ./...
+      - name: Check GoReleaser configuration
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: check
+      - name: Install pinned Syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.46.0
+      - name: Build unpublished release snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --snapshot --clean
+      - name: Inspect unpublished release payload
+        shell: bash
+        run: |
+          for os in linux darwin; do
+            for arch in amd64 arm64; do
+              archive="dist/burnban_${os}_${arch}.tar.gz"
+              test -f "$archive"
+              tar -tzf "$archive" | grep -Eq '(^|/)burnban$'
+              tar -tzf "$archive" | grep -Eq '(^|/)LICENSE$'
+              tar -tzf "$archive" | grep -Eq '(^|/)DATA_AND_PRIVACY.md$'
+              tar -tzf "$archive" | grep -Eq '(^|/)SECURITY.md$'
+              tar -tzf "$archive" | grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$'
+              tar -tzf "$archive" | grep -Eq '(^|/)third_party_licenses/.+/LICENSE'
+            done
+          done
+          for arch in amd64 arm64; do
+            test -f "dist/burnban_windows_${arch}.zip"
+          done
+          test -f dist/checksums.txt
+          compgen -G 'dist/*.sbom.spdx.json' >/dev/null
+          (cd dist && sha256sum --check checksums.txt)
+      - name: Upload unpublished snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-candidate-snapshot
+          retention-days: 5
+          if-no-files-found: error
+          path: |
+            dist/burnban_*.tar.gz
+            dist/burnban_*.zip
+            dist/checksums.txt
+            dist/*.sbom.spdx.json
+
+  installer:
+    needs: preflight
+    name: installer candidate (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-snapshot
+          path: release
+      - if: runner.os != 'Windows'
+        shell: bash
+        run: BURNBAN_RELEASE_DIR="$PWD/release" bash scripts/smoke_install.sh
+      - if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          $env:BURNBAN_RELEASE_DIR = (Resolve-Path release).Path
+          ./scripts/smoke_install.ps1
+
+  container:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Build and inspect candidate container
+        shell: bash
+        run: |
+          docker build --check .
+          docker build \
+            --build-arg VERSION="$GITHUB_REF_NAME" \
+            --build-arg VCS_REF="$GITHUB_SHA" \
+            --build-arg BUILD_DATE="$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+            -t burnban:release-candidate .
+          test "$(docker image inspect burnban:release-candidate --format '{{.Config.User}}')" = "65532:65532"
+          cid=$(docker create burnban:release-candidate)
+          trap 'docker rm -fv "$cid" burnban-release-candidate >/dev/null 2>&1 || true' EXIT
+          docker export "$cid" | tar -tf - | grep -q '^licenses/burnban/THIRD_PARTY_NOTICES.md$'
+          docker rm -v "$cid"
+          cid=
+      - name: Run candidate container
+        shell: bash
+        run: |
+          token=burnban-release-token-1234567890
+          docker run -d --name burnban-release-candidate \
+            -e BURNBAN_TOKEN="$token" \
+            -p 127.0.0.1:44141:4141 \
+            burnban:release-candidate serve --host 0.0.0.0 --allow-insecure-http
+          trap 'docker logs burnban-release-candidate || true; docker rm -fv burnban-release-candidate >/dev/null 2>&1 || true' EXIT
+          for attempt in {1..30}; do
+            if curl -fsS -H "x-burnban-token: $token" http://127.0.0.1:44141/health | grep -q '"ok":true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+
+  browser-accessibility:
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: release-candidate-snapshot
+          path: release
+      - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: 24.18.0
+          cache: npm
+          cache-dependency-path: qa/browser/package-lock.json
+      - name: Install pinned browser QA dependencies
+        run: |
+          npm ci --prefix qa/browser --ignore-scripts --no-audit --no-fund
+          npm audit --prefix qa/browser --audit-level=high --omit=optional
+          qa/browser/node_modules/.bin/playwright install --with-deps chromium
+      - name: Run isolated browser and accessibility gate
+        shell: bash
+        env:
+          BURNBAN_BROWSER_BASE_URL: http://127.0.0.1:44143
+          BURNBAN_TEAM_BASE_URL: http://127.0.0.1:44144
+          BURNBAN_TEAM_TEST_TOKEN: burnban-browser-test-token-123456
+          BURNBAN_ANTHROPIC_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_OPENAI_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_XAI_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_GEMINI_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_OPENROUTER_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_GROQ_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_MISTRAL_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_DEEPSEEK_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_OLLAMA_UPSTREAM: http://127.0.0.1:44991
+          BURNBAN_VLLM_UPSTREAM: http://127.0.0.1:44991
+        run: |
+          tmp=$(mktemp -d)
+          mkdir -p "$tmp/home"
+          tar -xzf release/burnban_linux_amd64.tar.gz -C "$tmp" burnban
+          HOME="$tmp/home" "$tmp/burnban" demo --no-open --port 44143 --db "$tmp/demo.db" >"$tmp/demo.log" 2>&1 &
+          demo_pid=$!
+          BURNBAN_TOKEN="$BURNBAN_TEAM_TEST_TOKEN" HOME="$tmp/home" \
+            "$tmp/burnban" serve --port 44144 --public-url https://team.invalid \
+            --db "$tmp/team.db" >"$tmp/team.log" 2>&1 &
+          team_pid=$!
+          cleanup() {
+            rc=$?
+            kill "$demo_pid" "$team_pid" >/dev/null 2>&1 || true
+            wait "$demo_pid" "$team_pid" >/dev/null 2>&1 || true
+            if [[ $rc -ne 0 ]]; then cat "$tmp/demo.log" "$tmp/team.log"; fi
+            rm -rf "$tmp"
+            exit "$rc"
+          }
+          trap cleanup EXIT
+          for attempt in {1..60}; do
+            if curl -fsS http://127.0.0.1:44143/health >/dev/null 2>&1; then break; fi
+            if ! kill -0 "$demo_pid" >/dev/null 2>&1; then cat "$tmp/demo.log"; exit 1; fi
+            sleep 0.25
+          done
+          curl -fsS http://127.0.0.1:44143/health | grep -q '"ok":true'
+          for attempt in {1..60}; do
+            if curl -fsS -H "x-burnban-token: $BURNBAN_TEAM_TEST_TOKEN" http://127.0.0.1:44144/health >/dev/null 2>&1; then break; fi
+            if ! kill -0 "$team_pid" >/dev/null 2>&1; then cat "$tmp/team.log"; exit 1; fi
+            sleep 0.25
+          done
+          curl -fsS -H "x-burnban-token: $BURNBAN_TEAM_TEST_TOKEN" http://127.0.0.1:44144/health | grep -q '"ok":true'
+          npm --prefix qa/browser test
+          test ! -e "$tmp/home/.burnban/burnban.db"
+      - name: Upload browser traces on failure
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: release-browser-qa-traces
+          if-no-files-found: ignore
+          retention-days: 5
+          path: qa/browser/test-results
+
+  publish:
+    needs: [installer, container, browser-accessibility]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+      artifact-metadata: write
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Install pinned Syft
+        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
+        with:
+          syft-version: v1.46.0
+      - name: Publish tested release commit
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
           args: release --clean
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Attest release artifacts
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-checksums: dist/checksums.txt
+      - name: Attest checksum manifest
+        uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
+        with:
+          subject-path: dist/checksums.txt
+
+  anonymous-install-verify:
+    needs: publish
+    # GoReleaser may have published assets before a later attestation step
+    # fails. Still exercise the public URLs whenever the publish job was not
+    # explicitly cancelled.
+    if: ${{ always() && needs.publish.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - name: Download, verify, and install published assets anonymously
+        shell: bash
+        run: |
+          set -euo pipefail
+          release_dir=$(mktemp -d)
+          trap 'rm -rf "$release_dir"' EXIT
+          asset_base="https://github.com/${GITHUB_REPOSITORY}/releases/download/${GITHUB_REF_NAME}"
+          for attempt in {1..12}; do
+            if curl --fail --location --silent --show-error \
+              "$asset_base/checksums.txt" -o "$release_dir/checksums.txt"; then
+              break
+            fi
+            sleep 5
+          done
+          test -s "$release_dir/checksums.txt"
+          while read -r expected filename; do
+            test -n "$expected"
+            case "$filename" in
+              ""|*/*|*..*) echo "unsafe release asset name: $filename" >&2; exit 1 ;;
+            esac
+            curl --fail --location --silent --show-error \
+              --retry 8 --retry-all-errors \
+              "$asset_base/$filename" -o "$release_dir/$filename"
+          done < "$release_dir/checksums.txt"
+          (cd "$release_dir" && sha256sum --check checksums.txt)
+          BURNBAN_RELEASE_DIR="$release_dir" bash scripts/smoke_install.sh

@@ -1,0 +1,33 @@
+name: Feature request
+description: Propose an improvement to the MIT-licensed local meter.
+title: "feature: "
+labels: [enhancement, triage]
+body:
+  - type: textarea
+    id: problem
+    attributes:
+      label: User problem
+      description: Describe the workflow or risk, not only a proposed implementation.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Include CLI/config examples and safe defaults where useful.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and tradeoffs
+      description: What can users do today, and what compatibility/privacy costs might this add?
+  - type: checkboxes
+    id: boundary
+    attributes:
+      label: Open-source boundary
+      options:
+        - label: This request concerns the local MIT meter, not private fleet-control functionality.
+          required: true
+        - label: The proposal does not require collecting provider keys, prompts, or telemetry.
+          required: true

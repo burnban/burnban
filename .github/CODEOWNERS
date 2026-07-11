@@ -1,0 +1,8 @@
+# Default ownership. Security-sensitive areas still require passing CI.
+* @OdayBrahem
+
+/.github/ @OdayBrahem
+/install.sh @OdayBrahem
+/install.ps1 @OdayBrahem
+/internal/proxy/ @OdayBrahem
+/internal/store/ @OdayBrahem

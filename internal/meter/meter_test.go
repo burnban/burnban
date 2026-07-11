@@ -20,8 +20,83 @@ func TestOpenAIResponsesSSE(t *testing.T) {
 	tr.Feed([]byte(`data: {"type":"response.output_text.delta","delta":"eight characters"}`))
 	tr.Feed([]byte(`data: {"type":"response.completed","response":{"model":"gpt-5.6-luna","usage":{"input_tokens":1000,"output_tokens":80,"input_tokens_details":{"cached_tokens":400,"cache_write_tokens":100}}}}`))
 	u := tr.Usage()
-	if u.Model != "gpt-5.6-luna" || u.In != 500 || u.Out != 80 || u.CacheRead != 400 || u.CacheWrite != 100 || !u.Found || u.Estimated {
+	if u.Model != "gpt-5.6-luna" || u.In != 500 || u.Out != 80 || u.CacheRead != 400 || u.CacheWrite != 100 || !u.Found || u.Estimated || !u.Exact || u.Incomplete {
 		t.Fatalf("usage = %+v", u)
+	}
+}
+
+func TestOpenAIStreamEstimatesToolAndReasoningDeltas(t *testing.T) {
+	tr := &OpenAISSE{}
+	tr.Feed([]byte(`data: {"model":"gpt-5.6-luna","choices":[{"delta":{"tool_calls":[{"function":{"arguments":"{\"city\":\"Vancouver\"}"}}]}}]}`))
+	tr.Feed([]byte(`data: {"choices":[{"delta":{"reasoning_content":"check the forecast"}}]}`))
+	u := tr.Usage()
+	if !u.Found || u.Out == 0 || !u.Estimated || !u.Incomplete || u.Exact {
+		t.Fatalf("tool/reasoning usage = %+v", u)
+	}
+}
+
+func TestAnthropicTruncatedStreamIsPartial(t *testing.T) {
+	tr := &AnthropicSSE{}
+	tr.Feed([]byte(`data: {"type":"message_start","message":{"model":"claude-test","usage":{"input_tokens":100,"output_tokens":1}}}`))
+	tr.Feed([]byte(`data: {"type":"content_block_delta","delta":{"type":"input_json_delta","partial_json":"{\"city\":\"Vancouver\"}"}}`))
+	u := tr.Usage()
+	if u.Model != "claude-test" || u.In != 100 || u.Out == 0 || !u.Estimated || !u.Incomplete || u.Exact {
+		t.Fatalf("truncated anthropic usage = %+v", u)
+	}
+}
+
+func TestAnthropicNestedCacheTierGeoAndServerTools(t *testing.T) {
+	u := ParseAnthropicJSON([]byte(`{
+		"model":"claude-test","service_tier":"priority","inference_geo":"us-west",
+		"usage":{"input_tokens":100,"output_tokens":20,"cache_read_input_tokens":10,
+			"cache_creation_input_tokens":100,
+			"cache_creation":{"ephemeral_5m_input_tokens":60,"ephemeral_1h_input_tokens":40},
+			"server_tool_use":{"web_search_requests":2,"web_fetch_requests":1}}}`))
+	if u.Model != "claude-test" || u.In != 100 || u.Out != 20 || u.CacheRead != 10 ||
+		u.CacheWrite != 100 || u.CacheWrite1h != 40 || u.ServiceTier != "priority" ||
+		u.InferenceGeo != "us-west" || u.ServerToolCalls != 3 || !u.FeeUnknown ||
+		!u.Found || !u.Exact || u.Incomplete {
+		t.Fatalf("anthropic metadata usage = %+v", u)
+	}
+}
+
+func TestAnthropicInferenceGeoFeeSafety(t *testing.T) {
+	us := ParseAnthropicJSON([]byte(`{"model":"claude-test","inference_geo":"us","usage":{"input_tokens":100,"output_tokens":20}}`))
+	if us.FeeUnknown || us.InferenceGeo != "us" {
+		t.Fatalf("known US geo should be priced: %+v", us)
+	}
+	unknown := ParseAnthropicJSON([]byte(`{"model":"claude-test","inference_geo":"future-region","usage":{"input_tokens":100,"output_tokens":20}}`))
+	if !unknown.FeeUnknown {
+		t.Fatalf("unknown inference geo was treated as priced: %+v", unknown)
+	}
+}
+
+func TestAnthropicSSEPreservesUsageMetadata(t *testing.T) {
+	tr := &AnthropicSSE{}
+	tr.Feed([]byte(`data: {"type":"message_start","message":{"model":"claude-test","service_tier":"standard","inference_geo":"global","usage":{"input_tokens":100,"cache_creation_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":20,"ephemeral_1h_input_tokens":30},"server_tool_use":{"web_search_requests":1}}}}`))
+	tr.Feed([]byte(`data: {"type":"message_delta","usage":{"output_tokens":25,"server_tool_use":{"web_search_requests":2}}}`))
+	tr.Feed([]byte(`data: {"type":"message_stop"}`))
+	u := tr.Usage()
+	if u.Model != "claude-test" || u.In != 100 || u.Out != 25 || u.CacheWrite != 50 ||
+		u.CacheWrite1h != 30 || u.ServiceTier != "standard" || u.InferenceGeo != "global" ||
+		u.ServerToolCalls != 2 || !u.FeeUnknown || !u.Exact || u.Estimated || u.Incomplete {
+		t.Fatalf("anthropic stream metadata usage = %+v", u)
+	}
+}
+
+func TestGeminiFunctionCallWithoutUsageIsEstimated(t *testing.T) {
+	tr := &GeminiSSE{}
+	tr.Feed([]byte(`data: {"modelVersion":"gemini-test","candidates":[{"content":{"parts":[{"functionCall":{"name":"weather","args":{"city":"Vancouver"}}}]}}]}`))
+	u := tr.Usage()
+	if u.Model != "gemini-test" || u.Out == 0 || !u.Estimated || !u.Incomplete || u.Exact {
+		t.Fatalf("gemini function usage = %+v", u)
+	}
+}
+
+func TestGeminiCachedSubsetCannotMakeInputNegative(t *testing.T) {
+	u := ParseGeminiJSON([]byte(`{"modelVersion":"gemini-test","usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":20}}`))
+	if u.In != 0 || u.CacheRead != 20 || !u.Exact {
+		t.Fatalf("gemini normalized usage = %+v", u)
 	}
 }
 

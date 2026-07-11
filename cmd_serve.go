@@ -1,16 +1,24 @@
 package main
 
 import (
+	"context"
+	"crypto/tls"
+	"crypto/x509"
+	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"maps"
 	"net"
 	"net/http"
+	"net/url"
 	"os"
+	"os/signal"
 	"regexp"
 	"slices"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
@@ -28,6 +36,8 @@ var reservedRoutes = map[string]bool{"health": true, "api": true, "metrics": tru
 // patterns, where characters like '{' either panic at registration or
 // register a wildcard that swallows arbitrary paths.
 var upstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
+
+const gracefulShutdownTimeout = 10 * time.Second
 
 // upstreamFlags collects repeated --upstream name=url pairs. A url may be
 // prefixed with a usage shape ("anthropic:https://…", "gemini:…") when the
@@ -66,15 +76,27 @@ func (u upstreamFlags) Set(v string) error {
 }
 
 func cmdServe(args []string) error {
-	return cmdServeMode(args, false)
+	return cmdServeWithOptions(args, false, false)
 }
 
 // cmdServeMode runs the real metering proxy. Desktop mode uses the exact same
 // server and database, then opens the dashboard once the listener is ready.
 func cmdServeMode(args []string, launchDashboard bool) error {
-	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	return cmdServeWithOptions(args, launchDashboard, false)
+}
+
+func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
+	commandName := "serve"
+	if launchDashboard {
+		commandName = "desktop"
+	}
+	if demoMode {
+		commandName = "demo-server"
+	}
+	fs := flag.NewFlagSet(commandName, flag.ExitOnError)
 	port := fs.Int("port", 4141, "listen port")
 	host := fs.String("host", "127.0.0.1", "bind address; anything non-loopback requires BURNBAN_TOKEN (team mode)")
+	publicURL := fs.String("public-url", "", "public dashboard/proxy base URL advertised to clients (recommended for team mode)")
 	tlsCert := fs.String("tls-cert", "", "TLS certificate for non-loopback/team mode")
 	tlsKey := fs.String("tls-key", "", "TLS private key for non-loopback/team mode")
 	allowInsecure := fs.Bool("allow-insecure-http", false, "allow plaintext on a non-loopback bind (only behind a TLS reverse proxy)")
@@ -82,20 +104,60 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 	custom := upstreamFlags{}
 	fs.Var(custom, "upstream", "extra upstream as name=url (repeatable; OpenAI-shaped unless url is prefixed anthropic:/gemini:): groq, mistral, openrouter, ollama, vllm…")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	if (*tlsCert == "") != (*tlsKey == "") {
 		return fmt.Errorf("--tls-cert and --tls-key must be provided together")
 	}
-	remote := !isLoopbackHost(*host)
-	token := os.Getenv("BURNBAN_TOKEN")
-	if remote && token == "" {
-		return fmt.Errorf("refusing to bind %s without BURNBAN_TOKEN set — team mode fails closed", *host)
+	if *port < 0 || *port > 65535 {
+		return fmt.Errorf("--port must be between 0 and 65535")
 	}
-	if remote && len(token) < 16 {
-		return fmt.Errorf("BURNBAN_TOKEN must be at least 16 characters for a non-loopback bind")
+	var parsedPublic *url.URL
+	if *publicURL != "" {
+		parsed, parseErr := url.Parse(*publicURL)
+		if parseErr != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.User != nil || parsed.RawQuery != "" || parsed.Fragment != "" || (parsed.Path != "" && parsed.Path != "/") {
+			return fmt.Errorf("--public-url must be an absolute http(s) origin with no path, query, credentials, or fragment")
+		}
+		parsedPublic = parsed
+		if parsedPublic.Scheme != "http" && parsedPublic.Scheme != "https" {
+			return fmt.Errorf("--public-url scheme must be http or https")
+		}
+		if *tlsCert != "" && parsedPublic.Scheme != "https" {
+			return fmt.Errorf("--public-url must use https when --tls-cert/--tls-key are configured")
+		}
+		*publicURL = strings.TrimSuffix(*publicURL, "/")
+	}
+	remote := !isLoopbackHost(*host)
+	publicRemote := parsedPublic != nil && !isLoopbackHost(parsedPublic.Hostname())
+	exposed := remote || publicRemote
+	if publicRemote && parsedPublic.Scheme != "https" {
+		return fmt.Errorf("non-loopback --public-url must use https")
+	}
+	token := os.Getenv("BURNBAN_TOKEN")
+	if token != "" {
+		if err := validateBurnbanToken(token, exposed); err != nil {
+			return err
+		}
+	}
+	if exposed && token == "" {
+		return fmt.Errorf("refusing network exposure without BURNBAN_TOKEN set — team mode fails closed")
 	}
 	if remote && *tlsCert == "" && !*allowInsecure {
 		return fmt.Errorf("refusing plaintext non-loopback traffic (it carries provider keys): configure --tls-cert/--tls-key, or use --allow-insecure-http only behind a TLS reverse proxy")
+	}
+	var serverCertificate *tls.Certificate
+	if *tlsCert != "" {
+		publicHost := ""
+		if parsedPublic != nil {
+			publicHost = parsedPublic.Hostname()
+		}
+		certificate, err := loadServerCertificate(*tlsCert, *tlsKey, publicHost, time.Now())
+		if err != nil {
+			return err
+		}
+		serverCertificate = &certificate
 	}
 
 	s, err := store.Open(*dbPath)
@@ -103,6 +165,27 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 		return err
 	}
 	defer s.Close()
+	lease, err := s.AcquireLease("serve", 15*time.Second)
+	if err != nil {
+		if errors.Is(err, store.ErrLeaseHeld) {
+			if launchDashboard {
+				if state, stateErr := readServerState(serverStatePath(*dbPath)); stateErr == nil && serverStateAlive(state) {
+					if openErr := openDashboard(dashboardURL(state.URL, token)); openErr != nil {
+						return openErr
+					}
+					fmt.Printf("🔥 burnban is already running — opened %s\n", state.URL)
+					return nil
+				}
+			}
+			return fmt.Errorf("database %s is already served by another live Burnban process; use a different --db or run `burnban status`", *dbPath)
+		}
+		return fmt.Errorf("acquire single-server database lease: %w", err)
+	}
+	defer func() {
+		if err := lease.Release(); err != nil {
+			fmt.Fprintf(os.Stderr, "burnban: release database lease: %v\n", err)
+		}
+	}()
 
 	prices, err := pricing.Load()
 	if err != nil {
@@ -127,7 +210,14 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 	if *tlsCert != "" {
 		scheme = "https"
 	}
-	base := scheme + "://" + addr
+	displayHost := strings.Trim(*host, "[]")
+	if ip := net.ParseIP(displayHost); ip != nil && ip.IsUnspecified() {
+		displayHost = "localhost"
+	}
+	base := scheme + "://" + net.JoinHostPort(displayHost, strconv.Itoa(*port))
+	if *publicURL != "" {
+		base = *publicURL
+	}
 	authState := "open (localhost only)"
 	if token != "" {
 		authState = "token required (BURNBAN_TOKEN)"
@@ -143,16 +233,6 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 		}
 	}
 
-	customLines := ""
-	for _, name := range slices.Sorted(maps.Keys(custom)) {
-		shape := upstreams[name].Shape
-		if shape == "" {
-			shape = "openai"
-		}
-		customLines += fmt.Sprintf("     %-11s %s/%s → %s (%s-shaped metering)\n",
-			name, base, name, redactURL(upstreams[name].URL), shape)
-	}
-
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
 		if launchDashboard && burnbanRunning(base, token) {
@@ -165,11 +245,39 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 		return err
 	}
 	defer ln.Close()
+	controlLn, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		return fmt.Errorf("open private loopback control listener: %w", err)
+	}
+	defer controlLn.Close()
 
 	// Port 0 is useful for tests and embedded launchers. Always report/open the
 	// address the OS actually assigned rather than an unusable :0 URL.
 	if *port == 0 {
-		base = scheme + "://" + ln.Addr().String()
+		boundPort := ln.Addr().(*net.TCPAddr).Port
+		if *publicURL == "" {
+			base = scheme + "://" + net.JoinHostPort(displayHost, strconv.Itoa(boundPort))
+		}
+	}
+	controlBase := "http://" + controlLn.Addr().String()
+	controlToken, err := newControlToken()
+	if err != nil {
+		return err
+	}
+	statePath := serverStatePath(*dbPath)
+	state := serverState{
+		Version: version, PID: os.Getpid(), URL: base, ControlURL: controlBase,
+		DBPath: *dbPath, StartedAt: time.Now().UTC(), ControlToken: controlToken,
+	}
+
+	customLines := ""
+	for _, name := range slices.Sorted(maps.Keys(custom)) {
+		shape := upstreams[name].Shape
+		if shape == "" {
+			shape = "openai"
+		}
+		customLines += fmt.Sprintf("     %-11s %s/%s → %s (%s-shaped metering)\n",
+			name, base, name, redactURL(upstreams[name].URL), shape)
 	}
 
 	fmt.Printf(`🔥 burnban %s — the meter is running
@@ -200,22 +308,213 @@ func cmdServeMode(args []string, launchDashboard bool) error {
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())
-	web.Register(mux, s, version, prices)
+	if demoMode {
+		registerDemoProviderBlocks(mux, upstreams)
+	}
+	web.RegisterWithConfig(mux, s, web.Config{
+		Version: version, Prices: prices, Demo: demoMode,
+		Exposure:          map[bool]string{true: "team/network", false: "localhost"}[exposed],
+		AuthRequired:      token != "",
+		DisableLocalUsage: exposed,
+		Health: func() web.HealthStatus {
+			h := p.Health()
+			return web.HealthStatus{
+				OK: h.OK, State: h.State, Detail: h.Detail, PersistenceOK: h.PersistenceOK,
+				InFlight: h.InFlight, ReservedUSD: h.ReservedUSD, LastFailure: h.LastFailure,
+			}
+		},
+	})
+	// Invalid or missing local-control credentials must never fall through to
+	// an upstream route.
+	mux.HandleFunc("/api/control/", func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "burnban: invalid local control token", http.StatusUnauthorized)
+	})
+	shutdown := make(chan struct{}, 1)
+	controlMux := http.NewServeMux()
+	controlMux.HandleFunc("GET /api/control/status", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"ok": true, "pid": os.Getpid(), "version": version,
+			"started_at": state.StartedAt, "health": p.Health(),
+		})
+	})
+	controlMux.HandleFunc("POST /api/control/stop", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Cache-Control", "no-store")
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = w.Write([]byte("burnban is shutting down\n"))
+		select {
+		case shutdown <- struct{}{}:
+		default:
+		}
+	})
+	controlDenied := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "burnban: invalid local control token", http.StatusUnauthorized)
+	})
+	controlSrv := &http.Server{
+		Addr:              controlLn.Addr().String(),
+		Handler:           web.LocalSafety("127.0.0.1", true, withControlToken(controlToken, controlMux, controlDenied)),
+		ReadHeaderTimeout: 5 * time.Second,
+		IdleTimeout:       30 * time.Second,
+		MaxHeaderBytes:    16 << 10,
+	}
+	defer controlSrv.Close()
+	publicOrigin := ""
+	if parsedPublic != nil {
+		publicOrigin = parsedPublic.Scheme + "://" + parsedPublic.Host
+	}
 	srv := &http.Server{
-		Addr: addr, Handler: web.WithAuth(token, mux),
+		Addr: addr, Handler: web.LocalSafetyWithPublicOrigin(*host, token == "", publicOrigin, web.WithAuth(token, mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
+	if serverCertificate != nil {
+		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*serverCertificate}, MinVersion: tls.VersionTLS12}
+	}
+	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stopSignals()
+	leaseCtx, cancelLease := context.WithCancel(context.Background())
+	defer cancelLease()
+	leaseLost := make(chan error, 1)
+	go func() {
+		ticker := time.NewTicker(5 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-leaseCtx.Done():
+				return
+			case <-ticker.C:
+				if err := lease.Renew(); err != nil {
+					select {
+					case leaseLost <- err:
+					default:
+					}
+					return
+				}
+			}
+		}
+	}()
+	fatalServeErr := make(chan error, 1)
+	controlServeErr := make(chan error, 1)
+	go func() {
+		if err := controlSrv.Serve(controlLn); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			controlServeErr <- err
+		}
+	}()
+	// Publish lifecycle state only after the private control listener is ready
+	// to accept connections. Status/stop readers may act as soon as this atomic
+	// state file appears.
+	if err := writeServerState(statePath, state); err != nil {
+		return fmt.Errorf("write private lifecycle state: %w", err)
+	}
+	defer removeServerState(statePath, controlToken)
+	shutdownDone := make(chan error, 1)
+	go func() {
+		select {
+		case <-ctx.Done():
+		case <-shutdown:
+		case err := <-leaseLost:
+			fatalServeErr <- fmt.Errorf("database lease renewal failed; meter stopped fail-closed: %w", err)
+		case err := <-controlServeErr:
+			fatalServeErr <- fmt.Errorf("private control listener failed: %w", err)
+		}
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), gracefulShutdownTimeout)
+		defer cancel()
+		shutdownErrors := make(chan error, 2)
+		go func() { shutdownErrors <- srv.Shutdown(shutdownCtx) }()
+		go func() { shutdownErrors <- controlSrv.Shutdown(shutdownCtx) }()
+		shutdownDone <- errors.Join(<-shutdownErrors, <-shutdownErrors)
+	}()
 	if launchDashboard {
 		if err := openDashboard(dashboardURL(base, token)); err != nil {
 			fmt.Fprintf(os.Stderr, "burnban: dashboard is live at %s (could not open the browser: %v)\n", base, err)
 		}
 	}
 	if *tlsCert != "" {
-		return srv.ServeTLS(ln, *tlsCert, *tlsKey)
+		err = srv.ServeTLS(ln, "", "")
+	} else {
+		err = srv.Serve(ln)
 	}
-	return srv.Serve(ln)
+	if errors.Is(err, http.ErrServerClosed) {
+		if shutdownErr := <-shutdownDone; shutdownErr != nil {
+			return fmt.Errorf("graceful shutdown: %w", shutdownErr)
+		}
+		select {
+		case fatalErr := <-fatalServeErr:
+			return fatalErr
+		default:
+			return nil
+		}
+	}
+	return err
+}
+
+func validateBurnbanToken(token string, requireStrong bool) error {
+	// Keep the shared secret portable across browsers, SDK header libraries,
+	// proxies, and shells. Visible ASCII without spaces is the conservative
+	// intersection; generated hex/base64url secrets fit it naturally.
+	for i := 0; i < len(token); i++ {
+		if token[i] < 0x21 || token[i] > 0x7e {
+			return fmt.Errorf("BURNBAN_TOKEN must contain only visible ASCII characters without spaces")
+		}
+	}
+	if !requireStrong {
+		return nil
+	}
+	if len(token) < 16 {
+		return fmt.Errorf("BURNBAN_TOKEN must be at least 16 characters for network exposure")
+	}
+	distinct := map[byte]struct{}{}
+	for i := 0; i < len(token); i++ {
+		distinct[token[i]] = struct{}{}
+	}
+	if len(distinct) < 4 {
+		return fmt.Errorf("BURNBAN_TOKEN must be a randomly generated secret for network exposure")
+	}
+	return nil
+}
+
+func loadServerCertificate(certPath, keyPath, publicHost string, now time.Time) (tls.Certificate, error) {
+	pair, err := tls.LoadX509KeyPair(certPath, keyPath)
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("load TLS certificate/key: %w", err)
+	}
+	if len(pair.Certificate) == 0 {
+		return tls.Certificate{}, fmt.Errorf("TLS certificate file contains no certificates")
+	}
+	leaf, err := x509.ParseCertificate(pair.Certificate[0])
+	if err != nil {
+		return tls.Certificate{}, fmt.Errorf("parse TLS leaf certificate: %w", err)
+	}
+	if now.Before(leaf.NotBefore) {
+		return tls.Certificate{}, fmt.Errorf("TLS certificate is not valid until %s", leaf.NotBefore.Format(time.RFC3339))
+	}
+	if !now.Before(leaf.NotAfter) {
+		return tls.Certificate{}, fmt.Errorf("TLS certificate expired at %s", leaf.NotAfter.Format(time.RFC3339))
+	}
+	if publicHost != "" {
+		if err := leaf.VerifyHostname(publicHost); err != nil {
+			return tls.Certificate{}, fmt.Errorf("TLS certificate does not cover --public-url host %q: %w", publicHost, err)
+		}
+	}
+	pair.Leaf = leaf
+	return pair, nil
+}
+
+func registerDemoProviderBlocks(mux *http.ServeMux, upstreams map[string]proxy.Upstream) {
+	for name := range upstreams {
+		mux.HandleFunc("/"+name+"/", func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusConflict)
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"error": map[string]string{
+					"type":    "burnban_demo_network_disabled",
+					"message": "demo mode uses isolated fixtures and never forwards provider traffic; run `burnban serve` for real agents",
+				},
+			})
+		})
+	}
 }
 
 func isLoopbackHost(host string) bool {

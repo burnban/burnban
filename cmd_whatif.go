@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"sort"
+	"strings"
 	"text/tabwriter"
 
 	"github.com/burnban/burnban/internal/pricing"
@@ -21,6 +22,9 @@ func cmdWhatif(args []string) error {
 	model := fs.String("model", "", "compare against one model only")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
+	if err := requireNoArgs(fs); err != nil {
+		return err
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -32,15 +36,15 @@ func cmdWhatif(args []string) error {
 	if err != nil {
 		return err
 	}
-	tot, err := s.TokenTotals(from)
+	requests, err := s.TokenRows(from)
 	if err != nil {
 		return err
 	}
+	tot := tokenTotalsFromRows(requests)
 	if tot.Requests == 0 {
 		fmt.Printf("no priced traffic in %s — nothing to reprice\n", label)
 		return nil
 	}
-
 	prices, err := pricing.Load()
 	if err != nil {
 		return err
@@ -56,10 +60,10 @@ func cmdWhatif(args []string) error {
 		if !ok {
 			return fmt.Errorf("no pricing for %q — add it to ~/.burnban/pricing.json", *model)
 		}
-		rows = append(rows, row{*model, pricing.Reprice(p, tot.In, tot.Out, tot.CacheRead, tot.CacheWrite)})
+		rows = append(rows, row{*model, repriceRequests(*model, p, requests)})
 	} else {
 		for name, p := range prices.Models {
-			rows = append(rows, row{name, pricing.Reprice(p, tot.In, tot.Out, tot.CacheRead, tot.CacheWrite)})
+			rows = append(rows, row{name, repriceRequests(name, p, requests)})
 		}
 		// Name tiebreak keeps equal-priced models in a stable order run to run.
 		sort.Slice(rows, func(i, j int) bool {
@@ -77,22 +81,82 @@ func cmdWhatif(args []string) error {
 	w := tabwriter.NewWriter(os.Stdout, 2, 4, 2, ' ', tabwriter.AlignRight)
 	fmt.Fprintln(w, "model\twould cost\tvs actual\t")
 	for _, r := range rows {
-		fmt.Fprintf(w, "%s\t$%.2f\t%s\t\n", r.model, r.cost, deltaPct(r.cost, tot.CostUSD))
+		fmt.Fprintf(w, "%s\t$%.2f\t%s\t\n", terminalText(r.model, 100), r.cost, deltaPct(r.cost, tot.CostUSD))
 	}
 	w.Flush()
 
 	if *model == "" && len(rows) > 1 && tot.CostUSD > 0 {
 		best := rows[0]
 		if best.cost < tot.CostUSD {
-			fmt.Printf("\n  cheapest: %s would have cut $%.2f (%s)\n", best.model, tot.CostUSD-best.cost, deltaPct(best.cost, tot.CostUSD))
+			fmt.Printf("\n  cheapest: %s would have cut $%.2f (%s)\n", terminalText(best.model, 100), tot.CostUSD-best.cost, deltaPct(best.cost, tot.CostUSD))
 		}
 	}
-	fmt.Println("\n  same token counts assumed — tokenizers and model verbosity differ,")
-	fmt.Println("  so read this as a floor estimate, not a quote.")
+	fmt.Println("\n  each request is repriced separately, including target long-context tiers;")
+	fmt.Println("  tokenizers and model verbosity differ, so this is an estimate, not a quote.")
+	fmt.Println("  standard target rates are used; service-tier, geography, and hosted-tool fees are not projected.")
 	if tot.Unpriced > 0 {
 		fmt.Printf("  %d unpriced request(s) excluded (unknown models, recorded at $0).\n", tot.Unpriced)
 	}
+	if tot.Unmetered > 0 {
+		fmt.Printf("  %d unmetered response(s) excluded because no usable token accounting was available.\n", tot.Unmetered)
+	}
+	if tot.Incomplete > 0 {
+		fmt.Printf("  %d partial/cancelled response(s) are represented by lower-bound token estimates.\n", tot.Incomplete)
+	}
+	if tot.FeeUnpriced > 0 {
+		fmt.Printf("  %d call(s) had provider-hosted fee dimensions excluded from this token-only comparison.\n", tot.FeeUnpriced)
+	}
 	return nil
+}
+
+func repriceRequests(model string, p pricing.Price, requests []store.TokenRow) float64 {
+	var total float64
+	claude := strings.HasPrefix(strings.ToLower(model), "claude")
+	for _, request := range requests {
+		if request.PricingState != store.PricingPriced {
+			continue
+		}
+		cost := pricing.RepriceRequest(p, request.In, request.Out, request.CacheRead, request.CacheWrite)
+		oneHour := min(max(request.CacheWrite1h, 0), max(request.CacheWrite, 0))
+		if oneHour > 0 && claude {
+			// Anthropic's 1-hour cache tier is 2x input. RepriceRequest has
+			// already applied the ordinary cache-write multiplier to this subset.
+			writeMult := p.CacheWriteMult
+			if writeMult <= 0 {
+				writeMult = 1
+			}
+			cost += float64(oneHour) * p.InputPerMTok * (2 - writeMult) / 1e6
+		}
+		total += max(0, cost)
+	}
+	return max(0, total)
+}
+
+func tokenTotalsFromRows(requests []store.TokenRow) *store.Totals {
+	totals := &store.Totals{}
+	for _, request := range requests {
+		if request.Incomplete {
+			totals.Incomplete++
+		}
+		if request.FeeUnpriced {
+			totals.FeeUnpriced++
+		}
+		switch request.PricingState {
+		case store.PricingPriced:
+			totals.Requests++
+			totals.In += request.In
+			totals.Out += request.Out
+			totals.CacheRead += request.CacheRead
+			totals.CacheWrite += request.CacheWrite
+			totals.CacheWrite1h += request.CacheWrite1h
+			totals.CostUSD += request.CostUSD
+		case store.PricingUnknown:
+			totals.Unpriced++
+		case store.PricingUnmetered:
+			totals.Unmetered++
+		}
+	}
+	return totals
 }
 
 func deltaPct(cost, actual float64) string {

@@ -2,7 +2,7 @@
 
 **Meter, itemize, and cap what your AI agents spend. Meters watch. Burnban acts.**
 
-Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and guards API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, account, cloud service, or additional telemetry destination: provider-bound requests still leave your machine for the upstream you configured, while Burnban keeps its ledger local.
+Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and guards API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, account, cloud service, or unsolicited telemetry destination: provider-bound requests still leave your machine for the upstream you configured, while Burnban keeps its ledger local.
 
 ![burnban dashboard](docs/dashboard.png)
 
@@ -24,9 +24,9 @@ irm https://raw.githubusercontent.com/burnban/burnban/main/install.ps1 | iex
 
 The release installers verify the downloaded archive against the published
 SHA-256 checksums. For a reviewable install, download the script first, inspect
-it, then run it. Release archives also include an SPDX SBOM, third-party notices,
-and provenance attestations. Pin a release by setting the documented download
-base to that release instead of `latest`.
+it, then run it. Releases publish SPDX SBOMs, third-party notices, and GitHub
+provenance attestations. Pin a release by setting the documented download base
+to that release instead of `latest`.
 
 The installer adds a one-click **Burnban** launcher. It starts the real meter,
 opens the dashboard, and reopens the existing dashboard when Burnban is already
@@ -45,14 +45,18 @@ figures are deterministic fixtures and the page carries a persistent DEMO badge.
 Then the real thing:
 
 ```sh
-# 1. run the meter
+# Terminal 1: run the meter (leave it running)
 burnban serve
+```
 
-# 2. point your agents at it (keys stay in your env — burnban never stores them)
+In Terminal 2:
+
+```sh
+# Point your agents at it (keys stay in your env — burnban never stores them)
 export ANTHROPIC_BASE_URL=http://localhost:4141/anthropic
 export OPENAI_BASE_URL=http://localhost:4141/openai/v1
 
-# 3. watch the burn
+# Watch the burn
 burnban top                      # in the terminal, or
 open http://localhost:4141       # the live dashboard
 ```
@@ -120,7 +124,7 @@ That's a real machine's last 30 days: a $200/mo plan doing **$4,173** of API-pri
 Which door is yours?
 
 - **Per-token keys** — agent fleets, CI, production apps, Codex on an API key → `burnban serve` meters and **caps** the spend live.
-- **Flat-rate/agent-managed plan** — Claude, ChatGPT, Hermes, OpenClaw → the dashboard and `burnban subsidy` auto-detect supported local logs and show dollars plus token type. The day your fleet moves to keys, the meter is already installed.
+- **Flat-rate/agent-managed plan** — Claude Code, Codex, Hermes Agent, OpenClaw, Goose → the dashboard and `burnban subsidy` auto-detect supported local logs and show dollars plus token type. The day your fleet moves to keys, the meter is already installed.
 
 ## What you get
 
@@ -167,7 +171,7 @@ The tools in this space either **watch** or **weigh a ton**. Log reporters ([ccu
 | local preflight spend guard | — | ✅ | ✅ | ✅ **reservation + 402 + kill switch** |
 | runs entirely on your machine | ✅ | ◐ self-hosted service | — | ✅ localhost-only default |
 | your provider keys stay yours | ✅ n/a | — virtual keys | — provider keys uploaded | ✅ pass-through, never stored |
-| infra needed | none | Postgres + Redis + config | an account | **one binary, one SQLite file** |
+| infra needed | none | Postgres + Redis + config | an account | **one binary, one local SQLite ledger** |
 | waste receipts (dupes, cache misses) | — | — | — | ✅ |
 | reprice your traffic (`whatif`) | — | — | — | ✅ |
 | agent self-throttling over MCP | — | — | — | ✅ |
@@ -230,49 +234,155 @@ request.
 
 ## Plug it into your tools (MCP)
 
-Burnban ships an MCP server, so any MCP client — Claude Code, Claude Desktop, Cursor — can query spend and control budgets in natural language:
+Burnban ships an MCP server, so any MCP client — Claude Code, Claude Desktop,
+Cursor — can query local spend in natural language:
 
 ```sh
 claude mcp add burnban -- burnban mcp
 ```
 
-Then just ask: *"what have my agents burned today?"*, *"set a $150 weekly cap"*, *"burn ban, now"*. Tools exposed: `spend_summary`, `burn_status`, `set_daily_cap` (daily/weekly/monthly windows), `burn_ban`, `lift_burn_ban`. Everything runs over stdio against the local database — no network, no keys.
+Read-only is the secure default. It exposes `spend_summary`, `burn_status`, and
+`pricing_diagnostics`; `burn_status` can report a named agent's daily
+spent/cap/remaining position. Everything runs over stdio against the local
+database—no network and no provider keys.
+
+Budget mutation tools are intentionally absent unless the human launching the
+MCP server grants that authority:
+
+```sh
+claude mcp add burnban-admin -- burnban mcp --allow-budget-admin
+```
+
+That opt-in adds strict-argument `set_daily_cap` (daily/weekly/monthly),
+`burn_ban`, and `lift_burn_ban` tools. Prompt content cannot turn a read-only
+MCP process into an administrator, and missing `usd` is rejected rather than
+interpreted as “remove the cap.”
 
 `burn_status` reports spent/cap/**remaining** per window, which turns budgets into something agents can plan around: an agent that can ask *"how much runway is left?"* can downshift models or stop gracefully instead of slamming into the 402.
 
 ## For IT managers
 
-One binary, one SQLite file, nothing leaves your network. Three deployment shapes:
+One binary and one local SQLite ledger. SQLite may create WAL/shared-memory
+files while running, and Burnban keeps a private lifecycle-state file beside
+the ledger. Burnban adds no unsolicited telemetry destination; model
+traffic still goes to the upstream provider or internal endpoint you configure.
+Three deployment shapes:
 
 1. **Per developer** (default) — localhost-only, zero config, each dev owns their meter.
 2. **Team gateway** — one instance the whole team points at:
 
    ```sh
-   BURNBAN_TOKEN=$(openssl rand -hex 16) burnban serve --host 0.0.0.0 \
-     --tls-cert /etc/burnban/tls.crt --tls-key /etc/burnban/tls.key
+   export BURNBAN_TOKEN="$(openssl rand -hex 32)"
+   burnban serve --host 0.0.0.0 \
+     --tls-cert /etc/burnban/tls.crt --tls-key /etc/burnban/tls.key \
+     --public-url https://burnban.example.com
    ```
 
-   Non-loopback binds **fail closed** without a strong token and TLS. Clients authenticate with the `x-burnban-token` header (Claude Code: `ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ..."`); it is consumed locally and never forwarded to providers. Bearer auth is reserved for dashboard/control routes because provider routes need `Authorization` for the provider key. The dashboard also accepts `?token=`. Spend is attributed per agent and per `x-burnban-session`; those attribution headers also stay local.
-3. **Docker** — bind the host side to loopback and put TLS at your ingress: `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 127.0.0.1:4141:4141 -v burnban-data:/data burnban serve --host 0.0.0.0 --allow-insecure-http`. The escape hatch is only for a local container bridge or TLS reverse proxy; never expose that plaintext port to a network.
+   Keep that exact value in a secret manager and distribute it only to authorized
+   users and clients. Non-loopback binds **fail closed** without a strong token
+   and TLS. Clients authenticate with the `x-burnban-token` header (Claude Code:
+   `ANTHROPIC_CUSTOM_HEADERS="x-burnban-token: ..."`); it is consumed locally and
+   never forwarded to providers. Bearer auth is reserved for Burnban-owned API
+   routes because provider routes need `Authorization` for the provider key.
+   The public dashboard shell prompts for the token and holds it in tab-scoped
+   session storage; URL/query tokens are rejected and legacy `?token=` values
+   are removed without being consumed. Spend is attributed per agent and per
+   `x-burnban-session`; those attribution headers also stay local. Team clients
+   that cannot send a custom Burnban header are not compatible with team mode.
+   Host-local Claude/Codex/etc. log scanning is disabled on a team/network
+   gateway so the operator account's local usage is not exposed to token users;
+   `burnban subsidy` remains available as a local CLI workflow on that host.
+   Agent/session labels are self-asserted by any client holding the shared token:
+   they are useful cooperative attribution and cap labels, not authenticated
+   user identity or a tamper-resistant team policy boundary.
+3. **Docker** — the image runs as an unprivileged UID with `/data` as its
+   writable volume. Bind the host side to loopback and put TLS at your ingress:
+   `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 127.0.0.1:4141:4141 -v burnban-data:/data burnban serve --host 0.0.0.0 --allow-insecure-http --public-url https://burnban.example.com`.
+   The escape hatch is only for a local container bridge or TLS reverse proxy;
+   never expose that plaintext port directly to a network.
 
 And the plumbing your existing stack expects:
 
-- **Prometheus** — scrape `/metrics`: total/per-model/per-agent spend counters, spend and cap gauges for the day/week/month windows, and ban state. Grafana dashboard in two minutes, no exporter.
+- **Prometheus** — scrape `/metrics`: retained-ledger request/spend gauges,
+  bounded per-model/per-agent gauges, spend and cap gauges for the
+  day/week/month windows, confidence states, and ban state. Retained-ledger
+  gauges can decrease after an explicit `prune`; they are not monotonic counters.
 - **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`) and again when a cap trips.
-- **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines.
-- **Audit trail** — every request row (timestamp, model, agent, session, tokens, cost, status) lives in plain SQLite you can query directly.
+- **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines. Spreadsheet formulas and terminal controls in provider-controlled labels are neutralized.
+- **Audit trail** — every request row (timestamp, provider route, model, agent, session, tokens, usage/pricing confidence, cost, status) lives in plain SQLite you can query directly. Request bodies are never stored; duplicate heuristics use a keyed local fingerprint.
 
 ## Pricing table
 
-Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6 Sol/Terra/Luna, Gemini 3.1 Pro / 3.5 Flash / 3.1 Flash-Lite, and Grok 4.5) ship embedded, plus older GPT-5 and Claude generations so `subsidy` can price historical session logs. Per-request long-context tiers and GPT-5.6 cache writes are included. Vendors change prices; override or extend without waiting for a release by creating `~/.burnban/pricing.json`:
+The embedded July 10, 2026 snapshot includes Claude Sonnet 5's time-bounded
+introductory price, Fable 5 / Opus 4.8 / Sonnet 4.6 / Haiku 4.5, GPT-5.6
+Sol/Terra/Luna, Gemini 3.1 Pro / 3.5 Flash / 3.1 Flash-Lite, Grok 4.5, and
+historical generations used by local logs. Per-request long-context tiers and
+cache economics are included. The table carries source URLs, effective dates,
+verification dates, and expiry diagnostics:
+
+```sh
+burnban pricing
+burnban pricing --model claude-sonnet-5
+burnban doctor
+```
+
+Vendors change prices. Override or extend without waiting for a release by
+creating `~/.burnban/pricing.json`:
 
 ```json
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}
 ```
 
+Overrides are decoded strictly: misspelled fields, trailing JSON, negative or
+non-finite values, and zero paid input/output rates are rejected. A truly free
+model must say `"free": true` explicitly.
+
+## Operations, data, and uninstall
+
+```sh
+burnban status                         # running PID, URL, DB, start time
+burnban doctor                         # DB write, price freshness, health, recent routing
+burnban stop                           # authenticated local graceful shutdown
+burnban prune --older-than 90d --yes   # explicit, irreversible ledger retention
+```
+
+Burnban never prunes implicitly. `prune` deletes request rows only; caps and
+settings remain, runs in bounded batches, and refuses while the ledger is being
+served. Pruning is logical retention and does not necessarily shrink the file;
+run SQLite `VACUUM` separately while Burnban is stopped if physical reclamation
+is required. Stop the meter before copying the SQLite database for a simple
+offline backup. Runtime lifecycle state is stored beside the selected database
+with mode `0600` where POSIX permissions apply and contains a random local
+control token. On Windows, isolation relies on the containing directory's ACL;
+keep any custom database directory private to the service account. Lifecycle
+commands use a separate ephemeral HTTP listener bound only to `127.0.0.1`, even
+when the public listener uses TLS.
+
+The tokenless localhost default is network-local, not an operating-system user
+boundary: another process or user account on the same shared host may be able to
+read dashboard/metrics data or send provider requests through the listener. Set
+`BURNBAN_TOKEN` even on loopback when the machine is shared or untrusted.
+
+The installer records only files it owns. Normal uninstall removes the binary,
+managed launcher/shortcuts, and managed PATH block while retaining
+`~/.burnban`; purge is a separate explicit action and refuses to run while the
+meter is active:
+
+```sh
+curl -fsSL https://burnban.sh/install | sh -s -- --uninstall
+curl -fsSL https://burnban.sh/install | sh -s -- --uninstall --purge
+```
+
+On Windows, save `install.ps1`, inspect it, then run
+`./install.ps1 -Uninstall` or `./install.ps1 -Uninstall -Purge`.
+
+See [data and privacy](DATA_AND_PRIVACY.md), [security reporting](SECURITY.md),
+[support](SUPPORT.md), [contributing](CONTRIBUTING.md), and
+[release verification](RELEASING.md) for the full contracts.
+
 ## Free forever vs. paid
 
-Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no telemetry, no account, no license checks, and **no code path to our servers**: if a feature ever needs the network beyond your model providers, it ships as a separate opt-in product, never in the meter.
+Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and an optional operator-configured webhook. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
 
 Paid is a clean ladder, and every rung buys a real thing:
 
@@ -286,15 +396,25 @@ The MIT meter only recognizes generic local `external_*` policy settings; it con
 
 - **Cache-aware request shaping** — stabilize prompt prefixes to turn cache misses into 90%-off hits
 - **Downshift routing** — send trivial calls to a cheap tier or your local Ollama, by policy (`whatif` already tells you what it would save)
-- **`burnban doctor`** — one command that verifies your agents are actually flowing through the meter
 - **State of Agent Spend** — opt-in anonymous aggregates, published monthly
 - **Burnban Teams** — the paid fleet control plane above; [early access](https://burnban.dev#teams)
 
 ## Development
 
+Prerequisite: Go 1.25 or newer. From a source checkout:
+
 ```sh
+go mod verify
 make build   # single static binary, no cgo
 make test    # offline: fixtures, not API calls — development burns $0
+go test -race ./...
 ```
+
+Configuration is CLI flags first, with `BURNBAN_DB`, `BURNBAN_TOKEN`, and the
+documented provider-upstream environment variables supplying defaults where
+applicable. Run `burnban <command> --help` for the authoritative flags. Please
+read [CONTRIBUTING.md](CONTRIBUTING.md) before submitting a change; never paste
+provider keys, raw prompts, private logs, or a real Burnban database into an
+issue.
 
 MIT © Oday Brahem

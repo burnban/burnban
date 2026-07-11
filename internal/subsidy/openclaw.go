@@ -32,14 +32,20 @@ type openClawLine struct {
 // append-only session transcript. Session metadata contains only snapshots;
 // the JSONL response entries are the authoritative per-call values.
 func ScanOpenClaw(dir string, since time.Time, emit func(Event)) (int, error) {
+	result, err := scanOpenClaw(dir, since, DefaultScanLimits(), emit)
+	return result.Sessions, err
+}
+
+func scanOpenClaw(dir string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
 	sessions := 0
-	err := walkJSONL(dir, since, func(path string) error {
+	scanner := newFileScanner(limits)
+	err := scanner.walkJSONL(dir, since, func(path string) error {
 		clean := filepath.ToSlash(path)
 		if !strings.Contains(clean, "/sessions/") || strings.HasSuffix(clean, ".trajectory.jsonl") {
 			return nil
 		}
 		contributed := false
-		err := eachLine(path, func(line []byte) {
+		err := scanner.eachLine(path, func(line []byte) {
 			if !bytes.Contains(line, []byte(`"usage"`)) || !bytes.Contains(line, []byte(`"assistant"`)) {
 				return
 			}
@@ -76,5 +82,5 @@ func ScanOpenClaw(dir string, since time.Time, emit func(Event)) (int, error) {
 		}
 		return err
 	})
-	return sessions, err
+	return scanResult{Sessions: sessions, Stats: scanner.stats}, err
 }
