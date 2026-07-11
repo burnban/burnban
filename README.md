@@ -2,7 +2,7 @@
 
 **Meter, itemize, and cap what your AI agents spend. Meters watch. Burnban acts.**
 
-Your agents run all day on your API keys. Burnban is a single-binary local proxy that sits between them and every provider, shows you the burn in real time, itemizes the waste with dollar amounts attached, and cuts spend off when you say so. No signup, no cloud, no telemetry — your traffic never leaves your machine. On a flat-rate plan instead of keys? [`burnban subsidy`](#on-a-flat-rate-plan-price-your-subsidy) prices those sessions too — no proxy needed.
+Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and caps API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, no cloud, no telemetry — your traffic and usage never leave your machine.
 
 ![burnban dashboard](docs/dashboard.png)
 
@@ -10,9 +10,22 @@ Your agents run all day on your API keys. Burnban is a single-binary local proxy
 
 ## Quickstart
 
+macOS / Linux:
+
 ```sh
-curl -fsSL https://burnban.sh/install | sh    # or: make build (Go, no cgo)
+curl -fsSL https://burnban.sh/install | sh    # CLI + desktop/application launcher
 ```
+
+Windows PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/syft8/burnban/main/install.ps1 | iex
+```
+
+The installer adds a one-click **Burnban** launcher. It starts the real meter,
+opens the dashboard, and reopens the existing dashboard when Burnban is already
+running. No Electron runtime, account, or cloud service is installed. From a
+source checkout, `make build` builds the same single Go binary.
 
 No traffic yet? See it alive first — fake data, fresh every run:
 
@@ -35,6 +48,13 @@ burnban top                      # in the terminal, or
 open http://localhost:4141       # the live dashboard
 ```
 
+Or launch **Burnban** from the desktop/application menu (equivalent to
+`burnban desktop`). The dashboard automatically detects local Claude Code,
+Codex, Hermes Agent, OpenClaw, and Goose usage and shows input, output, cache-read,
+and cache-write tokens at API-equivalent prices. Proxy-billed API-key traffic
+stays in a separate live-spend section, so a `$0` proxy ledger never hides
+subscription usage or pretends those tokens were billed.
+
 Set a budget and forget about surprise bills:
 
 ```sh
@@ -51,16 +71,17 @@ And when the bill makes you wonder:
 burnban whatif --since 7d       # your exact week repriced on every model
 ```
 
-## On a flat-rate plan? Price your subsidy
+## On a flat-rate or agent-managed plan? Price local usage
 
-Claude Code on Pro/Max and Codex on ChatGPT plans never produce a per-token bill, so there's nothing to meter — but there is something to price. Both tools keep session logs with real token counts, and burnban reads them where they sit:
+Claude Code, Codex, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices the same tokens with its API table:
 
 ```sh
-burnban subsidy                 # last 30 days; --since 7d, --daily, --json
+burnban subsidy                 # auto-detect all five sources
+                                # last 30 days; --since 7d, --daily, --json
 ```
 
 ```
-BURNBAN SUBSIDY — last 30 days of subscription traffic at API prices
+BURNBAN LOCAL USAGE — last 30 days at API-equivalent prices
 
 CLAUDE CODE  ~/.claude/projects · 2015 sessions
   model                      calls  in      out     cache-r   cache-w  API price
@@ -72,7 +93,7 @@ CLAUDE CODE  ~/.claude/projects · 2015 sessions
 
 TOTAL  $4173.49 at API prices
 
-  claude-code pace ≈ $4173.49/mo vs  Claude Pro $20 → 208.7x  ·  Claude Max 20x $200 → 20.9x
+  claude-code pace ≈ $4173.49/mo vs  Claude Max 20x $200 → 20.9x
 ```
 
 That's a real machine's last 30 days: a $200/mo plan doing **$4,173** of API-priced work — a 20.9× subsidy. Same cache-aware table the proxy prices with, plus one thing the API bill never shows: the logs split 5-minute and 1-hour cache writes, so the 1h tier is billed at its real 2× rate. Deduped by message ID (a multi-block reply logs its usage more than once — counting that twice is how you get inflated numbers).
@@ -80,15 +101,15 @@ That's a real machine's last 30 days: a $200/mo plan doing **$4,173** of API-pri
 Which door is yours?
 
 - **Per-token keys** — agent fleets, CI, production apps, Codex on an API key → `burnban serve` meters and **caps** the spend live.
-- **Flat-rate plan** — Claude Pro/Max, ChatGPT Plus/Team/Pro → `burnban subsidy` shows what the plan is worth. The day your fleet outgrows it and moves to keys, the meter is already installed.
+- **Flat-rate/agent-managed plan** — Claude, ChatGPT, Hermes, OpenClaw → the dashboard and `burnban subsidy` auto-detect supported local logs and show dollars plus token type. The day your fleet moves to keys, the meter is already installed.
 
 ## What you get
 
-- **Live dashboard** at `http://localhost:4141` — the burn total glowing ember, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
+- **Local + live dashboard** at `http://localhost:4141` — auto-detected subscription/agent logs with dollar and token breakdowns, plus live proxy burn, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
 - **`burnban report`** — spend for any window, plus **waste receipts**: duplicate requests that burned money twice, and cache hit rates that mean you're paying full price for context the provider would re-serve at a 90% discount.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
-- **`burnban subsidy`** — no proxy needed: read the session logs Claude Code and Codex already keep and price your flat-rate usage at API rates. "Your $200 Max plan did $4,173 of API work this month."
+- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
 - **Budget enforcement** — daily, weekly, and monthly dollar caps enforced in the request path with a clear 402 your agent surfaces verbatim, per-agent daily caps, a webhook warning at 80% (yours to tune) *before* the hard stop, and a manual **burn ban** kill switch.
 - **Honest numbers** — usage comes from provider usage frames, priced per model including cache read/write economics. Unknown models are recorded as unpriced, never guessed. Estimated counts are flagged as estimates.
 
@@ -150,17 +171,27 @@ added         525µs     1.5ms     8.5ms     924µs
 | OpenAI    | `http://localhost:4141/openai/v1`   | `OPENAI_BASE_URL`     |
 | Gemini    | `http://localhost:4141/gemini`      | `GOOGLE_GEMINI_BASE_URL` |
 | xAI       | `http://localhost:4141/xai/v1`      | `OPENAI_BASE_URL` (xAI SDKs are OpenAI-compatible) |
+| OpenRouter | `http://localhost:4141/openrouter/v1` | client API-base setting |
+| Groq      | `http://localhost:4141/groq/v1`     | client API-base setting |
+| Mistral   | `http://localhost:4141/mistral/v1`  | client API-base setting |
+| DeepSeek  | `http://localhost:4141/deepseek/v1` | client API-base setting |
+| Ollama    | `http://localhost:4141/ollama/v1`   | client API-base setting |
+| vLLM      | `http://localhost:4141/vllm/v1`     | client API-base setting |
 
-**Anything OpenAI-compatible** — Groq, Mistral, DeepSeek, OpenRouter, your local Ollama or vLLM — mounts as an extra route with one flag and gets metered the same way:
+Those popular OpenAI-compatible routes work out of the box. Add any other
+endpoint with `--upstream`:
 
 ```sh
-burnban serve --upstream groq=https://api.groq.com/openai --upstream ollama=http://localhost:11434
-# then point clients at http://localhost:4141/groq/v1/…, /ollama/v1/…
+burnban serve --upstream corp=https://llm.corp.internal/openai
+# then point the client at http://localhost:4141/corp/v1/…
 ```
 
 Endpoint speaks a different dialect? Prefix the url with its usage shape — `--upstream corp=anthropic:https://llm.corp.internal` — and burnban meters it with that provider's parser.
 
-Attribution: burnban groups spend by the client's `User-Agent`. For finer tracking, send `x-burnban-agent` / `x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
+Attribution: Burnban normalizes identifying user agents for Claude Code,
+Codex, Hermes, OpenClaw, Aider, Goose, Cline, Roo Code, Continue, Cursor,
+Windsurf, and OpenCode. For exact custom tracking, send `x-burnban-agent` /
+`x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
 
 OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact counts; without it burnban estimates output tokens and flags them as estimates in reports.
 
@@ -211,6 +242,8 @@ Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 
 Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no telemetry, no account, no license checks, and **no code path to our servers**: if a feature ever needs the network beyond your model providers, it ships as a separate opt-in product, never in the meter.
 
 The paid product is **[Burnban Teams](https://burnban.dev#teams)** (early access): a separate centralized control plane and opt-in connector for fleets, with org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, an immutable policy audit log, and aggregate chargeback exports. SSO/SAML, billing automation, fine-grained RBAC, and HA storage are enterprise follow-ons, not features hidden in this binary. The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if the control plane is unreachable.
+
+For individuals there's a **[Supporter](https://burnban.dev#supporter)** tier — $5/month (or $50/year). It gates nothing in this binary; it buys your name on the supporters' ledger at burnban.dev, priority issue triage, and first access to **Personal Sync** (one ledger across your machines — a separate opt-in product, per the vow) at a founding price locked for life. No telemetry means there is nothing to sell but the work; supporters are how the free meter stays free.
 
 ## Roadmap
 
