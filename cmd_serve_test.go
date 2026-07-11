@@ -132,6 +132,7 @@ func TestServeLifecycleHealthAndGracefulStop(t *testing.T) {
 }
 
 func TestTLSServeKeepsLifecycleControlOnPlainLoopback(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
 	certPath, keyPath := writeTestCertificate(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})
 	dbPath := filepath.Join(t.TempDir(), "tls-lifecycle.db")
 	errCh := make(chan error, 1)
@@ -271,6 +272,7 @@ func writeTestCertificate(t *testing.T, notBefore, notAfter time.Time, dnsNames 
 }
 
 func TestGracefulStopWaitsForInFlightProxyRequest(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
 	started := make(chan struct{})
 	release := make(chan struct{})
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -352,6 +354,7 @@ func TestGracefulStopWaitsForInFlightProxyRequest(t *testing.T) {
 }
 
 func TestPruneRefusesWhileLedgerIsServed(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
 	dbPath := filepath.Join(t.TempDir(), "live-prune.db")
 	s, err := store.Open(dbPath)
 	if err != nil {

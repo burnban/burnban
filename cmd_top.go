@@ -74,7 +74,7 @@ const (
 
 func renderTop(s *store.Store, color bool) (string, error) {
 	now := time.Now()
-	sum, err := s.Summarize(budget.DayStart(now))
+	sum, err := s.Top(budget.DayStart(now), 5)
 	if err != nil {
 		return "", err
 	}
@@ -124,20 +124,14 @@ func renderTop(s *store.Store, color bool) (string, error) {
 
 	if len(sum.Models) > 0 {
 		b.WriteString("BY MODEL (today)\n")
-		for i, m := range sum.Models {
-			if i == 5 {
-				break
-			}
+		for _, m := range sum.Models {
 			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", terminalText(m.Model, 34), m.Requests, m.Cost)
 		}
 		b.WriteString("\n")
 	}
 	if len(sum.Agents) > 0 {
 		b.WriteString("BY AGENT (today)\n")
-		for i, a := range sum.Agents {
-			if i == 5 {
-				break
-			}
+		for _, a := range sum.Agents {
 			fmt.Fprintf(&b, "  %-34s %6d req  $%.4f\n", terminalText(a.Agent, 34), a.Requests, a.Cost)
 		}
 		b.WriteString("\n")

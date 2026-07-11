@@ -102,7 +102,7 @@ func TestConfiguredPublicOriginSurvivesTLSProxyHostRewrite(t *testing.T) {
 	publicOrigin := "https://" + proxyServer.Listener.Addr().String()
 	backend := httptest.NewServer(web.LocalSafetyWithPublicOrigin(
 		"127.0.0.1", false, publicOrigin,
-		http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }),
+		web.WithAuth("team-secret", http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) })),
 	))
 	t.Cleanup(backend.Close)
 	target, err := url.Parse(backend.URL)
@@ -127,6 +127,7 @@ func TestConfiguredPublicOriginSurvivesTLSProxyHostRewrite(t *testing.T) {
 	req, _ := http.NewRequest(http.MethodGet, proxyServer.URL+"/api/summary", nil)
 	req.Header.Set("Origin", proxyServer.URL)
 	req.Header.Set("Sec-Fetch-Site", "same-origin")
+	req.Header.Set("x-burnban-token", "team-secret")
 	resp, err := proxyServer.Client().Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -145,6 +146,31 @@ func TestConfiguredPublicOriginSurvivesTLSProxyHostRewrite(t *testing.T) {
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden {
 		t.Fatalf("unconfigured origin through proxy = %d, want 403", resp.StatusCode)
+	}
+}
+
+func TestConfiguredPublicOriginNormalizesDefaultPortsDotsAndIPv6(t *testing.T) {
+	tests := []struct {
+		name, configured, origin string
+	}{
+		{name: "https explicit default", configured: "https://example.com:443", origin: "https://example.com"},
+		{name: "http explicit default", configured: "http://example.com:80", origin: "http://example.com"},
+		{name: "trailing dot", configured: "https://example.com.:443", origin: "https://example.com"},
+		{name: "ipv6 default", configured: "https://[::1]:443", origin: "https://[::1]"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := web.LocalSafetyWithPublicOrigin("127.0.0.1", false, tt.configured,
+				http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusNoContent) }))
+			req := httptest.NewRequest(http.MethodGet, "http://127.0.0.1:4141/api/summary", nil)
+			req.Host = "127.0.0.1:4141"
+			req.Header.Set("Origin", tt.origin)
+			rr := httptest.NewRecorder()
+			handler.ServeHTTP(rr, req)
+			if rr.Code != http.StatusNoContent {
+				t.Fatalf("status=%d body=%q", rr.Code, rr.Body.String())
+			}
+		})
 	}
 }
 

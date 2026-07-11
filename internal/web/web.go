@@ -243,10 +243,10 @@ func LocalSafetyWithPublicOrigin(bindHost string, tokenlessLoopback bool, public
 		}
 		if rawOrigin := r.Header.Get("Origin"); rawOrigin != "" {
 			origin, err := url.Parse(rawOrigin)
-			validOrigin := err == nil && origin.Scheme != "" && origin.Host != "" && origin.User == nil &&
+			validOrigin := err == nil && (origin.Scheme == "http" || origin.Scheme == "https") && origin.Host != "" && origin.User == nil &&
 				origin.Path == "" && origin.RawPath == "" && origin.RawQuery == "" && origin.Fragment == ""
-			matchesRequest := validOrigin && sameAuthority(origin.Host, r.Host)
-			matchesPublic := validOrigin && public != nil && strings.EqualFold(origin.Scheme, public.Scheme) && sameAuthority(origin.Host, public.Host)
+			matchesRequest := validOrigin && sameAuthority(origin.Host, r.Host, origin.Scheme)
+			matchesPublic := validOrigin && public != nil && strings.EqualFold(origin.Scheme, public.Scheme) && sameAuthority(origin.Host, public.Host, origin.Scheme)
 			if !matchesRequest && !matchesPublic {
 				http.Error(w, "burnban: cross-origin browser requests are not allowed", http.StatusForbidden)
 				return
@@ -276,8 +276,34 @@ func hostOnly(authority string) string {
 	return strings.Trim(authority, "[]")
 }
 
-func sameAuthority(a, b string) bool {
-	return strings.EqualFold(strings.TrimSuffix(a, "."), strings.TrimSuffix(b, "."))
+func sameAuthority(a, b, scheme string) bool {
+	normalize := func(authority string) (string, bool) {
+		parsed, err := url.Parse("//" + authority)
+		if err != nil || parsed.Host == "" || parsed.User != nil || parsed.Path != "" ||
+			parsed.RawPath != "" || parsed.RawQuery != "" || parsed.Fragment != "" {
+			return "", false
+		}
+		host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+		if host == "" {
+			return "", false
+		}
+		if ip := net.ParseIP(host); ip != nil {
+			host = ip.String()
+		}
+		port := parsed.Port()
+		if port == "" {
+			switch strings.ToLower(scheme) {
+			case "http":
+				port = "80"
+			case "https":
+				port = "443"
+			}
+		}
+		return net.JoinHostPort(host, port), true
+	}
+	left, leftOK := normalize(a)
+	right, rightOK := normalize(b)
+	return leftOK && rightOK && left == right
 }
 
 type subscriptionResponse struct {

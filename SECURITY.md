@@ -49,6 +49,13 @@ network. Reports that only demonstrate plaintext interception after explicitly
 enabling that option are not vulnerabilities, though documentation improvements
 are welcome.
 
+The tokenless loopback default is not an operating-system user boundary; use a
+token on shared hosts. Team mode has one shared gateway secret, and client-sent
+agent/session labels are cooperative attribution rather than authenticated
+identity. Reports premised only on a shared-token client relabeling itself are
+therefore expected behavior; bypassing the shared token or an enforced global
+cap remains in scope.
+
 ## Disclosure and credit
 
 Please allow the maintainers to prepare a fix and release before publication.

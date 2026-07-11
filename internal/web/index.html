@@ -630,7 +630,7 @@
     $("platformWindows").setAttribute("aria-pressed", String(platform === "powershell"));
     $("teamAuthNote").classList.toggle("hidden", !authRequired);
     $("compatibleNote").textContent = authRequired
-      ? "Team mode requires custom-header support in every client. Clients that cannot send x-burnban-token cannot use this gateway. Set x-burnban-agent as a second custom header for exact attribution."
+      ? "Team mode requires custom-header support in every client. Clients that cannot send x-burnban-token cannot use this gateway. x-burnban-agent is a cooperative, client-asserted label—not authenticated identity."
       : "Also works with OpenClaw, Goose, Cline, Roo Code, Continue, Cursor, Windsurf, OpenCode, OpenRouter, Groq, Mistral, DeepSeek, and OpenAI-compatible clients. Set x-burnban-agent when a client supports custom headers for exact attribution.";
   }
 

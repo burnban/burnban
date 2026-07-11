@@ -9,6 +9,9 @@ const viewports = [
 ];
 const teamBaseURL = process.env.BURNBAN_TEAM_BASE_URL;
 const teamToken = process.env.BURNBAN_TEAM_TEST_TOKEN;
+if (process.env.CI && (!teamBaseURL || !teamToken)) {
+  throw new Error("CI must provide the isolated team gateway URL and test token");
+}
 
 async function waitForLiveDashboard(page) {
   await page.goto("/");

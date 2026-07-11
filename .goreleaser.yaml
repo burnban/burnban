@@ -37,6 +37,7 @@ archives:
       - SECURITY.md
       - SUPPORT.md
       - THIRD_PARTY_NOTICES.md
+      - docs/dashboard.png
       - install.sh
       - install.ps1
       - third_party_licenses/**/*

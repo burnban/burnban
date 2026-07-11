@@ -209,8 +209,10 @@ func cmdStatusTo(args []string, out io.Writer) error {
 	fs := newCommandFlagSet("status")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err
@@ -279,8 +281,10 @@ func cmdStatusTo(args []string, out io.Writer) error {
 func cmdStop(args []string) error {
 	fs := newCommandFlagSet("stop")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err

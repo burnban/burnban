@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -53,8 +54,10 @@ func cmdDoctor(args []string) error {
 	pricingMaxAge := fs.Duration("pricing-max-age", 45*24*time.Hour, "maximum acceptable age of the embedded pricing verification")
 	sendToken := fs.Bool("send-token", false, "send BURNBAN_TOKEN to an explicit non-loopback --url")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err
@@ -264,12 +267,35 @@ func endpointConfigurationState(raw, meterBase, expectedPath string) (string, bo
 	if normalizedPath == "" {
 		normalizedPath = "/"
 	}
-	matches := strings.EqualFold(endpoint.Scheme, meter.Scheme) &&
-		strings.EqualFold(endpoint.Host, meter.Host) && normalizedPath == expectedPath
+	endpointOrigin, endpointOK := normalizedHTTPOrigin(endpoint)
+	meterOrigin, meterOK := normalizedHTTPOrigin(meter)
+	matches := endpointOK && meterOK && endpointOrigin == meterOrigin && normalizedPath == expectedPath
 	if matches {
 		return "set; points to this meter's " + expectedPath + " route", true
 	}
 	return "set; expected this meter's " + expectedPath + " route", false
+}
+
+func normalizedHTTPOrigin(parsed *url.URL) (string, bool) {
+	if parsed == nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" {
+		return "", false
+	}
+	host := strings.TrimSuffix(strings.ToLower(parsed.Hostname()), ".")
+	if host == "" {
+		return "", false
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		host = ip.String()
+	}
+	port := parsed.Port()
+	if port == "" {
+		if parsed.Scheme == "https" {
+			port = "443"
+		} else {
+			port = "80"
+		}
+	}
+	return strings.ToLower(parsed.Scheme) + "://" + net.JoinHostPort(host, port), true
 }
 
 func printDoctor(r doctorResult) {
@@ -314,8 +340,10 @@ func cmdPricing(args []string) error {
 	fs := flag.NewFlagSet("pricing", flag.ContinueOnError)
 	model := fs.String("model", "", "show the effective price for one model ID")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err
@@ -372,8 +400,10 @@ func cmdPrune(args []string) error {
 	olderThan := fs.String("older-than", "", "delete rows older than this window (for example 90d or 2160h)")
 	before := fs.String("before", "", "delete rows before YYYY-MM-DD")
 	yes := fs.Bool("yes", false, "confirm irreversible deletion")
-	if err := fs.Parse(args); err != nil {
+	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
+	} else if help {
+		return nil
 	}
 	if err := requireNoArgs(fs); err != nil {
 		return err

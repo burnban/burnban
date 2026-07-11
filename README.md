@@ -309,7 +309,7 @@ And the plumbing your existing stack expects:
   gauges can decrease after an explicit `prune`; they are not monotonic counters.
 - **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`) and again when a cap trips.
 - **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines. Spreadsheet formulas and terminal controls in provider-controlled labels are neutralized.
-- **Audit trail** — every request row (timestamp, provider route, model, agent, session, tokens, usage/pricing confidence, cost, status) lives in plain SQLite you can query directly. Request bodies are never stored; duplicate heuristics use a keyed local fingerprint.
+- **Audit trail** — every request row (timestamp, provider route, model, self-asserted agent/session labels, tokens, usage/pricing confidence, cost, status) lives in plain SQLite you can query directly. Request bodies are never stored; duplicate heuristics use a keyed local fingerprint.
 
 ## Pricing table
 
@@ -345,6 +345,10 @@ burnban doctor                         # DB write, price freshness, health, rece
 burnban stop                           # authenticated local graceful shutdown
 burnban prune --older-than 90d --yes   # explicit, irreversible ledger retention
 ```
+
+For supervisors, `burnban status --json` emits a stable health document and
+returns nonzero when the meter is inactive, unreachable, malformed, or
+fail-closed/unhealthy.
 
 Burnban never prunes implicitly. `prune` deletes request rows only; caps and
 settings remain, runs in bounded batches, and refuses while the ledger is being

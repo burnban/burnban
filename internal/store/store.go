@@ -616,6 +616,18 @@ type Summary struct {
 	DupWastedUSD    float64
 }
 
+// TopSummary is the deliberately small aggregate needed by the live terminal
+// view. Unlike Summary it does not calculate receipt duplication, confidence
+// diagnostics, unused token dimensions, or long top-20/other breakdowns.
+type TopSummary struct {
+	Requests  int64
+	Cost      float64
+	In        int64
+	CacheRead int64
+	Models    []ModelRow
+	Agents    []AgentRow
+}
+
 // MetricsSummary is the cheap lifetime view used by Prometheus/doctor. It
 // intentionally excludes token-wide and duplicate-receipt scans; those belong
 // to the richer, windowed Summarize path used by reports and the dashboard.
@@ -690,6 +702,66 @@ func (s *Store) LifetimeMetrics() (*MetricsSummary, error) {
 	return out, rows.Err()
 }
 
+// Top returns today's terminal-view totals and a bounded model/agent ranking.
+// It intentionally never touches body_hash or the duplicate-receipt grouping
+// used by full reports, because top refreshes continuously while it is open.
+func (s *Store) Top(since time.Time, limit int) (*TopSummary, error) {
+	if limit < 1 || limit > 100 {
+		return nil, fmt.Errorf("top limit must be between 1 and 100")
+	}
+	ts := since.UTC().Format(time.RFC3339)
+	out := &TopSummary{}
+	if err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
+		COALESCE(SUM(in_tokens),0), COALESCE(SUM(cache_read_tokens),0)
+		FROM requests WHERE ts >= ?`, ts).
+		Scan(&out.Requests, &out.Cost, &out.In, &out.CacheRead); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(`SELECT model, COUNT(*), COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? AND model != ''
+		GROUP BY model ORDER BY SUM(cost_usd) DESC, model LIMIT ?`, ts, limit)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var row ModelRow
+		if err := rows.Scan(&row.Model, &row.Requests, &row.Cost); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out.Models = append(out.Models, row)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	rows, err = s.db.Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
+		FROM requests WHERE ts >= ? AND agent != ''
+		GROUP BY agent ORDER BY SUM(cost_usd) DESC, agent LIMIT ?`, ts, limit)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var row AgentRow
+		if err := rows.Scan(&row.Agent, &row.Requests, &row.Cost); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		out.Agents = append(out.Agents, row)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	ts := since.UTC().Format(time.RFC3339)
 	sum := &Summary{}
@@ -756,10 +828,10 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	if modelTotal.Requests > modelTop.Requests {
 		sum.ModelOther = &ModelRow{
 			Requests: modelTotal.Requests - modelTop.Requests,
-			In: max(0, modelTotal.In-modelTop.In), Out: max(0, modelTotal.Out-modelTop.Out),
-			CacheRead: max(0, modelTotal.CacheRead-modelTop.CacheRead),
+			In:       max(0, modelTotal.In-modelTop.In), Out: max(0, modelTotal.Out-modelTop.Out),
+			CacheRead:  max(0, modelTotal.CacheRead-modelTop.CacheRead),
 			CacheWrite: max(0, modelTotal.CacheWrite-modelTop.CacheWrite),
-			Cost: max(0, modelTotal.Cost-modelTop.Cost),
+			Cost:       max(0, modelTotal.Cost-modelTop.Cost),
 		}
 	}
 
@@ -865,9 +937,9 @@ func (s *Store) TokenRows(t time.Time) ([]TokenRow, error) {
 }
 
 // TokenTotals sums tokens and cost across priced rows since t in one scan and
-// counts excluded confidence states on the side. What-if uses these totals for
-// the actual baseline and exclusions, then reprices exported rows individually
-// so per-request long-context tiers remain accurate.
+// counts excluded confidence states on the side. It remains available for
+// aggregate callers; what-if now derives its baseline, exclusions, and
+// per-request repricing from one consistent TokenRows snapshot.
 func (s *Store) TokenTotals(t time.Time) (*Totals, error) {
 	var tot Totals
 	err := s.db.QueryRow(`SELECT
@@ -892,20 +964,24 @@ func (s *Store) TokenTotals(t time.Time) (*Totals, error) {
 	return &tot, nil
 }
 
-// Export returns raw request rows for finance/audit tooling, oldest first.
-func (s *Store) Export(since time.Time) ([]Request, error) {
+// StreamExport visits raw request rows for finance/audit tooling, oldest first.
+// The callback runs while the SQLite read cursor is open; returning an error
+// stops the scan immediately. Memory use is bounded by one Request.
+func (s *Store) StreamExport(since time.Time, visit func(Request) error) error {
+	if visit == nil {
+		return fmt.Errorf("export visitor must not be nil")
+	}
 	rows, err := s.db.Query(`SELECT ts, provider, model, agent, session,
 		in_tokens, out_tokens, cache_read_tokens, cache_write_tokens,
 		cache_write_1h_tokens, cost_usd, latency_ms, status, streamed, estimated, priced, body_hash,
 		usage_state, pricing_state, incomplete, enforcement_unsafe, route,
 		service_tier, inference_geo, server_tool_calls, fee_unpriced
-		FROM requests WHERE ts >= ? ORDER BY ts`,
+		FROM requests WHERE ts >= ? ORDER BY ts, id`,
 		since.UTC().Format(time.RFC3339))
 	if err != nil {
-		return nil, err
+		return err
 	}
 	defer rows.Close()
-	var out []Request
 	for rows.Next() {
 		var r Request
 		var ts string
@@ -915,15 +991,28 @@ func (s *Store) Export(since time.Time) ([]Request, error) {
 			&r.CostUSD, &r.LatencyMs, &r.Status, &streamed, &estimated, &priced,
 			&r.BodyHash, &r.UsageState, &r.PricingState, &incomplete, &enforcementUnsafe,
 			&r.Route, &r.ServiceTier, &r.InferenceGeo, &r.ServerToolCalls, &feeUnpriced); err != nil {
-			return nil, err
+			return err
 		}
 		r.Ts, _ = time.Parse(time.RFC3339, ts)
 		r.Streamed, r.Estimated, r.Priced = streamed == 1, estimated == 1, priced == 1
 		r.Incomplete, r.EnforcementUnsafe = incomplete == 1, enforcementUnsafe == 1
 		r.FeeUnpriced = feeUnpriced == 1
-		out = append(out, r)
+		if err := visit(r); err != nil {
+			return err
+		}
 	}
-	return out, rows.Err()
+	return rows.Err()
+}
+
+// Export returns raw request rows for compatibility with callers that need a
+// slice. Streaming consumers should use StreamExport to keep memory bounded.
+func (s *Store) Export(since time.Time) ([]Request, error) {
+	var out []Request
+	err := s.StreamExport(since, func(r Request) error {
+		out = append(out, r)
+		return nil
+	})
+	return out, err
 }
 
 func (s *Store) SetSetting(key, value string) error {

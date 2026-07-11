@@ -67,6 +67,19 @@ func TestControlClientNeverUsesEnvironmentProxy(t *testing.T) {
 	}
 }
 
+func TestServerStateAliveRejectsUnrelatedProcessOnReusedPort(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("some unrelated local service"))
+	}))
+	t.Cleanup(srv.Close)
+	if serverStateAlive(serverState{
+		PID: 123, ControlURL: srv.URL, ControlToken: strings.Repeat("a", 64),
+	}) {
+		t.Fatal("an arbitrary HTTP 200 on a reused loopback port was treated as the live Burnban server")
+	}
+}
+
 func TestStatusJSONIsNonzeroWhenInactive(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "not-running.db")
 	var out bytes.Buffer

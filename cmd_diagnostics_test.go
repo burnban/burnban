@@ -44,6 +44,15 @@ func TestEndpointConfigurationRequiresExactProviderRoute(t *testing.T) {
 			}
 		})
 	}
+	for _, pair := range [][2]string{
+		{"https://burnban.example:443/anthropic", "https://burnban.example"},
+		{"https://burnban.example./anthropic", "https://burnban.example:443"},
+		{"https://[::1]:443/anthropic", "https://[::1]"},
+	} {
+		if state, ok := endpointConfigurationState(pair[0], pair[1], "/anthropic"); !ok {
+			t.Errorf("normalized origin %q vs %q did not match: %s", pair[0], pair[1], state)
+		}
+	}
 }
 
 func TestDoctorUsesPrivateAuthenticatedControlState(t *testing.T) {

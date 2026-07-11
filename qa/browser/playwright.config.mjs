@@ -8,9 +8,13 @@ export default defineConfig({
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
+  projects: [
+    { name: "chromium", use: { browserName: "chromium" } },
+    { name: "firefox", use: { browserName: "firefox" } },
+    { name: "webkit", use: { browserName: "webkit" } }
+  ],
   use: {
     baseURL: process.env.BURNBAN_BROWSER_BASE_URL || "http://127.0.0.1:4242",
-    browserName: "chromium",
     headless: true,
     trace: "retain-on-failure"
   }

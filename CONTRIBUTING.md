@@ -31,8 +31,9 @@ CGO_ENABLED=0 go build ./...
 ```
 
 CI additionally runs Staticcheck, `govulncheck`, secret and license checks,
-release snapshot/install tests, pinned Playwright/axe responsive and
-accessibility checks, CodeQL, and a non-root container smoke test.
+release snapshot/install tests, pinned Chromium/Firefox/WebKit Playwright/axe
+responsive and accessibility checks, CodeQL, and a non-root container smoke
+test.
 
 ## Pull requests
 
