@@ -39,6 +39,13 @@ var upstreamName = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9._-]*$`)
 
 const gracefulShutdownTimeout = 10 * time.Second
 
+// Provider API keys, trace baggage, and custom attribution headers normally
+// fit comfortably below 64 KiB in aggregate. Capping the public listener here
+// prevents the previous 1 MiB header allocation from becoming a cheap memory
+// abuse path while retaining substantially more room than common 8-16 KiB
+// reverse-proxy defaults.
+const providerMaxHeaderBytes = 64 << 10
+
 // upstreamFlags collects repeated --upstream name=url pairs. A url may be
 // prefixed with a usage shape ("anthropic:https://…", "gemini:…") when the
 // endpoint is not OpenAI-compatible; unprefixed urls meter as OpenAI-shaped,
@@ -367,7 +374,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 		Addr: addr, Handler: web.LocalSafetyWithPublicOrigin(*host, token == "", publicOrigin, web.WithAuth(token, mux)),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
-		MaxHeaderBytes:    1 << 20,
+		MaxHeaderBytes:    providerMaxHeaderBytes,
 	}
 	if serverCertificate != nil {
 		srv.TLSConfig = &tls.Config{Certificates: []tls.Certificate{*serverCertificate}, MinVersion: tls.VersionTLS12}

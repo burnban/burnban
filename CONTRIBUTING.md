@@ -9,7 +9,7 @@ not a public issue.
 
 ## Development setup
 
-Burnban requires Go 1.25 or newer. Tests use local fixtures and loopback servers;
+Burnban requires Go 1.25.12 or newer. Tests use local fixtures and loopback servers;
 they must not consume paid model APIs or require provider credentials.
 
 ```sh

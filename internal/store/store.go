@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -65,7 +66,10 @@ CREATE TABLE IF NOT EXISTS runtime_leases (
 `
 
 type Store struct {
-	db *sql.DB
+	db                *sql.DB
+	snapshotReader    readQueryer
+	requestMutationMu sync.Mutex
+	requestRevision   atomic.Uint64
 }
 
 func Open(path string) (*Store, error) {
@@ -370,25 +374,44 @@ func normalizeRequest(r *Request) {
 
 func (s *Store) Insert(r Request) error {
 	normalizeRequest(&r)
-	_, err := s.db.Exec(`INSERT INTO requests
+	return s.mutateRequests(func() error {
+		_, err := s.db.Exec(`INSERT INTO requests
 		(ts, provider, model, agent, session, in_tokens, out_tokens,
 		 cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, cost_usd, latency_ms,
 		 status, streamed, estimated, priced, body_hash, usage_state,
 		 pricing_state, incomplete, enforcement_unsafe, route, service_tier,
 		 inference_geo, server_tool_calls, fee_unpriced)
 		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
-		r.Ts.UTC().Format(time.RFC3339), r.Provider, r.Model, r.Agent, r.Session,
-		r.InTokens, r.OutTokens, r.CacheReadTokens, r.CacheWriteTokens, r.CacheWrite1hTokens,
-		r.CostUSD, r.LatencyMs, r.Status, b2i(r.Streamed), b2i(r.Estimated),
-		b2i(r.Priced), r.BodyHash, string(r.UsageState), string(r.PricingState),
-		b2i(r.Incomplete), b2i(r.EnforcementUnsafe), r.Route, r.ServiceTier,
-		r.InferenceGeo, r.ServerToolCalls, b2i(r.FeeUnpriced))
-	return err
+			r.Ts.UTC().Format(time.RFC3339), r.Provider, r.Model, r.Agent, r.Session,
+			r.InTokens, r.OutTokens, r.CacheReadTokens, r.CacheWriteTokens, r.CacheWrite1hTokens,
+			r.CostUSD, r.LatencyMs, r.Status, b2i(r.Streamed), b2i(r.Estimated),
+			b2i(r.Priced), r.BodyHash, string(r.UsageState), string(r.PricingState),
+			b2i(r.Incomplete), b2i(r.EnforcementUnsafe), r.Route, r.ServiceTier,
+			r.InferenceGeo, r.ServerToolCalls, b2i(r.FeeUnpriced))
+		return err
+	})
+}
+
+// RequestRevision is an even/odd sequence lock for request mutations. Even
+// values are stable snapshots; odd values mean Insert or PruneBatch is in
+// progress. Admission caches publish only unchanged even revisions. Coherence
+// covers mutations made through this Store instance; Burnban's serve lease and
+// live-prune refusal enforce that single-writer invariant in production.
+func (s *Store) RequestRevision() uint64 { return s.requestRevision.Load() }
+
+func (s *Store) mutateRequests(fn func() error) error {
+	s.requestMutationMu.Lock()
+	s.requestRevision.Add(1)
+	defer func() {
+		s.requestRevision.Add(1)
+		s.requestMutationMu.Unlock()
+	}()
+	return fn()
 }
 
 func (s *Store) SpentSince(t time.Time) (float64, error) {
 	var v float64
-	err := s.db.QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE ts >= ?`,
+	err := s.readQueryer().QueryRow(`SELECT COALESCE(SUM(cost_usd),0) FROM requests WHERE ts >= ?`,
 		t.UTC().Format(time.RFC3339)).Scan(&v)
 	return v, err
 }
@@ -445,7 +468,7 @@ func (s *Store) BudgetUsageSinceMulti(ts []time.Time) ([]BudgetUsage, error) {
 		dests[i*2] = &out[i].SpentUSD
 		dests[i*2+1] = &out[i].EnforcementGaps
 	}
-	err := s.db.QueryRow(`SELECT `+strings.Join(cols, ", ")+
+	err := s.readQueryer().QueryRow(`SELECT `+strings.Join(cols, ", ")+
 		` FROM requests WHERE ts >= ?`, args...).Scan(dests...)
 	return out, err
 }
@@ -496,7 +519,7 @@ func (s *Store) UsageSinceForAgents(t time.Time, agents []string) (map[string]Ag
 		for _, agent := range chunk {
 			args = append(args, agent)
 		}
-		rows, err := s.db.Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
+		rows, err := s.readQueryer().Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
 			FROM requests WHERE ts >= ? AND agent IN (?`+
 			strings.Repeat(",?", len(chunk)-1)+`) GROUP BY agent`, args...)
 		if err != nil {
@@ -560,7 +583,7 @@ func (s *Store) HourlySeries(since time.Time) ([]SeriesPoint, error) {
 // SettingsWithPrefix returns all settings whose key starts with prefix,
 // keyed by the remainder after the prefix.
 func (s *Store) SettingsWithPrefix(prefix string) (map[string]string, error) {
-	rows, err := s.db.Query(`SELECT key, value FROM settings WHERE key LIKE ? || '%'`, prefix)
+	rows, err := s.readQueryer().Query(`SELECT key, value FROM settings WHERE key LIKE ? || '%'`, prefix)
 	if err != nil {
 		return nil, err
 	}
@@ -647,7 +670,7 @@ type MetricsSummary struct {
 func (s *Store) LifetimeMetrics() (*MetricsSummary, error) {
 	out := &MetricsSummary{}
 	var lastRequest string
-	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
+	err := s.readQueryer().QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
 		COALESCE(SUM(CASE WHEN pricing_state='unknown' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(CASE WHEN pricing_state='unmetered' THEN 1 ELSE 0 END),0),
 		COALESCE(SUM(incomplete),0), COALESCE(SUM(enforcement_unsafe),0),
@@ -660,7 +683,7 @@ func (s *Store) LifetimeMetrics() (*MetricsSummary, error) {
 	if lastRequest != "" {
 		out.LastRequestAt, _ = time.Parse(time.RFC3339, lastRequest)
 	}
-	rows, err := s.db.Query(`SELECT model, COUNT(*),
+	rows, err := s.readQueryer().Query(`SELECT model, COUNT(*),
 		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
 		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		COALESCE(SUM(cost_usd),0) FROM requests WHERE model != ''
@@ -683,7 +706,7 @@ func (s *Store) LifetimeMetrics() (*MetricsSummary, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	rows, err = s.db.Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
+	rows, err = s.readQueryer().Query(`SELECT agent, COUNT(*), COALESCE(SUM(cost_usd),0)
 		FROM requests WHERE agent != '' GROUP BY agent ORDER BY SUM(cost_usd) DESC LIMIT 20`)
 	if err != nil {
 		return nil, err
@@ -766,7 +789,7 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 	ts := since.UTC().Format(time.RFC3339)
 	sum := &Summary{}
 	var lastRequest string
-	err := s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
+	err := s.readQueryer().QueryRow(`SELECT COUNT(*), COALESCE(SUM(cost_usd),0),
 		COALESCE(SUM(in_tokens),0), COALESCE(SUM(out_tokens),0),
 		COALESCE(SUM(cache_read_tokens),0), COALESCE(SUM(cache_write_tokens),0),
 		COALESCE(SUM(cache_write_1h_tokens),0),
@@ -786,7 +809,7 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 		sum.LastRequestAt, _ = time.Parse(time.RFC3339, lastRequest)
 	}
 
-	rows, err := s.db.Query(`WITH grouped AS (
+	rows, err := s.readQueryer().Query(`WITH grouped AS (
 		SELECT model, COUNT(*) AS requests,
 			COALESCE(SUM(in_tokens),0) AS in_tokens,
 			COALESCE(SUM(out_tokens),0) AS out_tokens,
@@ -835,7 +858,7 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 		}
 	}
 
-	rows, err = s.db.Query(`WITH grouped AS (
+	rows, err = s.readQueryer().Query(`WITH grouped AS (
 		SELECT agent, COUNT(*) AS requests, COALESCE(SUM(cost_usd),0) AS cost
 		FROM requests WHERE ts >= ? AND agent != '' GROUP BY agent
 	)
@@ -868,7 +891,7 @@ func (s *Store) Summarize(since time.Time) (*Summary, error) {
 		}
 	}
 
-	err = s.db.QueryRow(`SELECT COUNT(*), COALESCE(SUM(wasted),0) FROM (
+	err = s.readQueryer().QueryRow(`SELECT COUNT(*), COALESCE(SUM(wasted),0) FROM (
 		SELECT SUM(cost_usd) * (COUNT(*)-1.0)/COUNT(*) AS wasted
 		FROM requests WHERE ts >= ? AND body_hash != ''
 		GROUP BY body_hash HAVING COUNT(*) > 1)`, ts).
@@ -1038,7 +1061,7 @@ func (s *Store) SetSettingOnce(key, value string) (bool, error) {
 // GetSetting returns "" for keys that were never set.
 func (s *Store) GetSetting(key string) (string, error) {
 	var v string
-	err := s.db.QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
+	err := s.readQueryer().QueryRow(`SELECT value FROM settings WHERE key = ?`, key).Scan(&v)
 	if err == sql.ErrNoRows {
 		return "", nil
 	}
@@ -1056,7 +1079,7 @@ func (s *Store) GetSettings(keys ...string) (map[string]string, error) {
 	for i, k := range keys {
 		args[i] = k
 	}
-	rows, err := s.db.Query(`SELECT key, value FROM settings WHERE key IN (?`+
+	rows, err := s.readQueryer().Query(`SELECT key, value FROM settings WHERE key IN (?`+
 		strings.Repeat(",?", len(keys)-1)+`)`, args...)
 	if err != nil {
 		return nil, err
@@ -1115,13 +1138,18 @@ func (s *Store) PruneBatch(before time.Time, limit int) (int64, error) {
 	if limit <= 0 || limit > 100_000 {
 		return 0, fmt.Errorf("prune batch size must be between 1 and 100000")
 	}
-	res, err := s.db.Exec(`DELETE FROM requests WHERE id IN (
-		SELECT id FROM requests WHERE ts < ? ORDER BY id LIMIT ?
-	)`, before.UTC().Format(time.RFC3339), limit)
-	if err != nil {
-		return 0, err
-	}
-	return res.RowsAffected()
+	var deleted int64
+	err := s.mutateRequests(func() error {
+		res, err := s.db.Exec(`DELETE FROM requests WHERE id IN (
+			SELECT id FROM requests WHERE ts < ? ORDER BY id LIMIT ?
+		)`, before.UTC().Format(time.RFC3339), limit)
+		if err != nil {
+			return err
+		}
+		deleted, err = res.RowsAffected()
+		return err
+	})
+	return deleted, err
 }
 
 // Checkpoint asks SQLite to move completed WAL pages into the main database

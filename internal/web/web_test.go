@@ -182,6 +182,15 @@ func TestMetrics(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	for _, suffix := range []string{"alpha", "beta"} {
+		if err := s.Insert(store.Request{
+			Ts: time.Now(), Provider: "openai", Model: strings.Repeat("same-prefix-", 25) + suffix,
+			Agent: strings.Repeat("same-agent-", 25) + suffix, CostUSD: .01, Status: 200,
+			PricingState: store.PricingPriced,
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
 	resp, err := http.Get(srv.URL + "/metrics")
 	if err != nil {
 		t.Fatal(err)
@@ -213,6 +222,15 @@ func TestMetrics(t *testing.T) {
 				t.Fatalf("metric line contains an unsupported label escape: %q", line)
 			}
 		}
+	}
+	modelSeries := map[string]bool{}
+	for _, line := range strings.Split(metrics, "\n") {
+		if strings.HasPrefix(line, `burnban_ledger_model_cost_usd{model="same-prefix-`) {
+			modelSeries[line] = true
+		}
+	}
+	if len(modelSeries) != 2 {
+		t.Fatalf("long distinct labels collapsed into duplicate Prometheus series: %+v", modelSeries)
 	}
 }
 

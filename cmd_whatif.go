@@ -42,7 +42,7 @@ func cmdWhatif(args []string) error {
 	}
 	tot := tokenTotalsFromRows(requests)
 	if tot.Requests == 0 {
-		fmt.Printf("no priced traffic in %s — nothing to reprice\n", label)
+		fmt.Print(noPricedTrafficMessage(label, tot))
 		return nil
 	}
 	prices, err := pricing.Load()
@@ -107,6 +107,24 @@ func cmdWhatif(args []string) error {
 		fmt.Printf("  %d call(s) had provider-hosted fee dimensions excluded from this token-only comparison.\n", tot.FeeUnpriced)
 	}
 	return nil
+}
+
+func noPricedTrafficMessage(label string, totals *store.Totals) string {
+	var message strings.Builder
+	fmt.Fprintf(&message, "no priced traffic in %s — nothing to reprice\n", label)
+	if totals.Unpriced > 0 {
+		fmt.Fprintf(&message, "%d unknown-price request(s) were excluded.\n", totals.Unpriced)
+	}
+	if totals.Unmetered > 0 {
+		fmt.Fprintf(&message, "%d unmetered response(s) had no usable token accounting.\n", totals.Unmetered)
+	}
+	if totals.Incomplete > 0 {
+		fmt.Fprintf(&message, "%d response(s) were partial or cancelled.\n", totals.Incomplete)
+	}
+	if totals.FeeUnpriced > 0 {
+		fmt.Fprintf(&message, "%d call(s) had unpriced provider-hosted fee dimensions.\n", totals.FeeUnpriced)
+	}
+	return message.String()
 }
 
 func repriceRequests(model string, p pricing.Price, requests []store.TokenRow) float64 {

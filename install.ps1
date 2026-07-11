@@ -11,6 +11,8 @@ param(
 $ErrorActionPreference = "Stop"
 $Repo = "burnban/burnban"
 $Temp = $null
+$StagedBinary = $null
+$BackupBinary = $null
 
 if ($Purge -and -not $Uninstall) {
     throw "-Purge is only valid with -Uninstall"
@@ -251,7 +253,18 @@ function Get-BurnbanArtifact([string]$Name, [string]$Destination) {
     }
     $Uri = [Uri]($BaseUrl.TrimEnd('/') + "/" + $Name)
     if ($Uri.Scheme -ne "https") { throw "Remote release downloads must use HTTPS: $Uri" }
-    Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination
+    $Response = Invoke-WebRequest -UseBasicParsing -Uri $Uri -OutFile $Destination -PassThru
+    # Windows PowerShell exposes ResponseUri; PowerShell 7 exposes the final
+    # RequestUri. Validate the redirect destination as well as the initial URL.
+    $FinalUri = $null
+    if ($null -ne $Response.BaseResponse.ResponseUri) {
+        $FinalUri = [Uri]$Response.BaseResponse.ResponseUri
+    } elseif ($null -ne $Response.BaseResponse.RequestMessage) {
+        $FinalUri = [Uri]$Response.BaseResponse.RequestMessage.RequestUri
+    }
+    if ($null -eq $FinalUri -or $FinalUri.Scheme -ne "https") {
+        throw "Remote release redirect did not end on HTTPS: $FinalUri"
+    }
 }
 
 try {
@@ -270,10 +283,44 @@ try {
     $Extracted = Join-Path $Temp "extracted"
     Expand-Archive -Path $Zip -DestinationPath $Extracted -Force
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    Copy-Item (Join-Path $Extracted "burnban.exe") $Binary -Force
+    $StagedBinary = Join-Path $InstallDir (".burnban-install-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    Copy-Item (Join-Path $Extracted "burnban.exe") $StagedBinary
     # This happens only after the archive matches the published SHA-256.
-    Unblock-File $Binary -ErrorAction SilentlyContinue
-    if (-not (Test-BurnbanBinary $Binary)) { throw "Installed binary did not pass its version check" }
+    Unblock-File $StagedBinary -ErrorAction SilentlyContinue
+    if (-not (Test-BurnbanBinary $StagedBinary)) {
+        throw "Downloaded binary did not pass its version check; the existing install was retained"
+    }
+    # Recheck immediately before replacement, then use same-directory file
+    # replacement so a failed upgrade cannot truncate a working executable.
+    if ((Test-Path -LiteralPath $Binary) -and -not (Test-BurnbanBinary $Binary)) {
+        throw "Refusing to overwrite a non-Burnban file: $Binary"
+    }
+    if (Test-Path -LiteralPath $Binary) {
+        $BackupBinary = Join-Path $InstallDir (".burnban-backup-" + [Guid]::NewGuid().ToString("N") + ".exe")
+        [IO.File]::Replace($StagedBinary, $Binary, $BackupBinary, $true)
+    } else {
+        [IO.File]::Move($StagedBinary, $Binary)
+    }
+    $StagedBinary = $null
+    if (-not (Test-BurnbanBinary $Binary)) {
+        if ($null -ne $BackupBinary -and (Test-Path -LiteralPath $BackupBinary)) {
+            try {
+                [IO.File]::Replace($BackupBinary, $Binary, $null, $true)
+            } catch {
+                $RetainedBackup = $BackupBinary
+                $BackupBinary = $null
+                throw "Installed binary validation failed and rollback failed; the preceding version remains at ${RetainedBackup}: $($_.Exception.Message)"
+            }
+            $BackupBinary = $null
+            throw "Installed binary did not pass its version check; the preceding version was restored"
+        }
+        Remove-Item -LiteralPath $Binary -Force -ErrorAction SilentlyContinue
+        throw "Installed binary did not pass its version check; the incomplete fresh install was removed"
+    }
+    if ($null -ne $BackupBinary) {
+        Remove-Item -LiteralPath $BackupBinary -Force
+        $BackupBinary = $null
+    }
 
     $PathAdded = $false
     if ($null -ne $ExistingManifest) { $PathAdded = [bool]$ExistingManifest.path_added }
@@ -323,6 +370,12 @@ try {
     Write-Host "Desktop: double-click Burnban"
     Write-Host "Terminal: burnban serve   |   burnban subsidy"
 } finally {
+    if ($null -ne $StagedBinary) {
+        Remove-Item -LiteralPath $StagedBinary -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $BackupBinary -and (Test-Path -LiteralPath $BackupBinary)) {
+        Write-Warning "An interrupted upgrade left the preceding executable at $BackupBinary"
+    }
     if ($null -ne $Temp) {
         Remove-Item $Temp -Recurse -Force -ErrorAction SilentlyContinue
     }

@@ -27,7 +27,7 @@ func TestDemoRefusesExistingCustomDatabase(t *testing.T) {
 }
 
 func TestDemoRefusesDatabaseServedByLiveProcess(t *testing.T) {
-	const token = "0123456789abcdef0123456789abcdef"
+	const token = "burnban-test-demo-control-token-not-a-secret"
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path != "/api/control/status" || r.Header.Get("x-burnban-control-token") != token {
 			http.Error(w, "no", http.StatusUnauthorized)

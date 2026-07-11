@@ -2,6 +2,7 @@ package main
 
 import (
 	"math"
+	"strings"
 	"testing"
 
 	"github.com/burnban/burnban/internal/pricing"
@@ -24,6 +25,17 @@ func TestRepriceRequestsAppliesLongContextPerRequest(t *testing.T) {
 	longRows := []store.TokenRow{{In: 120, Out: 10, PricingState: store.PricingPriced}}
 	if got, want := repriceRequests("target", p, longRows), (120.0*2+10.0*2*1.5)/1e6; math.Abs(got-want) > 1e-12 {
 		t.Fatalf("long request omitted tier: got %v want %v", got, want)
+	}
+}
+
+func TestNoPricedTrafficMessageDisclosesEveryExclusion(t *testing.T) {
+	message := noPricedTrafficMessage("today", &store.Totals{
+		Unpriced: 2, Unmetered: 3, Incomplete: 4, FeeUnpriced: 5,
+	})
+	for _, want := range []string{"2 unknown-price", "3 unmetered", "4 response(s) were partial", "5 call(s) had unpriced"} {
+		if !strings.Contains(message, want) {
+			t.Errorf("message missing %q: %s", want, message)
+		}
 	}
 }
 

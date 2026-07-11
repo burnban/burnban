@@ -1,0 +1,8 @@
+# Historical false positives from a9ffa6c. These were deterministic sequential-
+# hex authentication fixtures, never issued credentials. Current tests use
+# explicit `burnban-test-...-not-a-secret` values instead.
+a9ffa6c9cdf918c798ebd1e6ffca9e03f1bd464e:cmd_demo_test.go:generic-api-key:30
+a9ffa6c9cdf918c798ebd1e6ffca9e03f1bd464e:cmd_diagnostics_test.go:generic-api-key:70
+a9ffa6c9cdf918c798ebd1e6ffca9e03f1bd464e:cmd_lifecycle_test.go:generic-api-key:87
+a9ffa6c9cdf918c798ebd1e6ffca9e03f1bd464e:cmd_lifecycle_test.go:generic-api-key:140
+a9ffa6c9cdf918c798ebd1e6ffca9e03f1bd464e:cmd_serve_test.go:generic-api-key:232

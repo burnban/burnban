@@ -31,12 +31,18 @@ func cmdReport(args []string) error {
 	if err != nil {
 		return err
 	}
-	sum, err := s.Summarize(from)
-	if err != nil {
+	var sum *store.Summary
+	var lastHour float64
+	now := time.Now()
+	if err := s.ReadSnapshot(func(snapshot *store.ReadSnapshot) error {
+		var err error
+		sum, err = snapshot.Summarize(from)
+		if err != nil {
+			return err
+		}
+		lastHour, err = snapshot.SpentSince(now.Add(-time.Hour))
 		return err
-	}
-	lastHour, err := s.SpentSince(time.Now().Add(-time.Hour))
-	if err != nil {
+	}); err != nil {
 		return err
 	}
 

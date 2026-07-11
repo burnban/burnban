@@ -11,6 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"io"
 	"math/big"
 	"net"
 	"net/http"
@@ -19,6 +20,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -218,6 +220,45 @@ func TestPublicURLExposureFailsClosedBeforeListening(t *testing.T) {
 	}
 }
 
+func TestProviderHeaderCeilingAllowsNormalCustomHeadersAndRejectsAbuse(t *testing.T) {
+	var hits atomic.Int64
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		hits.Add(1)
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	srv.Config.MaxHeaderBytes = providerMaxHeaderBytes
+	srv.Start()
+	t.Cleanup(srv.Close)
+
+	request := func(size int) int {
+		t.Helper()
+		req, err := http.NewRequest(http.MethodGet, srv.URL, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Authorization", "Bearer normal-provider-token")
+		req.Header.Set("X-Custom-Provider-Metadata", strings.Repeat("a", size))
+		resp, err := srv.Client().Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_, _ = io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if status := request(32 << 10); status != http.StatusNoContent || hits.Load() != 1 {
+		t.Fatalf("ordinary custom headers status=%d hits=%d", status, hits.Load())
+	}
+	// net/http reserves a small read-buffer allowance above MaxHeaderBytes;
+	// eight extra KiB exceeds both the configured ceiling and that allowance.
+	if status := request(providerMaxHeaderBytes + 8<<10); status != http.StatusRequestHeaderFieldsTooLarge {
+		t.Fatalf("oversized headers status=%d, want 431", status)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("oversized headers reached handler: hits=%d", hits.Load())
+	}
+}
+
 func TestValidateBurnbanToken(t *testing.T) {
 	tests := []struct {
 		name, token string
@@ -230,7 +271,7 @@ func TestValidateBurnbanToken(t *testing.T) {
 		{name: "control", token: "0123456789\nabcdef", wantErr: true},
 		{name: "unicode", token: "0123456789abcdef☃", wantErr: true},
 		{name: "low diversity", token: strings.Repeat("a", 32), strong: true, wantErr: true},
-		{name: "generated hex", token: "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", strong: true},
+		{name: "synthetic strong token", token: "burnban-test-network-token-not-a-secret", strong: true},
 		{name: "base64url", token: "wC0a-Safe_Random.Token=123456", strong: true},
 	}
 	for _, tt := range tests {
@@ -240,6 +281,16 @@ func TestValidateBurnbanToken(t *testing.T) {
 				t.Fatalf("validateBurnbanToken error=%v, wantErr=%t", err, tt.wantErr)
 			}
 		})
+	}
+}
+
+func TestGeneratedControlTokenPassesStrongValidation(t *testing.T) {
+	token, err := newControlToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validateBurnbanToken(token, true); err != nil {
+		t.Fatalf("generated control token failed strong validation: %v", err)
 	}
 }
 

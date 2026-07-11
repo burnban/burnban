@@ -19,6 +19,12 @@ support Unix permissions. The ledger stores one row per proxied request:
   query, agent, session and a five-minute time bucket. Its random 256-bit key is
   generated locally and stored in the same database.
 
+Explicit agent/session identifiers are limited to 128 Unicode characters and
+256 UTF-8 bytes and reject unsafe control/format characters before forwarding.
+Long or unsafe provider-derived model/route/client labels are stored as a
+bounded sanitized prefix plus a deterministic hash suffix; full provider model
+IDs are still used for pricing before the display value is bounded.
+
 Burnban does not persist request or response bodies, provider authorization
 headers, API keys, or `BURNBAN_TOKEN`. The keyed fingerprint prevents offline
 matching from an exported fingerprint alone, but the local database also holds

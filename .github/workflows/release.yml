@@ -50,12 +50,15 @@ jobs:
         uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           syft-version: v1.46.0
-      - name: Build unpublished release snapshot
+      - name: Build unpublished tagged release candidate
         uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
         with:
           distribution: goreleaser
           version: v2.17.0
-          args: release --snapshot --clean
+          # Build the actual tagged version without creating a GitHub release.
+          # These exact bytes are carried through every candidate gate and are
+          # later attested and published; the publish job never rebuilds them.
+          args: release --skip=publish --clean
       - name: Inspect unpublished release payload
         shell: bash
         run: |
@@ -78,10 +81,10 @@ jobs:
           test -f dist/checksums.txt
           compgen -G 'dist/*.sbom.spdx.json' >/dev/null
           (cd dist && sha256sum --check checksums.txt)
-      - name: Upload unpublished snapshot
+      - name: Upload unpublished tagged candidate
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: release-candidate-snapshot
+          name: release-candidate
           retention-days: 5
           if-no-files-found: error
           path: |
@@ -105,7 +108,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-candidate-snapshot
+          name: release-candidate
           path: release
       - if: runner.os != 'Windows'
         shell: bash
@@ -166,7 +169,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: release-candidate-snapshot
+          name: release-candidate
           path: release
       - uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
         with:
@@ -251,21 +254,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          go-version-file: go.mod
-      - name: Install pinned Syft
-        uses: anchore/sbom-action/download-syft@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
-        with:
-          syft-version: v1.46.0
-      - name: Publish tested release commit
-        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
-        with:
-          distribution: goreleaser
-          version: v2.17.0
-          args: release --clean
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: release-candidate
+          path: dist
+      - name: Verify carried candidate before attestation
+        shell: bash
+        run: (cd dist && sha256sum --check checksums.txt)
       - name: Attest release artifacts
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
@@ -274,12 +269,76 @@ jobs:
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:
           subject-path: dist/checksums.txt
+      - name: Stage, verify, and publish exact candidate bytes
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          tag=$GITHUB_REF_NAME
+          release_flags=(--verify-tag --draft --generate-notes --title "Burnban $tag")
+          publish_flags=(--draft=false)
+          case "$tag" in
+            *-*)
+              release_flags+=(--prerelease)
+              publish_flags+=(--prerelease --latest=false)
+              ;;
+            *)
+              publish_flags+=(--prerelease=false --latest)
+              ;;
+          esac
+
+          # The release remains private while assets are uploaded and checked.
+          # A failed upload, digest check, or attestation leaves at most a draft.
+          assets=(dist/checksums.txt)
+          while read -r expected filename; do
+            [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+            case "$filename" in
+              ""|*/*|*..*) echo "unsafe release asset name: $filename" >&2; exit 1 ;;
+            esac
+            test -f "dist/$filename"
+            assets+=("dist/$filename")
+          done < dist/checksums.txt
+          test "${#assets[@]}" -gt 1
+
+          release_is_draft=
+          if release_is_draft=$(gh release view "$tag" --json isDraft --jq .isDraft 2>/dev/null); then
+            case "$release_is_draft" in
+              true|false) ;;
+              *) echo "unexpected release state for $tag: $release_is_draft" >&2; exit 1 ;;
+            esac
+            echo "Found an existing release for $tag; it must match this candidate exactly."
+          else
+            gh release create "$tag" "${assets[@]}" "${release_flags[@]}"
+            release_is_draft=true
+          fi
+          verify_dir=$(mktemp -d)
+          trap 'rm -rf "$verify_dir"' EXIT
+          gh release download "$tag" --dir "$verify_dir"
+          if ! test "$(find "$verify_dir" -type f | wc -l)" -eq "${#assets[@]}" ||
+             ! cmp dist/checksums.txt "$verify_dir/checksums.txt" ||
+             ! (cd "$verify_dir" && sha256sum --check checksums.txt); then
+            echo "Existing release assets do not exactly match the gated candidate." >&2
+            if [ "$release_is_draft" = true ]; then
+              echo "Delete the private draft for $tag after review, then rerun the workflow." >&2
+            else
+              echo "The public release differs; stop and follow the release incident process." >&2
+            fi
+            exit 1
+          fi
+
+          # Publishing is the final mutating step, after exact-byte QA,
+          # attestations, draft upload, and authenticated hash verification.
+          if [ "$release_is_draft" = true ]; then
+            gh release edit "$tag" "${publish_flags[@]}"
+          else
+            echo "Release $tag is already public and its assets match exactly; continuing verification."
+          fi
 
   anonymous-install-verify:
     needs: publish
-    # GoReleaser may have published assets before a later attestation step
-    # fails. Still exercise the public URLs whenever the publish job was not
-    # explicitly cancelled.
+    # The final publish API call may succeed before the client observes its
+    # response. Exercise public URLs whenever the publish job was not cancelled.
     if: ${{ always() && needs.publish.result != 'cancelled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15

@@ -28,7 +28,11 @@ assets will be published there while the official installers still resolve
 3. Verify current first-party pricing sources and supported model identifiers.
 4. Run the GoReleaser snapshot job and installer matrix.
 5. Test the dashboard/desktop launch and Docker deployment on clean systems.
-6. Publish an `-rc.N` tag when installer, signing, or migration behavior changed.
+6. Run `burnban bench --requests 2000 --concurrency 4`, a larger-ledger pass,
+   and the 100k-row Go benchmarks on the tagged candidate. Record commit,
+   hardware, OS, date, and repeated runs; update or remove README performance
+   claims when they no longer match.
+7. Publish an `-rc.N` tag when installer, signing, or migration behavior changed.
 
 ## Publish
 
@@ -40,14 +44,18 @@ git push origin v0.4.0
 ```
 
 Before publication, the release workflow pins and runs GoReleaser and Syft,
-builds an unpublished snapshot from the tagged commit, verifies its checksums
-and license payload, and runs that snapshot through the Linux, macOS, and
-Windows installer smoke tests. Publication is also blocked on the non-root
-container runtime smoke and the pinned Playwright/axe responsive, keyboard, and
-accessibility gate. Only after every candidate job passes does the workflow
-create the archives, third-party license bundles, SHA-256 checksums and SPDX
-SBOMs, publish the GitHub release, and record signed GitHub build-provenance
-attestations.
+builds the actual tagged archives once without publishing, verifies their
+checksums and license payload, and runs those exact bytes through the Linux,
+macOS, and Windows installer smoke tests. Publication is also blocked on the
+non-root container runtime smoke and the pinned Playwright/axe responsive,
+keyboard, and accessibility gate. Only after every candidate job passes does
+the workflow attest those same archives, third-party license bundles, SHA-256
+checksums, and SPDX SBOMs; upload them to a private draft release; download and
+hash-check the draft assets; and make that draft public as its final step.
+If a publish job is rerun, it resumes only when the existing draft or public
+release has the exact same asset count, checksum manifest, and bytes. Review
+and delete a mismatched private draft before retrying; never replace mismatched
+assets on a public release.
 
 After publication, the workflow performs one final check without release API
 credentials: it downloads `checksums.txt` and every listed asset through the

@@ -72,6 +72,38 @@ try {
         [StringComparer]::OrdinalIgnoreCase.Equals($_.TrimEnd('\'), $Install.TrimEnd('\'))
     })
     if ($ManagedPathEntries.Count -ne 1) { throw "Reinstall lost or duplicated the managed PATH entry" }
+    if (Get-ChildItem -LiteralPath $Install -Filter ".burnban-*.exe" -ErrorAction SilentlyContinue) {
+        throw "Atomic reinstall left a staging or backup executable behind"
+    }
+
+    # Exercise checksum-valid staging validation: an invalid replacement must
+    # fail without changing the preceding executable or leaving recovery files.
+    $InvalidUpgrade = Join-Path $Temp "invalid-upgrade-release"
+    $InvalidPayload = Join-Path $Temp "invalid-upgrade-payload"
+    New-Item -ItemType Directory -Path $InvalidUpgrade, $InvalidPayload | Out-Null
+    "not a Burnban executable" | Set-Content (Join-Path $InvalidPayload "burnban.exe") -Encoding ascii
+    $InvalidArchive = Join-Path $InvalidUpgrade $Archive
+    Compress-Archive -Path (Join-Path $InvalidPayload "*") -DestinationPath $InvalidArchive
+    $InvalidHash = (Get-FileHash -Algorithm SHA256 $InvalidArchive).Hash.ToLowerInvariant()
+    "$InvalidHash  $Archive" | Set-Content (Join-Path $InvalidUpgrade "checksums.txt") -Encoding ascii
+    $VersionBeforeInvalidUpgrade = (& $Binary version | Out-String).Trim()
+    $env:BURNBAN_DOWNLOAD_BASE_URL = $InvalidUpgrade
+    $InvalidUpgradeRefused = $false
+    try {
+        & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -NoDesktop -NoPath
+    } catch {
+        if ($_.Exception.Message -notmatch 'existing install was retained') { throw }
+        $InvalidUpgradeRefused = $true
+    } finally {
+        $env:BURNBAN_DOWNLOAD_BASE_URL = $Release
+    }
+    if (-not $InvalidUpgradeRefused) { throw "Invalid checksum-valid upgrade unexpectedly installed" }
+    if ((& $Binary version | Out-String).Trim() -ne $VersionBeforeInvalidUpgrade) {
+        throw "Invalid upgrade changed the preceding executable"
+    }
+    if (Get-ChildItem -LiteralPath $Install -Filter ".burnban-*.exe" -ErrorAction SilentlyContinue) {
+        throw "Refused invalid upgrade left a staging or backup executable behind"
+    }
 
     # Exercise the installed Windows executable, the OS-assigned port path,
     # private lifecycle state, status control request, and graceful stop.

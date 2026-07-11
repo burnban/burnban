@@ -76,7 +76,7 @@ func TestDoctorUsesPrivateAuthenticatedControlState(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	const controlToken = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const controlToken = "burnban-test-doctor-control-token-not-a-secret"
 	pid := os.Getpid()
 	var authenticated atomic.Bool
 	control := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

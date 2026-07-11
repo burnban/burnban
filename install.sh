@@ -167,16 +167,41 @@ remove_desktop_path() {
   esac
 }
 
-burnban_meter_running() {
-  command -v pgrep >/dev/null 2>&1 &&
-    pgrep -f '[b]urnban (serve|desktop|demo)( |$)' >/dev/null 2>&1
+require_meter_stopped_for_purge() {
+  if command -v pgrep >/dev/null 2>&1; then
+    if pgrep -f '[b]urnban (serve|desktop|demo)( |$)' >/dev/null 2>&1; then
+      echo "burnban: stop the running Burnban meter before using --purge" >&2
+      return 1
+    else
+      pgrep_status=$?
+      if [ "$pgrep_status" -eq 1 ]; then
+        return 0
+      fi
+      echo "burnban: cannot inspect running processes (pgrep exited $pgrep_status); refusing --purge" >&2
+      return 1
+    fi
+  fi
+  # procps is not installed by default on some minimal Linux systems. Use the
+  # macOS/Linux ps interface when available, but never interpret an unavailable
+  # liveness check as proof that recursive data deletion is safe.
+  if command -v ps >/dev/null 2>&1; then
+    if ! process_list=$(ps -ax -o command= 2>/dev/null); then
+      echo "burnban: cannot inspect running processes; refusing --purge" >&2
+      return 1
+    fi
+    if printf '%s\n' "$process_list" |
+       grep -E '[b]urnban (serve|desktop|demo)( |$)' >/dev/null 2>&1; then
+      echo "burnban: stop the running Burnban meter before using --purge" >&2
+      return 1
+    fi
+    return 0
+  fi
+  echo "burnban: cannot verify meter liveness (pgrep or ps is required); refusing --purge" >&2
+  return 1
 }
 
 purge_data() {
-  if burnban_meter_running; then
-    echo "burnban: stop the running Burnban meter before using --purge" >&2
-    return 1
-  fi
+  require_meter_stopped_for_purge || return 1
   case "$(basename "$DATA_DIR")" in
     .burnban) ;;
     *) echo "burnban: refusing to purge unexpected data directory: $DATA_DIR" >&2; return 1 ;;
@@ -190,9 +215,8 @@ purge_data() {
 }
 
 uninstall() {
-  if [ "$PURGE" -eq 1 ] && burnban_meter_running; then
-    echo "burnban: stop the running Burnban meter before using --purge" >&2
-    return 1
+  if [ "$PURGE" -eq 1 ]; then
+    require_meter_stopped_for_purge || return 1
   fi
   incomplete=0
   recorded_binary=$(manifest_get binary)
@@ -295,7 +319,22 @@ BASE_URL="${BURNBAN_DOWNLOAD_BASE_URL:-$DEFAULT_BASE}"
 CHECKSUMS="checksums.txt"
 
 TMP=$(mktemp -d)
-trap 'rm -rf "$TMP"' EXIT HUP INT TERM
+STAGED_PATH=""
+cleanup_install() {
+  rc=$?
+  trap - EXIT HUP INT TERM
+  if [ -n "$STAGED_PATH" ] && [ -e "$STAGED_PATH" ]; then
+    rm -f "$STAGED_PATH" 2>/dev/null || {
+      if command -v sudo >/dev/null 2>&1; then sudo rm -f "$STAGED_PATH" || true; fi
+    }
+  fi
+  rm -rf "$TMP"
+  exit "$rc"
+}
+trap cleanup_install EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 fetch() {
   name=$1
@@ -331,13 +370,40 @@ fi
 
 tar -xzf "$TMP/burnban.tgz" -C "$TMP" burnban
 mkdir -p "$BIN_DIR" 2>/dev/null || true
-if install -m 755 "$TMP/burnban" "$BIN_PATH" 2>/dev/null; then
+if STAGED_PATH=$(mktemp "$BIN_DIR/.burnban.install.XXXXXX" 2>/dev/null); then
   :
 elif command -v sudo >/dev/null 2>&1; then
   sudo mkdir -p "$BIN_DIR"
-  sudo install -m 755 "$TMP/burnban" "$BIN_PATH"
+  STAGED_PATH=$(sudo mktemp "$BIN_DIR/.burnban.install.XXXXXX")
+else
+  echo "burnban: cannot create a safe staging file in $BIN_DIR" >&2
+  exit 1
+fi
+if install -m 755 "$TMP/burnban" "$STAGED_PATH" 2>/dev/null; then
+  :
+elif command -v sudo >/dev/null 2>&1; then
+  sudo install -m 755 "$TMP/burnban" "$STAGED_PATH"
 else
   echo "burnban: cannot install to $BIN_DIR; rerun with --bin-dir \"$HOME/.local/bin\"" >&2
+  exit 1
+fi
+if ! is_burnban_binary "$STAGED_PATH"; then
+  echo "burnban: downloaded binary did not pass its version check; existing install was retained" >&2
+  exit 1
+fi
+# Recheck immediately before the atomic replacement so a changed target is
+# never silently overwritten during the download window.
+if [ -e "$BIN_PATH" ] && ! is_burnban_binary "$BIN_PATH"; then
+  echo "burnban: refusing to overwrite a non-Burnban file: $BIN_PATH" >&2
+  exit 1
+fi
+if mv -f "$STAGED_PATH" "$BIN_PATH" 2>/dev/null; then
+  STAGED_PATH=""
+elif command -v sudo >/dev/null 2>&1; then
+  sudo mv -f "$STAGED_PATH" "$BIN_PATH"
+  STAGED_PATH=""
+else
+  echo "burnban: cannot replace $BIN_PATH; the existing install was retained" >&2
   exit 1
 fi
 if ! is_burnban_binary "$BIN_PATH"; then

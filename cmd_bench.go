@@ -43,7 +43,7 @@ func cmdBench(args []string) error {
 		return err
 	}
 
-	fmt.Printf("🔥 burnban bench — %d requests × %d clients, instant loopback upstream (worst case)\n\n", *n, *conc)
+	fmt.Printf("🔥 burnban bench — %d total requests · concurrency %d, instant loopback upstream (worst case)\n\n", *n, *conc)
 	w := func(label string, s latStats) {
 		fmt.Printf("  %-9s %9s %9s %9s %9s\n", label, fmtDur(s.p50), fmtDur(s.p90), fmtDur(s.p99), fmtDur(s.mean))
 	}

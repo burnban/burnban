@@ -181,20 +181,29 @@ The honest flip side: LiteLLM speaks 100+ providers and does routing, fallbacks,
 ### Measure it, don't trust it
 
 ```sh
-burnban bench
+burnban bench --requests 2000 --concurrency 4
 ```
 
-stands up an instant loopback upstream and runs the same traffic direct and through a fully armed proxy — metering, pricing, and a live budget check on every request. On an M-series laptop, 2,000 requests × 4 clients:
+stands up an instant loopback upstream and runs the same traffic direct and
+through a fully armed proxy — metering, pricing, and a live budget check on
+every request. In three runs of 2,000 total requests at concurrency 4:
 
 ```
-                p50       p90       p99      mean
-direct        103µs     174µs     332µs     115µs
-burnban       628µs     1.7ms     8.8ms     1.0ms
-─────────────────────────────────────────────────
-added         525µs     1.5ms     8.5ms     924µs
+                     p50          p90          p99         mean
+direct           77–85µs    117–136µs    261–280µs      88–95µs
+burnban        575–583µs    938–986µs    5.1–5.4ms    755–797µs
+──────────────────────────────────────────────────────────────
+added          494–503µs    801–869µs    4.8–5.2ms    667–702µs
 ```
 
-**~0.5ms median, with the durable ledger write and cap check included** — against an instant upstream, the worst case a proxy can face (the p99 tail is SQLite checkpointing; real inference calls run seconds either way). Percentiles are nearest-rank, warts kept. Run it on your own hardware and check.
+Those are the ranges from three pre-release runs on an Apple M2 Pro (macOS
+26.5, Go 1.25.12, 2026-07-11). The roughly **0.5ms median includes the
+WAL-backed SQLite ledger insert and live cap enforcement**. A separate
+100,000-row guard benchmark measured a 36.6ms first cache fill and 38µs warm
+admissions with no warm ledger scan. SQLite uses `synchronous=NORMAL`, so this
+is a latency measurement, not a claim that the final moments survive an OS
+crash. Percentiles are nearest-rank, warts kept; tagged candidates are rerun
+under the release checklist. Run it on your own hardware and check.
 
 ## Providers
 
@@ -224,7 +233,10 @@ Endpoint speaks a different dialect? Prefix the url with its usage shape — `--
 Attribution: Burnban normalizes identifying user agents for Claude Code,
 Codex, Hermes, OpenClaw, Aider, Goose, Cline, Roo Code, Continue, Cursor,
 Windsurf, and OpenCode. For exact custom tracking, send `x-burnban-agent` /
-`x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
+`x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`). Explicit
+identities are rejected above 128 Unicode characters or 256 UTF-8 bytes rather
+than truncated into a different cap identity. Provider/client-derived display
+labels are sanitized and bounded with a deterministic hash suffix.
 
 OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact
 provider counts. Without it Burnban estimates observed text, tool-call arguments,
@@ -405,7 +417,7 @@ The MIT meter only recognizes generic local `external_*` policy settings; it con
 
 ## Development
 
-Prerequisite: Go 1.25 or newer. From a source checkout:
+Prerequisite: Go 1.25.12 or newer. From a source checkout:
 
 ```sh
 go mod verify

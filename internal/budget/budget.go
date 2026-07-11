@@ -47,6 +47,11 @@ const (
 // but warn_pct was never set explicitly.
 const DefaultWarnPct = 80.0
 
+// Agent cap usage is cheap to reload from its covering index. Bounding the
+// warm set prevents configured-agent churn from growing process memory
+// forever; crossing the limit performs one amortized bulk eviction.
+const maxAgentUsageCacheEntries = 4096
+
 // Window is one budget enforcement window. Starts are computed in local
 // time, matching how people read their bills.
 type Window struct {
@@ -99,10 +104,15 @@ func MonthStart(now time.Time) time.Time {
 type Guard struct {
 	S *store.Store
 
-	mu              sync.Mutex
-	reservedUSD     float64
-	reservedByAgent map[string]float64
-	inFlight        int
+	mu                sync.Mutex
+	reservedUSD       float64
+	reservedByAgent   map[string]float64
+	inFlight          int
+	cacheRevision     uint64
+	usageCache        map[usageCacheKey]store.BudgetUsage
+	activeGlobalKeys  map[usageCacheKey]struct{}
+	agentCacheDay     int64
+	agentCacheEntries int
 }
 
 // AdmissionEstimate is a conservative preflight cost bound derived from the
@@ -125,30 +135,90 @@ type Reservation struct {
 	agent     string
 	amount    float64
 	capActive bool
-	once      sync.Once
+	agentDay  usageCacheKey
+	done      bool // guarded by guard.mu
 }
 
 func (r *Reservation) Release() {
 	if r == nil || r.guard == nil {
 		return
 	}
-	r.once.Do(func() {
-		g := r.guard
-		g.mu.Lock()
-		defer g.mu.Unlock()
-		g.reservedUSD = max(0, g.reservedUSD-r.amount)
+	g := r.guard
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	r.releaseLocked()
+}
+
+func (r *Reservation) releaseLocked() {
+	if r.done {
+		return
+	}
+	g := r.guard
+	g.reservedUSD = max(0, g.reservedUSD-r.amount)
+	if r.agent != "" {
+		left := max(0, g.reservedByAgent[r.agent]-r.amount)
+		if left == 0 {
+			delete(g.reservedByAgent, r.agent)
+		} else {
+			g.reservedByAgent[r.agent] = left
+		}
+	}
+	if g.inFlight > 0 {
+		g.inFlight--
+	}
+	r.done = true
+}
+
+// Settle durably inserts a completed request, updates every warm usage window,
+// and releases its conservative reservation as one Guard-locked transition.
+// On insert failure the reservation remains held until Release, so the proxy
+// can latch persistence fail-closed without an undercount window.
+func (r *Reservation) Settle(request store.Request) error {
+	if r == nil || r.guard == nil {
+		return fmt.Errorf("cannot settle a nil reservation")
+	}
+	if request.Agent != r.agent {
+		return fmt.Errorf("settled request agent does not match its reservation")
+	}
+	if request.Ts.IsZero() || math.IsNaN(request.CostUSD) || math.IsInf(request.CostUSD, 0) || request.CostUSD < 0 {
+		return fmt.Errorf("settled request has invalid timestamp or cost")
+	}
+	g := r.guard
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if r.done {
+		return nil
+	}
+	before := g.S.RequestRevision()
+	if err := g.S.Insert(request); err != nil {
+		return err
+	}
+	after := g.S.RequestRevision()
+	if g.usageCache != nil && before%2 == 0 && g.cacheRevision == before && after == before+2 {
+		for key := range g.activeGlobalKeys {
+			g.addSettledUsageLocked(key, request)
+		}
 		if r.agent != "" {
-			left := max(0, g.reservedByAgent[r.agent]-r.amount)
-			if left == 0 {
-				delete(g.reservedByAgent, r.agent)
-			} else {
-				g.reservedByAgent[r.agent] = left
-			}
+			g.addSettledUsageLocked(r.agentDay, request)
 		}
-		if g.inFlight > 0 {
-			g.inFlight--
-		}
-	})
+		g.cacheRevision = after
+	} else {
+		g.invalidateUsageCacheLocked(after)
+	}
+	r.releaseLocked()
+	return nil
+}
+
+func (g *Guard) addSettledUsageLocked(key usageCacheKey, request store.Request) {
+	usage, ok := g.usageCache[key]
+	if !ok || request.Ts.UnixNano() < key.startUnixNano || (key.agent != "" && key.agent != request.Agent) {
+		return
+	}
+	usage.SpentUSD += request.CostUSD
+	if request.EnforcementUnsafe {
+		usage.EnforcementGaps++
+	}
+	g.usageCache[key] = usage
 }
 
 func (r *Reservation) AmountUSD() float64 {
@@ -217,9 +287,15 @@ func (w WindowState) Pct() float64 {
 	return w.Spent / w.CapUSD * 100
 }
 
+type statusReader interface {
+	GetSettings(keys ...string) (map[string]string, error)
+	SpentSinceMulti(ts []time.Time) ([]float64, error)
+}
+
 // Status reports every window's cap and live spend with one settings query
-// and one ledger scan.
-func Status(s *store.Store, now time.Time) ([]WindowState, error) {
+// and one ledger scan. The narrow reader contract also lets dashboard reads
+// run against a single SQLite transaction without duplicating cap logic.
+func Status(s statusReader, now time.Time) ([]WindowState, error) {
 	wins := Windows()
 	keys := make([]string, 0, len(wins)*2)
 	starts := make([]time.Time, 0, len(wins)*2)
@@ -319,7 +395,10 @@ func (g *Guard) Admit(now time.Time, agent string, estimate AdmissionEstimate) (
 		g.reservedByAgent[agent] += amount
 	}
 	g.inFlight++
-	return &Reservation{guard: g, agent: agent, amount: amount, capActive: state.active()}, nil, nil
+	return &Reservation{
+		guard: g, agent: agent, amount: amount, capActive: state.active(),
+		agentDay: usageCacheKey{startUnixNano: DayStart(now).UnixNano(), agent: agent},
+	}, nil, nil
 }
 
 type capPosition struct {
@@ -338,6 +417,166 @@ func (p capPosition) remaining() float64 { return p.cap - p.spent - p.reserved }
 
 type admissionState struct {
 	positions []capPosition
+}
+
+type usageCacheKey struct {
+	startUnixNano int64
+	agent         string
+}
+
+type usageRequest struct {
+	start time.Time
+	agent string
+}
+
+func (g *Guard) invalidateUsageCacheLocked(revision uint64) {
+	g.cacheRevision = revision
+	g.usageCache = make(map[usageCacheKey]store.BudgetUsage)
+	g.activeGlobalKeys = nil
+	g.agentCacheDay = 0
+	g.agentCacheEntries = 0
+}
+
+// reconcileUsageCacheLocked touches only the previous active global keys and
+// the current agent during ordinary checks. A full agent sweep happens once on
+// local-day rollover, plus an amortized sweep if same-day churn exceeds the
+// bounded warm-agent set.
+func (g *Guard) reconcileUsageCacheLocked(global []usageRequest, agent string, agentCapSet bool, agentStart time.Time) {
+	desiredGlobal := make(map[usageCacheKey]struct{}, len(global))
+	for _, request := range global {
+		desiredGlobal[usageCacheKey{startUnixNano: request.start.UnixNano()}] = struct{}{}
+	}
+	for key := range g.activeGlobalKeys {
+		if _, active := desiredGlobal[key]; !active {
+			delete(g.usageCache, key)
+		}
+	}
+	g.activeGlobalKeys = desiredGlobal
+
+	currentDay := agentStart.UnixNano()
+	if g.agentCacheDay != 0 && g.agentCacheDay != currentDay {
+		currentEntries := 0
+		for key := range g.usageCache {
+			if key.agent != "" && key.startUnixNano != currentDay {
+				delete(g.usageCache, key)
+			} else if key.agent != "" {
+				currentEntries++
+			}
+		}
+		g.agentCacheEntries = currentEntries
+	}
+	g.agentCacheDay = currentDay
+	currentAgentKey := usageCacheKey{startUnixNano: currentDay, agent: agent}
+	if agent != "" && !agentCapSet {
+		if _, exists := g.usageCache[currentAgentKey]; exists {
+			delete(g.usageCache, currentAgentKey)
+			g.agentCacheEntries = max(0, g.agentCacheEntries-1)
+		}
+	}
+}
+
+func (g *Guard) boundAgentUsageCacheLocked(keep map[usageCacheKey]struct{}) {
+	if g.agentCacheEntries <= maxAgentUsageCacheEntries {
+		return
+	}
+	for key := range g.usageCache {
+		if key.agent != "" {
+			if _, retained := keep[key]; !retained {
+				delete(g.usageCache, key)
+			}
+		}
+	}
+	g.agentCacheEntries = 0
+	for key := range keep {
+		if _, exists := g.usageCache[key]; exists {
+			g.agentCacheEntries++
+		}
+	}
+}
+
+// cachedUsagesLocked scans each previously unseen cutoff/agent once for a
+// stable Store revision. Warm admissions are map lookups; direct inserts and
+// pruning through this same Store change the revision and force a fresh
+// durable snapshot. Production's serve lease supplies the one-writer contract.
+func (g *Guard) cachedUsagesLocked(requests []usageRequest) ([]store.BudgetUsage, error) {
+	if len(requests) == 0 {
+		return nil, nil
+	}
+	for attempt := 0; attempt < 3; attempt++ {
+		revision := g.S.RequestRevision()
+		if revision%2 != 0 {
+			return nil, fmt.Errorf("request ledger mutation is in progress; admission failed closed")
+		}
+		if g.usageCache == nil || g.cacheRevision != revision {
+			g.invalidateUsageCacheLocked(revision)
+		}
+
+		missingGlobal := make([]time.Time, 0, len(requests))
+		missingGlobalKeys := make([]usageCacheKey, 0, len(requests))
+		missingAgents := make([]usageRequest, 0, 1)
+		seen := make(map[usageCacheKey]bool, len(requests))
+		for _, request := range requests {
+			key := usageCacheKey{startUnixNano: request.start.UnixNano(), agent: request.agent}
+			if _, ok := g.usageCache[key]; ok || seen[key] {
+				continue
+			}
+			seen[key] = true
+			if request.agent == "" {
+				missingGlobal = append(missingGlobal, request.start)
+				missingGlobalKeys = append(missingGlobalKeys, key)
+			} else {
+				missingAgents = append(missingAgents, request)
+			}
+		}
+
+		loaded := make(map[usageCacheKey]store.BudgetUsage, len(missingGlobal)+len(missingAgents))
+		if len(missingGlobal) > 0 {
+			usages, err := g.S.BudgetUsageSinceMulti(missingGlobal)
+			if err != nil {
+				return nil, err
+			}
+			for i, usage := range usages {
+				loaded[missingGlobalKeys[i]] = usage
+			}
+		}
+		for _, request := range missingAgents {
+			usage, err := g.S.BudgetUsageSinceForAgent(request.start, request.agent)
+			if err != nil {
+				return nil, err
+			}
+			loaded[usageCacheKey{startUnixNano: request.start.UnixNano(), agent: request.agent}] = usage
+		}
+		if current := g.S.RequestRevision(); current != revision || current%2 != 0 {
+			g.invalidateUsageCacheLocked(current)
+			continue
+		}
+		addedAgent := false
+		var keepAgents map[usageCacheKey]struct{}
+		for key, usage := range loaded {
+			if _, exists := g.usageCache[key]; !exists && key.agent != "" {
+				g.agentCacheEntries++
+				addedAgent = true
+				if keepAgents == nil {
+					keepAgents = make(map[usageCacheKey]struct{}, len(missingAgents))
+					for _, request := range requests {
+						if request.agent != "" {
+							keepAgents[usageCacheKey{startUnixNano: request.start.UnixNano(), agent: request.agent}] = struct{}{}
+						}
+					}
+				}
+			}
+			g.usageCache[key] = usage
+		}
+		if addedAgent {
+			g.boundAgentUsageCacheLocked(keepAgents)
+		}
+		out := make([]store.BudgetUsage, len(requests))
+		for i, request := range requests {
+			out[i] = g.usageCache[usageCacheKey{startUnixNano: request.start.UnixNano(), agent: request.agent}]
+		}
+		return out, nil
+	}
+	return nil, fmt.Errorf("request ledger changed repeatedly while loading budget state; admission failed closed")
 }
 
 func (s admissionState) active() bool { return len(s.positions) > 0 }
@@ -418,15 +657,26 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 			checks = append(checks, capCheck{window: w, cap: external, start: externalStart(w, now), source: "external"})
 		}
 	}
-	if len(checks) > 0 {
-		starts := make([]time.Time, len(checks))
-		for i, check := range checks {
-			starts[i] = check.start
-		}
-		usages, err := g.S.BudgetUsageSinceMulti(starts)
+	agentCap, agentCapSet := 0.0, false
+	if agentKey != "" && !overrideLocal {
+		agentCap, agentCapSet, err = parseCap(agentKey, vals[agentKey])
 		if err != nil {
 			return nil, state, err
 		}
+	}
+	usageRequests := make([]usageRequest, 0, len(checks)+1)
+	for _, check := range checks {
+		usageRequests = append(usageRequests, usageRequest{start: check.start})
+	}
+	if agentCapSet {
+		usageRequests = append(usageRequests, usageRequest{start: DayStart(now), agent: agent})
+	}
+	usages, err := g.cachedUsagesLocked(usageRequests)
+	if err != nil {
+		return nil, state, err
+	}
+	g.reconcileUsageCacheLocked(usageRequests[:len(checks)], agent, agentCapSet, DayStart(now))
+	if len(checks) > 0 {
 		for i, check := range checks {
 			position := capPosition{
 				name: check.window.Name, cap: check.cap, spent: usages[i].SpentUSD,
@@ -476,19 +726,12 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 		}
 	}
 
-	if agentKey == "" || overrideLocal {
+	if !agentCapSet {
 		return nil, state, nil
 	}
-	capUSD, ok, err := parseCap(agentKey, vals[agentKey])
-	if err != nil || !ok {
-		return nil, state, err
-	}
-	usage, err := g.S.BudgetUsageSinceForAgent(DayStart(now), agent)
-	if err != nil {
-		return nil, state, err
-	}
+	usage := usages[len(checks)]
 	position := capPosition{
-		name: "daily agent", cap: capUSD, spent: usage.SpentUSD,
+		name: "daily agent", cap: agentCap, spent: usage.SpentUSD,
 		reserved: g.reservedByAgent[agent], unsafe: usage.EnforcementGaps,
 		start: DayStart(now), source: "local", agent: agent,
 	}
@@ -500,27 +743,31 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 				"daily cap for agent %q is paused fail-closed: %d successful request(s) had incomplete usage or unknown pricing.", agent, position.unsafe),
 		}, state, nil
 	}
-	if position.spent >= capUSD {
+	if position.spent >= agentCap {
 		return &Denial{
 			Type: "burnban_agent_cap_reached",
 			Message: fmt.Sprintf(
 				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent AGENT_NAME --daily %.2f`.",
-				agent, position.spent, capUSD, capUSD*2),
+				agent, position.spent, agentCap, agentCap*2),
 		}, state, nil
 	}
-	if position.spent+position.reserved >= capUSD {
+	if position.spent+position.reserved >= agentCap {
 		return &Denial{
 			Type: "burnban_inflight_headroom",
 			Message: fmt.Sprintf(
 				"the daily cap for agent %q is reserved by in-flight work ($%.2f spent + $%.4f reserved of $%.2f); retry after it completes or lower max tokens.",
-				agent, position.spent, position.reserved, capUSD),
+				agent, position.spent, position.reserved, agentCap),
 		}, state, nil
 	}
 	return nil, state, nil
 }
 
+type settingsReader interface {
+	GetSettings(keys ...string) (map[string]string, error)
+}
+
 // BanStatus reports the independently managed local and external ban states.
-func BanStatus(s *store.Store) (local, external bool, err error) {
+func BanStatus(s settingsReader) (local, external bool, err error) {
 	vals, err := s.GetSettings(KeyBanActive, KeyExternalBanActive)
 	if err != nil {
 		return false, false, err

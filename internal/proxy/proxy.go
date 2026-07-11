@@ -23,6 +23,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/burnban/burnban/internal/budget"
 	"github.com/burnban/burnban/internal/meter"
@@ -35,6 +37,21 @@ import (
 const maxBodyBytes = 32 << 20
 
 const maxMeterLineBytes = 4 << 20
+
+// Explicit cap identities are accepted verbatim only when they fit both
+// limits. The rune ceiling keeps UI/database work bounded for ASCII labels;
+// the byte ceiling bounds multibyte UTF-8 storage. Oversized identities are
+// rejected, never truncated into a different budget identity.
+const (
+	maxExplicitIdentityRunes = 128
+	maxExplicitIdentityBytes = 256
+
+	// Every provider/client-derived string persisted in the request ledger is
+	// sanitized and bounded to the same envelope. Changed/truncated labels get
+	// a deterministic hash suffix so distinct raw values remain distinguishable.
+	maxPersistedLabelRunes = 128
+	maxPersistedLabelBytes = 256
+)
 
 // Upstream is one forwarding target. Shape names the usage dialect its
 // responses speak — "anthropic", "gemini", or "openai" (the default and the
@@ -313,8 +330,11 @@ func (p *Proxy) ensurePersistence() error {
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string) {
 	start := time.Now()
-	agent := agentFrom(r)
-	session := r.Header.Get("x-burnban-session")
+	agent, session, err := requestAttribution(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	shape := p.upstreams[provider].shape
 
 	if r.Method == http.MethodPost {
@@ -386,8 +406,8 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	}
 	copyHeaders(out.Header, r.Header)
 	rec := store.Request{
-		Ts: start, Provider: provider, Agent: agent,
-		Session: session, Route: r.URL.EscapedPath(),
+		Ts: start, Provider: persistedLabel(provider), Agent: persistedLabel(agent),
+		Session: persistedLabel(session), Route: persistedLabel(r.URL.EscapedPath()),
 	}
 	if r.Method == http.MethodPost {
 		rec.BodyHash = p.fingerprint(provider, r.Method, r.URL.EscapedPath(), r.URL.Query().Encode(), agent, session, start, reqBody)
@@ -405,7 +425,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 			rec.PricingState = store.PricingUnmetered
 			rec.Incomplete = true
 			rec.EnforcementUnsafe = reservation != nil && reservation.CapActive()
-			if insertErr := p.Store.Insert(rec); insertErr != nil {
+			if insertErr := reservation.Settle(rec); insertErr != nil {
 				p.markPersistenceFailure(insertErr)
 				p.Logf("burnban: store after upstream transport failure: %v", insertErr)
 				http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
@@ -505,11 +525,13 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		}
 		_, geoKnown := inferenceGeoPriceMultiplier(usage.InferenceGeo)
 		usage.FeeUnknown = usage.FeeUnknown || serviceTierFeeUnpriced(usage.ServiceTier) || !geoKnown
-		rec.Model = usage.Model
+		fullModel := usage.Model
+		rec.Model = persistedLabel(fullModel)
 		rec.InTokens, rec.OutTokens = usage.In, usage.Out
 		rec.CacheReadTokens, rec.CacheWriteTokens = usage.CacheRead, usage.CacheWrite
 		rec.CacheWrite1hTokens = usage.CacheWrite1h
-		rec.ServiceTier, rec.InferenceGeo = usage.ServiceTier, usage.InferenceGeo
+		rec.ServiceTier = persistedLabel(usage.ServiceTier)
+		rec.InferenceGeo = persistedLabel(usage.InferenceGeo)
 		rec.ServerToolCalls, rec.FeeUnpriced = usage.ServerToolCalls, usage.FeeUnknown
 		switch {
 		case usage.Incomplete:
@@ -520,7 +542,9 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 			rec.UsageState = store.UsageExact
 		}
 		rec.Incomplete = usage.Incomplete
-		if price, ok := p.Prices.Lookup(usage.Model); ok {
+		// Pricing always sees the full provider model ID. Only the display value
+		// persisted to SQLite is bounded, so long/versioned IDs remain billable.
+		if price, ok := p.Prices.Lookup(fullModel); ok {
 			rec.CostUSD = costUsage(price, usage)
 			rec.PricingState = store.PricingPriced
 		} else {
@@ -543,7 +567,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	}
 	rec.EnforcementUnsafe = reservation != nil && reservation.CapActive() && unsafeAccounting
 	if r.Method == http.MethodPost {
-		if err := p.Store.Insert(rec); err != nil {
+		if err := reservation.Settle(rec); err != nil {
 			p.markPersistenceFailure(err)
 			p.Logf("burnban: store: %v", err)
 			return
@@ -631,7 +655,7 @@ func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
 		Description: "request model",
 	}
 	if model != "" {
-		info.admission.Description = fmt.Sprintf("model %q", model)
+		info.admission.Description = fmt.Sprintf("model %q", persistedLabel(model))
 	}
 	price, ok := p.Prices.Lookup(model)
 	if !ok {
@@ -840,14 +864,95 @@ func stripHopHeaders(header http.Header) {
 	}
 }
 
+func requestAttribution(r *http.Request) (agent, session string, err error) {
+	for _, header := range []string{"X-Burnban-Agent", "X-Burnban-Session"} {
+		values := r.Header.Values(header)
+		if len(values) > 1 {
+			return "", "", fmt.Errorf("%s must not appear more than once", strings.ToLower(header))
+		}
+		for _, value := range values {
+			if err := validateExplicitIdentity(value); err != nil {
+				return "", "", fmt.Errorf("%s %w", strings.ToLower(header), err)
+			}
+		}
+	}
+	return agentFrom(r), r.Header.Get("X-Burnban-Session"), nil
+}
+
+func validateExplicitIdentity(value string) error {
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("must contain valid UTF-8")
+	}
+	if len(value) > maxExplicitIdentityBytes || utf8.RuneCountInString(value) > maxExplicitIdentityRunes {
+		return fmt.Errorf("must be at most %d Unicode characters and %d UTF-8 bytes",
+			maxExplicitIdentityRunes, maxExplicitIdentityBytes)
+	}
+	for _, r := range value {
+		if unsafeLabelRune(r) {
+			return fmt.Errorf("must not contain control, formatting, private-use, or surrogate characters")
+		}
+	}
+	return nil
+}
+
+func unsafeLabelRune(r rune) bool {
+	return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Co, unicode.Cs)
+}
+
+// persistedLabel makes provider-derived attribution safe and bounded without
+// silently merging long values. It never splits UTF-8. Sanitized or truncated
+// values end in a stable 64-bit SHA-256 suffix derived from the original bytes.
+func persistedLabel(value string) string {
+	if value == "" {
+		return ""
+	}
+	if len(value) <= maxPersistedLabelBytes && utf8.ValidString(value) &&
+		utf8.RuneCountInString(value) <= maxPersistedLabelRunes {
+		safe := true
+		for _, r := range value {
+			if unsafeLabelRune(r) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return value
+		}
+	}
+
+	digest := sha256.Sum256([]byte(value))
+	suffix := "…#" + hex.EncodeToString(digest[:8])
+	byteBudget := maxPersistedLabelBytes - len(suffix)
+	runeBudget := maxPersistedLabelRunes - utf8.RuneCountInString(suffix)
+	var prefix strings.Builder
+	prefix.Grow(min(len(value), byteBudget))
+	bytesUsed, runesUsed := 0, 0
+	for remaining := value; remaining != ""; {
+		r, size := utf8.DecodeRuneInString(remaining)
+		remaining = remaining[size:]
+		if r == utf8.RuneError && size == 1 || unsafeLabelRune(r) {
+			r = '�'
+		}
+		runeBytes := utf8.RuneLen(r)
+		if runesUsed == runeBudget || bytesUsed+runeBytes > byteBudget {
+			break
+		}
+		prefix.WriteRune(r)
+		bytesUsed += runeBytes
+		runesUsed++
+	}
+	return prefix.String() + suffix
+}
+
 // agentFrom attributes a request to a client: an explicit x-burnban-agent
-// header wins, else the User-Agent product token (e.g. "claude-cli").
+// header wins, else the User-Agent product token (e.g. "claude-cli"). The
+// explicit value is validated by requestAttribution before this is called.
 func agentFrom(r *http.Request) string {
 	if v := r.Header.Get("x-burnban-agent"); v != "" {
 		return v
 	}
 	if v := r.Header.Get("x-client-name"); v != "" {
-		return v
+		return persistedLabel(v)
 	}
 	ua := r.Header.Get("User-Agent")
 	if ua == "" {
@@ -883,7 +988,7 @@ func agentFrom(r *http.Request) string {
 	if i := strings.IndexAny(ua, " ("); i > 0 {
 		ua = ua[:i]
 	}
-	return ua
+	return persistedLabel(ua)
 }
 
 // alertCapReached fires the configured webhook (Slack-compatible JSON) the

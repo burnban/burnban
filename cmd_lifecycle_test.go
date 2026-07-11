@@ -97,7 +97,7 @@ func TestStatusJSONIsNonzeroWhenInactive(t *testing.T) {
 }
 
 func TestStatusJSONUsesAuthenticatedControlHealth(t *testing.T) {
-	const token = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	const token = "burnban-test-status-control-token-not-a-secret"
 	var authenticated atomic.Bool
 	statePID := os.Getpid()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -150,7 +150,7 @@ func TestStatusJSONUsesAuthenticatedControlHealth(t *testing.T) {
 }
 
 func TestStatusReturnsFailureForUnhealthyServer(t *testing.T) {
-	const token = "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+	const token = "burnban-test-unhealthy-control-token-not-secret"
 	statePID := os.Getpid()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		_ = json.NewEncoder(w).Encode(controlStatusPayload{

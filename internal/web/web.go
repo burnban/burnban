@@ -4,6 +4,7 @@
 package web
 
 import (
+	"crypto/sha256"
 	"crypto/subtle"
 	_ "embed"
 	"encoding/json"
@@ -460,6 +461,18 @@ func burnbanRoute(path string) bool {
 // scrape burnban into Grafana without any exporter in between. Per-model
 // and per-agent series follow the store's top-20 cut to bound cardinality.
 func writeMetrics(w *strings.Builder, s *store.Store, now time.Time) error {
+	return s.ReadSnapshot(func(snapshot *store.ReadSnapshot) error {
+		return writeMetricsSnapshot(w, snapshot, now)
+	})
+}
+
+type metricsReader interface {
+	LifetimeMetrics() (*store.MetricsSummary, error)
+	SpentSinceMulti(since []time.Time) ([]float64, error)
+	GetSettings(keys ...string) (map[string]string, error)
+}
+
+func writeMetricsSnapshot(w *strings.Builder, s metricsReader, now time.Time) error {
 	all, err := s.LifetimeMetrics()
 	if err != nil {
 		return err
@@ -517,14 +530,34 @@ func writeMetrics(w *strings.Builder, s *store.Store, now time.Time) error {
 }
 
 func prometheusLabel(value string) string {
+	original := value
 	value = strings.ToValidUTF8(value, "�")
-	var b strings.Builder
-	count := 0
+	changed := value != original
+	const maxRunes = 200
+	runes := make([]rune, 0, maxRunes)
+	truncated := false
 	for _, r := range value {
-		if count >= 200 {
-			b.WriteRune('…')
-			break
+		if r < 0x20 || r == 0x7f {
+			r = ' '
+			changed = true
 		}
+		if len(runes) == maxRunes {
+			truncated = true
+			continue
+		}
+		runes = append(runes, r)
+	}
+	if changed || truncated {
+		digest := sha256.Sum256([]byte(original))
+		suffix := []rune(fmt.Sprintf("…#%x", digest[:6]))
+		prefixLimit := maxRunes - len(suffix)
+		if len(runes) > prefixLimit {
+			runes = runes[:prefixLimit]
+		}
+		runes = append(runes, suffix...)
+	}
+	var b strings.Builder
+	for _, r := range runes {
 		switch r {
 		case '\\':
 			b.WriteString(`\\`)
@@ -533,13 +566,8 @@ func prometheusLabel(value string) string {
 		case '\n':
 			b.WriteString(`\n`)
 		default:
-			if r < 0x20 || r == 0x7f {
-				b.WriteRune(' ')
-			} else {
-				b.WriteRune(r)
-			}
+			b.WriteRune(r)
 		}
-		count++
 	}
 	return b.String()
 }
@@ -618,7 +646,27 @@ type summaryJSON struct {
 	DupWastedUSD    float64       `json:"dup_wasted_usd"`
 }
 
+type summaryReader interface {
+	Summarize(since time.Time) (*store.Summary, error)
+	SpentSince(since time.Time) (float64, error)
+	SpentSinceMulti(since []time.Time) ([]float64, error)
+	SettingsWithPrefix(prefix string) (map[string]string, error)
+	UsageSinceForAgents(since time.Time, agents []string) (map[string]store.AgentRow, error)
+	GetSetting(key string) (string, error)
+	GetSettings(keys ...string) (map[string]string, error)
+}
+
 func build(s *store.Store, cfg Config, now time.Time) (*summaryJSON, error) {
+	var resp *summaryJSON
+	err := s.ReadSnapshot(func(snapshot *store.ReadSnapshot) error {
+		var err error
+		resp, err = buildSnapshot(snapshot, cfg, now)
+		return err
+	})
+	return resp, err
+}
+
+func buildSnapshot(s summaryReader, cfg Config, now time.Time) (*summaryJSON, error) {
 	sum, err := s.Summarize(budget.DayStart(now))
 	if err != nil {
 		return nil, err
