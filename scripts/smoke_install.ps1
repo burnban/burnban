@@ -42,7 +42,7 @@ try {
 
     $Inspect = Join-Path $Temp "archive"
     Expand-Archive -Path (Join-Path $Release $Archive) -DestinationPath $Inspect
-    foreach ($Required in @("burnban.exe", "LICENSE", "DATA_AND_PRIVACY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "docs/dashboard.png")) {
+    foreach ($Required in @("burnban.exe", "LICENSE", "DATA_AND_PRIVACY.md", "EXTERNAL_POLICY.md", "SECURITY.md", "THIRD_PARTY_NOTICES.md", "docs/dashboard.png")) {
         if (-not (Test-Path (Join-Path $Inspect $Required))) { throw "Archive is missing $Required" }
     }
     if (-not (Get-ChildItem (Join-Path $Inspect "third_party_licenses") -Recurse -Filter LICENSE -ErrorAction SilentlyContinue)) {

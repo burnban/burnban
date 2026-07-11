@@ -234,7 +234,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	banState := ""
 	if local, external, _ := budget.BanStatus(s); local || external {
 		if external {
-			banState = "\n   🚫 ORGANIZATION BURN BAN IN EFFECT — external policy\n"
+			banState = "\n   🚫 EXTERNAL BURN BAN IN EFFECT — controlled by external policy\n"
 		} else {
 			banState = "\n   🚫 BURN BAN IN EFFECT — lift with: burnban lift\n"
 		}

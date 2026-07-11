@@ -272,7 +272,7 @@ type WindowState struct {
 	LocalCapUSD    float64   // user-managed local cap; 0 when unset
 	ExternalCapUSD float64   // sidecar-managed allocation; 0 when unset
 	LocalSpent     float64   // spend in the machine-local calendar window
-	ExternalSpent  float64   // spend in the organization UTC calendar window
+	ExternalSpent  float64   // spend in the external policy's UTC calendar window
 	Source         string    // "local", "external", or "both"
 	Set            bool      // a valid effective cap is configured
 	Spent          float64   // spend since the window opened
@@ -623,14 +623,14 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 	if vals[KeyExternalBanActive] == "1" {
 		return &Denial{
 			Type:    "burnban_external_ban",
-			Message: "organization burn ban in effect: spend is paused by external policy. Contact your Burnban administrator.",
+			Message: "external burn ban in effect: spend is paused by a locally configured external policy. Contact the policy owner.",
 		}, state, nil
 	}
 	overrideLocal := vals[KeyOverrideDay] == now.Format("2006-01-02")
 
-	// Local caps use the machine's calendar; external fleet allocations use
-	// UTC so every meter enforces the same organization window. One scan still
-	// covers every configured cutoff.
+	// Local caps use the machine's calendar; external allocations use UTC so
+	// every meter attached to a coordinator evaluates the same window. One scan
+	// still covers every configured cutoff.
 	type capCheck struct {
 		window Window
 		cap    float64
@@ -698,7 +698,7 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 					return &Denial{
 						Type: "burnban_external_cap_reached",
 						Message: fmt.Sprintf(
-							"organization %s burn allocation reached: %s of $%.2f (resets on the UTC boundary). Contact your Burnban administrator.",
+							"external %s burn allocation reached: %s of $%.2f (resets on the UTC boundary). Contact the policy owner.",
 							check.window.Name, spentText, check.cap),
 						Window: check.window.Name, WindowStart: check.start,
 					}, state, nil

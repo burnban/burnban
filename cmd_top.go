@@ -93,7 +93,7 @@ func renderTop(s *store.Store, color bool) (string, error) {
 	} else if local || external {
 		message := "🚫 BURN BAN IN EFFECT — all spend paused (burnban lift)"
 		if external {
-			message = "🚫 ORGANIZATION BURN BAN — external policy; contact your administrator"
+			message = "🚫 EXTERNAL BURN BAN — contact the external policy owner"
 		}
 		b.WriteString(colorize(message, cRed, color) + "\n\n")
 	} else if states, err := budget.Status(s, now); err != nil {

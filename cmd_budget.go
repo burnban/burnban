@@ -238,7 +238,7 @@ func cmdLift(args []string) error {
 	if _, external, err := budget.BanStatus(s); err != nil {
 		return err
 	} else if external {
-		msg += "; organization burn ban remains in effect"
+		msg += "; external burn ban remains in effect"
 	}
 	fmt.Println(msg)
 	return nil

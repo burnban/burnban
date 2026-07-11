@@ -400,13 +400,13 @@ See [data and privacy](DATA_AND_PRIVACY.md), [security reporting](SECURITY.md),
 
 Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and an optional operator-configured webhook. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
 
-Paid is a clean ladder, and every rung buys a real thing:
+Burnban's separately maintained product ladder is:
 
-- **[Personal](https://burnban.dev#pricing)** — $5/month (or $50/year) — adds **Personal Sync**: one ledger across every machine you own (laptop, desktop, the work box), so your spend and caps follow you everywhere. A separate opt-in client, per the vow — this MIT binary still contains no sync code. Founding price, locked for life.
+- **Personal Sync preview** — Burnban's maintained client and hosted coordination service for one person's machines. It is not yet available for purchase; the separate manual-account MVP is being validated before billing and activation are enabled.
 - **[Team](https://burnban.dev#pricing)** — $25/month for 5 users — the centralized control plane and opt-in connector for fleets: org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, per-person/CI/agent attribution, an immutable policy audit log, and chargeback exports.
 - **Enterprise** — SSO/SAML, RBAC, self-hosted (VPC) deployment, SLA and priority support, plus an optional guided 45-day rollout. [Talk to us](https://burnban.dev#pricing).
 
-The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if the control plane is unreachable.
+The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if a sidecar is unreachable. The seam is deliberately vendor-neutral: anyone may build and self-host their own coordinator against the documented [external-policy contract](EXTERNAL_POLICY.md). The paid products provide maintained coordination, not exclusive access to the meter or its extension point.
 
 ## Roadmap
 

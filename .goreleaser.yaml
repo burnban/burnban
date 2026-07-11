@@ -32,6 +32,7 @@ archives:
       - CODE_OF_CONDUCT.md
       - CONTRIBUTING.md
       - DATA_AND_PRIVACY.md
+      - EXTERNAL_POLICY.md
       - GOVERNANCE.md
       - RELEASING.md
       - SECURITY.md

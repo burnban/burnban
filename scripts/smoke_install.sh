@@ -52,6 +52,7 @@ test -f "$RELEASE/checksums.txt"
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)burnban$'
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)LICENSE$'
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)DATA_AND_PRIVACY.md$'
+tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)EXTERNAL_POLICY.md$'
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)SECURITY.md$'
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$'
 tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)docs/dashboard.png$'

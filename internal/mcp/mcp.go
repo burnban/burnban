@@ -298,7 +298,7 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if _, external, err := budget.BanStatus(s.S); err != nil {
 			return "", err
 		} else if external {
-			msg += "; organization burn ban remains active"
+			msg += "; external burn ban remains active"
 		}
 		return msg, nil
 	default:

@@ -355,7 +355,7 @@ func TestExternalWindowsUseUTCAcrossMeters(t *testing.T) {
 	location := time.FixedZone("Pacific", -7*60*60)
 	queryNow := time.Date(2026, 7, 9, 1, 0, 0, 0, time.UTC).In(location)
 	// This row belongs to the machine-local day (July 8) but precedes the
-	// organization UTC day (July 9), so it must not consume the fleet cap.
+	// external-policy UTC day (July 9), so it must not consume the shared cap.
 	spend(t, s, time.Date(2026, 7, 8, 22, 0, 0, 0, time.UTC), 9)
 	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "5"); err != nil {
 		t.Fatal(err)
