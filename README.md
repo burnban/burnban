@@ -2,7 +2,7 @@
 
 **Meter, itemize, and cap what your AI agents spend. Meters watch. Burnban acts.**
 
-Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and caps API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, no cloud, no telemetry — your traffic and usage never leave your machine.
+Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and guards API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, account, cloud service, or additional telemetry destination: provider-bound requests still leave your machine for the upstream you configured, while Burnban keeps its ledger local.
 
 ![burnban dashboard](docs/dashboard.png)
 
@@ -22,6 +22,12 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/burnban/burnban/main/install.ps1 | iex
 ```
 
+The release installers verify the downloaded archive against the published
+SHA-256 checksums. For a reviewable install, download the script first, inspect
+it, then run it. Release archives also include an SPDX SBOM, third-party notices,
+and provenance attestations. Pin a release by setting the documented download
+base to that release instead of `latest`.
+
 The installer adds a one-click **Burnban** launcher. It starts the real meter,
 opens the dashboard, and reopens the existing dashboard when Burnban is already
 running. No Electron runtime, account, or cloud service is installed. From a
@@ -30,8 +36,11 @@ source checkout, `make build` builds the same single Go binary.
 No traffic yet? See it alive first — fake data, fresh every run:
 
 ```sh
-burnban demo    # dashboard on http://localhost:4242
+burnban demo    # opens an isolated dashboard on http://localhost:4242
 ```
+
+Demo mode never scans your real agent logs; both its proxy and subscription
+figures are deterministic fixtures and the page carries a persistent DEMO badge.
 
 Then the real thing:
 
@@ -58,12 +67,22 @@ subscription usage or pretends those tokens were billed.
 Set a budget and forget about surprise bills:
 
 ```sh
-burnban cap --daily 10 --weekly 40 --monthly 120   # 402 past any of them
+burnban cap --daily 10 --weekly 40 --monthly 120   # reserve/deny against any window
 burnban cap --agent openclaw --daily 3             # that one hungry agent gets $3
 burnban cap --warn 80                              # webhook ping at 80% of any cap
 burnban ban                                        # emergency stop: pause ALL spend now
 burnban lift --today                               # resume, overriding today's local caps
 ```
+
+Burnban serializes admission and reserves conservative request cost against
+in-flight work. Requests with a known model and output-token limit are rejected
+before forwarding when their bound does not fit. An unbounded request is allowed
+exclusively and can still overshoot by that single provider call because its final
+cost is unknowable in advance; concurrent unknown overshoot is prevented. With an
+active cap, unknown-price models are denied and incomplete/unmetered successful
+responses latch that window fail-closed until the accounting issue is corrected or
+the local cap is explicitly overridden/removed. Treat caps as strong local
+guardrails, not a provider-side billing limit.
 
 And when the bill makes you wonder:
 
@@ -106,12 +125,13 @@ Which door is yours?
 ## What you get
 
 - **Local + live dashboard** at `http://localhost:4141` — auto-detected subscription/agent logs with dollar and token breakdowns, plus live proxy burn, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
-- **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, $/hour rate, and a budget bar that goes red before your bill does.
-- **`burnban report`** — spend for any window, plus **waste receipts**: duplicate requests that burned money twice, and cache hit rates that mean you're paying full price for context the provider would re-serve at a 90% discount.
+- **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, last-hour spend, and every budget window. Redirected output is plain text; `--once` prints one snapshot.
+- **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
 - **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
-- **Budget enforcement** — daily, weekly, and monthly dollar caps enforced in the request path with a clear 402 your agent surfaces verbatim, per-agent daily caps, a webhook warning at 80% (yours to tune) *before* the hard stop, and a manual **burn ban** kill switch.
-- **Honest numbers** — usage comes from provider usage frames, priced per model including cache read/write economics. Unknown models are recorded as unpriced, never guessed. Estimated counts are flagged as estimates.
+- **Budget guardrails** — daily, weekly, and monthly caps enforced during admission with in-flight reservations, per-agent daily caps, a retried webhook warning at 80% (yours to tune), and a manual **burn ban** kill switch.
+- **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active caps fail safe around accounting gaps.
+- **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state.
 
 ## How it works
 
@@ -121,13 +141,22 @@ agents (Claude Code, Codex, OpenClaw, Hermes, your app)
    ▼
 burnban serve  ──►  anthropic / openai / gemini / xai / any --upstream
    │
-   ├─ passes every byte through unmodified (SSE included)
-   ├─ reads usage frames, prices them (cache-aware)
+   ├─ relays provider requests/responses and streams SSE as it arrives
+   ├─ reads usage frames and request-side bounds, prices them (cache-aware)
+   ├─ reserves in-flight budget and fails closed on persistence/accounting gaps
    ├─ SQLite at ~/.burnban/burnban.db — yours, greppable
    └─ refuses to forward when you're over budget
 ```
 
-Burnban binds to `127.0.0.1` only. It is a pass-through observer: request and response bodies are never rewritten, and API keys are forwarded, never persisted.
+Burnban binds to `127.0.0.1` by default and validates loopback `Host`, `Origin`,
+and browser fetch metadata to resist DNS rebinding. It does not rewrite request
+bodies; it may normalize hop-by-hop transport framing while relaying responses.
+API keys are forwarded to the configured upstream and never persisted.
+
+The primary metered surfaces are text-generation endpoints using Anthropic,
+OpenAI-compatible, and Gemini usage shapes. Other successful POST endpoints are
+forwarded, but if Burnban cannot obtain safe usage they are marked unmetered; an
+active dollar cap then fails closed rather than pretending the call cost $0.
 
 ## Why not the big gateway?
 
@@ -135,7 +164,7 @@ The tools in this space either **watch** or **weigh a ton**. Log reporters ([ccu
 
 |  | log reporters (ccusage…) | platform gateways (LiteLLM…) | cloud gateways (Cloudflare…) | **burnban** |
 |---|---|---|---|---|
-| stops overspend in the request path | — | ✅ | ✅ | ✅ **402 + kill switch** |
+| local preflight spend guard | — | ✅ | ✅ | ✅ **reservation + 402 + kill switch** |
 | runs entirely on your machine | ✅ | ◐ self-hosted service | — | ✅ localhost-only default |
 | your provider keys stay yours | ✅ n/a | — virtual keys | — provider keys uploaded | ✅ pass-through, never stored |
 | infra needed | none | Postgres + Redis + config | an account | **one binary, one SQLite file** |
@@ -193,7 +222,11 @@ Codex, Hermes, OpenClaw, Aider, Goose, Cline, Roo Code, Continue, Cursor,
 Windsurf, and OpenCode. For exact custom tracking, send `x-burnban-agent` /
 `x-burnban-session` headers (Claude Code: `ANTHROPIC_CUSTOM_HEADERS`).
 
-OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact counts; without it burnban estimates output tokens and flags them as estimates in reports.
+OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact
+provider counts. Without it Burnban estimates observed text, tool-call arguments,
+reasoning deltas, and request input; truncated/cancelled streams are explicitly
+marked partial lower bounds. Burnban does not silently add this option to your
+request.
 
 ## Plug it into your tools (MCP)
 
@@ -241,9 +274,13 @@ Current prices for the July 2026 lineup (Claude Fable 5 / Opus 4.8 / Sonnet 4.6 
 
 Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no telemetry, no account, no license checks, and **no code path to our servers**: if a feature ever needs the network beyond your model providers, it ships as a separate opt-in product, never in the meter.
 
-The paid product is **[Burnban Teams](https://burnban.dev#teams)** (early access): a separate centralized control plane and opt-in connector for fleets, with org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, an immutable policy audit log, and aggregate chargeback exports. SSO/SAML, billing automation, fine-grained RBAC, and HA storage are enterprise follow-ons, not features hidden in this binary. The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if the control plane is unreachable.
+Paid is a clean ladder, and every rung buys a real thing:
 
-For individuals there's a **[Supporter](https://burnban.dev#supporter)** tier — $5/month (or $50/year). It gates nothing in this binary; it buys your name on the supporters' ledger at burnban.dev, priority issue triage, and first access to **Personal Sync** (one ledger across your machines — a separate opt-in product, per the vow) at a founding price locked for life. No telemetry means there is nothing to sell but the work; supporters are how the free meter stays free.
+- **[Personal](https://burnban.dev#pricing)** — $5/month (or $50/year) — adds **Personal Sync**: one ledger across every machine you own (laptop, desktop, the work box), so your spend and caps follow you everywhere. A separate opt-in client, per the vow — this MIT binary still contains no sync code. Founding price, locked for life.
+- **[Team](https://burnban.dev#pricing)** — $25/month for 5 users — the centralized control plane and opt-in connector for fleets: org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, per-person/CI/agent attribution, an immutable policy audit log, and chargeback exports.
+- **Enterprise** — SSO/SAML, RBAC, self-hosted (VPC) deployment, SLA and priority support, plus an optional guided 45-day rollout. [Talk to us](https://burnban.dev#pricing).
+
+The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if the control plane is unreachable.
 
 ## Roadmap
 
