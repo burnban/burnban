@@ -66,6 +66,12 @@ func (u upstreamFlags) Set(v string) error {
 }
 
 func cmdServe(args []string) error {
+	return cmdServeMode(args, false)
+}
+
+// cmdServeMode runs the real metering proxy. Desktop mode uses the exact same
+// server and database, then opens the dashboard once the listener is ready.
+func cmdServeMode(args []string, launchDashboard bool) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	port := fs.Int("port", 4141, "listen port")
 	host := fs.String("host", "127.0.0.1", "bind address; anything non-loopback requires BURNBAN_TOKEN (team mode)")
@@ -147,6 +153,25 @@ func cmdServe(args []string) error {
 			name, base, name, redactURL(upstreams[name].URL), shape)
 	}
 
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		if launchDashboard && burnbanRunning(base, token) {
+			if openErr := openDashboard(dashboardURL(base, token)); openErr != nil {
+				return openErr
+			}
+			fmt.Printf("🔥 burnban is already running — opened %s\n", base)
+			return nil
+		}
+		return err
+	}
+	defer ln.Close()
+
+	// Port 0 is useful for tests and embedded launchers. Always report/open the
+	// address the OS actually assigned rather than an unusable :0 URL.
+	if *port == 0 {
+		base = scheme + "://" + ln.Addr().String()
+	}
+
 	fmt.Printf(`🔥 burnban %s — the meter is running
 
    dashboard   %s
@@ -156,6 +181,14 @@ func cmdServe(args []string) error {
      openai      OPENAI_BASE_URL=%s/openai/v1
      gemini      GOOGLE_GEMINI_BASE_URL=%s/gemini
      xai         %s/xai/v1
+
+   compatible routes:
+     openrouter  %s/openrouter/v1
+     groq        %s/groq/v1
+     mistral     %s/mistral/v1
+     deepseek    %s/deepseek/v1
+     ollama      %s/ollama/v1
+     vllm        %s/vllm/v1
 %s
    db    %s
    cap   %s
@@ -163,21 +196,26 @@ func cmdServe(args []string) error {
 %s
    watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, base, base, customLines, *dbPath, capState, authState, banState)
+`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, banState)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())
-	web.Register(mux, s, version)
+	web.Register(mux, s, version, prices)
 	srv := &http.Server{
 		Addr: addr, Handler: web.WithAuth(token, mux),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       2 * time.Minute,
 		MaxHeaderBytes:    1 << 20,
 	}
-	if *tlsCert != "" {
-		return srv.ListenAndServeTLS(*tlsCert, *tlsKey)
+	if launchDashboard {
+		if err := openDashboard(dashboardURL(base, token)); err != nil {
+			fmt.Fprintf(os.Stderr, "burnban: dashboard is live at %s (could not open the browser: %v)\n", base, err)
+		}
 	}
-	return srv.ListenAndServe()
+	if *tlsCert != "" {
+		return srv.ServeTLS(ln, *tlsCert, *tlsKey)
+	}
+	return srv.Serve(ln)
 }
 
 func isLoopbackHost(host string) bool {

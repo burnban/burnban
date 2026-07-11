@@ -19,6 +19,8 @@ func main() {
 	switch os.Args[1] {
 	case "serve":
 		err = cmdServe(os.Args[2:])
+	case "desktop":
+		err = cmdDesktop(os.Args[2:])
 	case "top":
 		err = cmdTop(os.Args[2:])
 	case "report":
@@ -64,11 +66,12 @@ func usage() {
 usage: burnban <command> [flags]
 
   serve    run the metering proxy (point your agents at it)
+  desktop  run the real meter and open its dashboard (desktop launcher)
   demo     seed fake traffic and serve the dashboard — see it alive in 5s
   top      live spend view, refreshed in place
   report   spend + waste receipts for a window (--since today|24h|7d)
   whatif   reprice a window's traffic onto other models ("what would 7d cost on haiku?")
-  subsidy  price your Claude Code / Codex subscription logs at API rates — no proxy needed
+  subsidy  price local agent/subscription logs at API rates — no proxy needed
   cap      set budgets (--daily 10 --weekly 40 --monthly 120 [--agent NAME] [--warn 80] | --off)
   ban      pause ALL agent spend immediately
   lift     lift the local ban (--today also overrides local caps)

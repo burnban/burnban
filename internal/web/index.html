@@ -135,6 +135,51 @@
   td.name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
   tr.empty td { color: var(--faint); text-align: left; padding: 14px 0; border-top: none; }
 
+  /* ── local subscription / agent-log usage ────────────────── */
+  .local-usage { margin-top: 22px; padding: 18px; }
+  .local-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  .local-title { font-family: var(--cond); font-size: 22px; letter-spacing: .08em; margin-top: 2px; }
+  .windows { display: flex; border: 1px solid var(--line); }
+  .windows button {
+    appearance: none; border: 0; border-right: 1px solid var(--line); background: #100c08;
+    color: var(--dim); padding: 7px 10px; font: 600 10px var(--cond); letter-spacing: .12em;
+    text-transform: uppercase; cursor: pointer;
+  }
+  .windows button:last-child { border-right: 0; }
+  .windows button.active { color: var(--ember-hi); background: rgba(255,122,47,.12); }
+  .sub-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin: 22px 0 16px; flex-wrap: wrap; }
+  .sub-cost { color: var(--ember); font-size: clamp(38px, 7vw, 62px); font-weight: 700; line-height: 1; }
+  .token-grid { display: grid; grid-template-columns: repeat(5, minmax(82px, 1fr)); gap: 8px; flex: 1; min-width: min(100%, 520px); }
+  .token-cell { border-left: 1px solid var(--line); padding-left: 11px; }
+  .token-cell .val { margin-top: 3px; font-size: 17px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .source-list { display: flex; flex-wrap: wrap; gap: 7px; margin: 9px 0 13px; }
+  .source-chip { border: 1px solid var(--line-soft); background: #100c08; color: var(--dim); padding: 4px 8px; font-size: 11px; }
+  .source-chip.on { color: var(--ok); border-color: rgba(157,199,108,.22); }
+  .source-chip.err { color: var(--warn); border-color: rgba(240,179,78,.3); }
+  .sub-note { color: var(--faint); font-size: 11px; margin: 8px 0 3px; }
+  .table-scroll { overflow-x: auto; }
+  .source-name { color: var(--dim); }
+  .model-indent { padding-left: 10px; }
+  .section-kicker { margin-top: 28px; display: flex; align-items: center; gap: 10px; color: var(--faint); }
+  .section-kicker::after { content: ""; height: 1px; flex: 1; background: var(--line); }
+  .connect { margin-top: 12px; padding: 0; }
+  .connect summary {
+    cursor: pointer; list-style: none; padding: 12px 16px; color: var(--dim);
+    font: 700 11px var(--cond); letter-spacing: .15em; text-transform: uppercase;
+  }
+  .connect summary::-webkit-details-marker { display: none; }
+  .connect summary::before { content: "+"; color: var(--ember); margin-right: 9px; }
+  .connect[open] summary::before { content: "−"; }
+  .connect-body { border-top: 1px solid var(--line-soft); padding: 13px 16px 15px; display: grid; gap: 8px; }
+  .route { display: grid; grid-template-columns: 150px 1fr; gap: 12px; align-items: baseline; }
+  .route code { color: var(--ember-hi); overflow-wrap: anywhere; user-select: all; }
+  .compatible { color: var(--faint); font-size: 11px; margin-top: 4px; }
+  @media (max-width: 720px) {
+    .local-head { flex-direction: column; }
+    .token-grid { grid-template-columns: repeat(2, 1fr); }
+    .token-cell { min-height: 48px; }
+  }
+
   /* ── waste receipt ───────────────────────────────────────── */
   .receipt {
     margin-top: 14px; background: var(--panel-2);
@@ -174,9 +219,62 @@
 
   <section id="banBanner" class="ban hidden">🚫 Burn ban in effect — all agent spend paused<span class="dim">lift with: burnban lift</span></section>
 
+  <section class="panel local-usage reveal d1">
+    <div class="local-head">
+      <div>
+        <div class="label">Auto-detected local agent logs</div>
+        <div class="local-title">SUBSCRIPTION USAGE</div>
+      </div>
+      <div class="windows" aria-label="Subscription usage window">
+        <button type="button" data-window="today" class="active">today</button>
+        <button type="button" data-window="7d">7 days</button>
+        <button type="button" data-window="30d">30 days</button>
+      </div>
+    </div>
+    <div id="subLoading" class="sub-note">scanning Claude Code, Codex, Hermes Agent, OpenClaw, and Goose…</div>
+    <div id="subContent" class="hidden">
+      <div class="sub-hero">
+        <div>
+          <div id="subCostLabel" class="label">API equivalent · today</div>
+          <div id="subCost" class="sub-cost">$0.0000</div>
+        </div>
+        <div class="token-grid">
+          <div class="token-cell"><div class="label">Calls</div><div id="subCalls" class="val">0</div></div>
+          <div class="token-cell"><div class="label">Input</div><div id="subIn" class="val">0</div></div>
+          <div class="token-cell"><div class="label">Output</div><div id="subOut" class="val">0</div></div>
+          <div class="token-cell"><div class="label">Cache read</div><div id="subCacheRead" class="val">0</div></div>
+          <div class="token-cell"><div class="label">Cache write</div><div id="subCacheWrite" class="val">0</div></div>
+        </div>
+      </div>
+      <div id="subSources" class="source-list"></div>
+      <div class="table-scroll">
+        <table>
+          <thead><tr><th>source</th><th>model</th><th>calls</th><th>input</th><th>output</th><th>cache r/w</th><th>API equiv.</th></tr></thead>
+          <tbody id="subModels"></tbody>
+        </table>
+      </div>
+      <div id="subNote" class="sub-note">Local subscription usage is not a per-token bill. Dollar values show what the same tokens would cost at API prices.</div>
+    </div>
+  </section>
+
+  <div class="label section-kicker reveal d1">LIVE API-KEY PROXY · TODAY</div>
+
+  <details class="panel connect reveal d2">
+    <summary>Connect an API-key agent</summary>
+    <div class="connect-body">
+      <div class="route"><span class="label">Claude Code</span><code id="routeAnthropic"></code></div>
+      <div class="route"><span class="label">Codex / OpenAI</span><code id="routeOpenAI"></code></div>
+      <div class="route"><span class="label">Hermes Agent</span><code id="routeHermes"></code></div>
+      <div class="route"><span class="label">Aider</span><code id="routeAider"></code></div>
+      <div class="route"><span class="label">Local Ollama</span><code id="routeOllama"></code></div>
+      <div class="route"><span class="label">Local vLLM</span><code id="routeVLLM"></code></div>
+      <div class="compatible">Also works with OpenClaw, Goose, Cline, Roo Code, Continue, Cursor, Windsurf, OpenCode, OpenRouter, Groq, Mistral, DeepSeek, and any OpenAI-compatible client. Set <code>x-burnban-agent</code> when a client supports custom headers for exact attribution.</div>
+    </div>
+  </details>
+
   <section class="hero reveal d1">
     <div>
-      <div class="label">Burned today</div>
+      <div class="label">Billed API-key spend today</div>
       <div id="total" class="big" aria-live="polite">$0.0000</div>
     </div>
     <div class="stats">
@@ -254,7 +352,7 @@
   function renderModels(models) {
     const tb = $("models");
     if (!models.length) {
-      tb.innerHTML = '<tr class="empty"><td colspan="6">no traffic yet — point an agent at the meter</td></tr>';
+      tb.innerHTML = '<tr class="empty"><td colspan="6">no proxied API-key traffic yet</td></tr>';
       return;
     }
     tb.innerHTML = models.map(m =>
@@ -287,6 +385,77 @@
       ? items.map(i => `<li>${i}</li>`).join("")
       : '<li class="clean">none — clean burn 🔥</li>';
   }
+
+  const sourceNames = {
+    "claude-code": "Claude Code", codex: "Codex", hermes: "Hermes Agent", openclaw: "OpenClaw", goose: "Goose"
+  };
+  let subWindow = "today";
+
+  function exactTok(n) { return Number(n || 0).toLocaleString(); }
+
+  function renderSubscription(d) {
+    $("subLoading").classList.add("hidden");
+    $("subContent").classList.remove("hidden");
+    setText("subCost", fmt$(d.api_usd || 0));
+    setText("subCalls", exactTok(d.calls));
+    setText("subIn", fmtTok(d.in_tokens || 0));
+    setText("subOut", fmtTok(d.out_tokens || 0));
+    setText("subCacheRead", fmtTok(d.cache_read_tokens || 0));
+    setText("subCacheWrite", fmtTok(d.cache_write_tokens || 0));
+    $("subIn").title = exactTok(d.in_tokens) + " input tokens";
+    $("subOut").title = exactTok(d.out_tokens) + " output tokens";
+    $("subCacheRead").title = exactTok(d.cache_read_tokens) + " cache-read tokens";
+    $("subCacheWrite").title = exactTok(d.cache_write_tokens) + " cache-write tokens";
+    $("subCostLabel").textContent = "API equivalent · " + d.label;
+
+    const detected = d.providers.filter(p => p.detected);
+    $("subSources").innerHTML = d.providers.map(p => {
+      const cls = p.error ? "source-chip err" : "source-chip" + (p.detected ? " on" : "");
+      const state = p.error ? "scan issue" : p.detected ? `${p.sessions} session${p.sessions === 1 ? "" : "s"}` : "not found";
+      return `<span class="${cls}"${p.error ? ` title="${esc(p.error)}"` : ""}>${esc(sourceNames[p.provider] || p.provider)} · ${state}</span>`;
+    }).join("");
+
+    const rows = [];
+    d.providers.forEach(p => p.models.forEach(m => rows.push(
+      `<tr><td class="source-name">${esc(sourceNames[p.provider] || p.provider)}</td>` +
+      `<td class="name model-indent">${esc(m.model)}</td><td>${exactTok(m.calls)}</td>` +
+      `<td title="${exactTok(m.in_tokens)}">${fmtTok(m.in_tokens)}</td>` +
+      `<td title="${exactTok(m.out_tokens)}">${fmtTok(m.out_tokens)}</td>` +
+      `<td title="${exactTok(m.cache_read_tokens)} read / ${exactTok(m.cache_write_tokens)} write">${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td>` +
+      `<td class="cost">${m.priced ? fmt$(m.api_usd) : "unpriced"}</td></tr>`
+    )));
+    $("subModels").innerHTML = rows.length ? rows.join("") :
+      `<tr class="empty"><td colspan="7">${detected.length ? "no local usage in this window" : "no supported local agent logs found"}</td></tr>`;
+    const notes = ["Local subscription usage is not a per-token bill. Dollar values show what the same tokens would cost at API prices."];
+    if (d.unpriced_tokens > 0) notes.push(exactTok(d.unpriced_tokens) + " tokens use models not yet in the pricing table.");
+    $("subNote").textContent = notes.join(" ");
+  }
+
+  async function subscription() {
+    try {
+      const opts = TOKEN ? { headers: { "x-burnban-token": TOKEN } } : undefined;
+      const r = await fetch("/api/subsidy?window=" + encodeURIComponent(subWindow), opts);
+      if (!r.ok) throw new Error(r.status);
+      renderSubscription(await r.json());
+    } catch (e) {
+      $("subLoading").textContent = "could not scan local agent logs — the live proxy is still running";
+    }
+  }
+
+  document.querySelectorAll("[data-window]").forEach(button => button.addEventListener("click", () => {
+    subWindow = button.dataset.window;
+    document.querySelectorAll("[data-window]").forEach(b => b.classList.toggle("active", b === button));
+    $("subLoading").textContent = "scanning local agent logs…";
+    $("subLoading").classList.remove("hidden");
+    subscription();
+  }));
+
+  $("routeAnthropic").textContent = "ANTHROPIC_BASE_URL=" + location.origin + "/anthropic";
+  $("routeOpenAI").textContent = "OPENAI_BASE_URL=" + location.origin + "/openai/v1";
+  $("routeHermes").textContent = "OPENAI_BASE_URL=" + location.origin + "/openrouter/v1";
+  $("routeAider").textContent = "AIDER_OPENAI_API_BASE=" + location.origin + "/openrouter/v1";
+  $("routeOllama").textContent = "OPENAI_BASE_URL=" + location.origin + "/ollama/v1";
+  $("routeVLLM").textContent = "OPENAI_BASE_URL=" + location.origin + "/vllm/v1";
 
   async function tick() {
     try {
@@ -363,8 +532,10 @@
 
   tick();
   series();
+  subscription();
   setInterval(tick, 2000);
   setInterval(series, 15000);
+  setInterval(subscription, 30000);
 </script>
 </body>
 </html>

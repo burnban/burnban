@@ -6,11 +6,14 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/syft8/burnban/internal/budget"
+	"github.com/syft8/burnban/internal/pricing"
 	"github.com/syft8/burnban/internal/store"
 	"github.com/syft8/burnban/internal/web"
 )
@@ -23,7 +26,11 @@ func newServer(t *testing.T) (*httptest.Server, *store.Store) {
 	}
 	t.Cleanup(func() { s.Close() })
 	mux := http.NewServeMux()
-	web.Register(mux, s, "test")
+	prices, err := pricing.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	web.Register(mux, s, "test", prices)
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 	return srv, s
@@ -151,5 +158,45 @@ func TestSummaryAPI(t *testing.T) {
 	}
 	if d.TotalCost != 0 || !d.BanActive || d.Models == nil {
 		t.Fatalf("summary = %+v", d)
+	}
+}
+
+func TestSubsidyAPIAutoDetectsLocalLogs(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dir := filepath.Join(home, ".claude", "projects", "demo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf(`{"type":"assistant","requestId":"r","timestamp":%q,"message":{"id":"m","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":20,"cache_creation_input_tokens":40,"cache_read_input_tokens":300}}}`+"\n", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano))
+	if err := os.WriteFile(filepath.Join(dir, "session.jsonl"), []byte(line), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	srv, _ := newServer(t)
+	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Window    string `json:"window"`
+		HasUsage  bool   `json:"has_usage"`
+		Calls     int64  `json:"calls"`
+		In        int64  `json:"in_tokens"`
+		Out       int64  `json:"out_tokens"`
+		Providers []struct {
+			Provider string `json:"provider"`
+			Detected bool   `json:"detected"`
+			Sessions int    `json:"sessions"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || data.Window != "today" || !data.HasUsage || data.Calls != 1 || data.In != 100 || data.Out != 20 {
+		t.Fatalf("status=%d data=%+v", resp.StatusCode, data)
+	}
+	if len(data.Providers) < 1 || data.Providers[0].Provider != "claude-code" || !data.Providers[0].Detected || data.Providers[0].Sessions != 1 {
+		t.Fatalf("providers=%+v", data.Providers)
 	}
 }

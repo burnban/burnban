@@ -11,10 +11,13 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/syft8/burnban/internal/budget"
+	"github.com/syft8/burnban/internal/pricing"
 	"github.com/syft8/burnban/internal/store"
+	"github.com/syft8/burnban/internal/subsidy"
 )
 
 //go:embed index.html
@@ -22,7 +25,8 @@ var indexHTML []byte
 
 // Register mounts the dashboard at / (exact) and its feed at /api/summary.
 // Provider proxy routes keep working because they match longer patterns.
-func Register(mux *http.ServeMux, s *store.Store, version string) {
+func Register(mux *http.ServeMux, s *store.Store, version string, prices *pricing.Table) {
+	subscriptions := newSubscriptionFeed(prices)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		secureHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -75,6 +79,78 @@ func Register(mux *http.ServeMux, s *store.Store, version string) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	})
+	mux.HandleFunc("GET /api/subsidy", func(w http.ResponseWriter, r *http.Request) {
+		secureHeaders(w)
+		window := r.URL.Query().Get("window")
+		if window == "" {
+			window = "today"
+		}
+		resp, err := subscriptions.get(window, time.Now())
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_ = json.NewEncoder(w).Encode(resp)
+	})
+}
+
+type subscriptionResponse struct {
+	Window string `json:"window"`
+	Label  string `json:"label"`
+	subsidy.Report
+}
+
+type cachedSubscription struct {
+	created time.Time
+	since   time.Time
+	value   *subscriptionResponse
+}
+
+type subscriptionFeed struct {
+	mu      sync.Mutex
+	prices  *pricing.Table
+	entries map[string]cachedSubscription
+	ttl     time.Duration
+}
+
+func newSubscriptionFeed(prices *pricing.Table) *subscriptionFeed {
+	return &subscriptionFeed{prices: prices, entries: map[string]cachedSubscription{}, ttl: time.Minute}
+}
+
+func (f *subscriptionFeed) get(window string, now time.Time) (*subscriptionResponse, error) {
+	var since time.Time
+	var label string
+	switch window {
+	case "today":
+		since, label = budget.DayStart(now), "today"
+	case "7d":
+		since, label = now.Add(-7*24*time.Hour), "last 7 days"
+	case "30d":
+		since, label = now.Add(-30*24*time.Hour), "last 30 days"
+	default:
+		return nil, fmt.Errorf("bad window %q: use today, 7d, or 30d", window)
+	}
+
+	// Scans are read-only but can walk many logs. Serialize cache misses so a
+	// dashboard refresh cannot start duplicate scans of the same local data.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if cached, ok := f.entries[window]; ok && time.Since(cached.created) < f.ttl &&
+		(window != "today" || cached.since.Equal(since)) {
+		return cached.value, nil
+	}
+	report, err := subsidy.BuildReport(f.prices, subsidy.ReportOptions{Since: since, Until: now})
+	if err != nil {
+		return nil, err
+	}
+	resp := &subscriptionResponse{Window: window, Label: label, Report: report}
+	// Stamp the cache after the scan. Large histories can take longer than the
+	// TTL itself on cold or network-backed storage; using the request start time
+	// would make the freshly completed result immediately stale and let browser
+	// polling create an endless queue of full rescans.
+	f.entries[window] = cachedSubscription{created: time.Now(), since: since, value: resp}
+	return resp, nil
 }
 
 func secureHeaders(w http.ResponseWriter) {

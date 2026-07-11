@@ -1,7 +1,6 @@
-// Package subsidy reads the session logs that Claude Code and Codex already
-// keep on disk and totals what that traffic would have cost at API prices.
-// Nothing is proxied and nothing is billed — flat-rate subscribers can't
-// meter spend that doesn't exist, but they can see what their plan is worth.
+// Package subsidy reads the local usage stores kept by Claude Code, Codex,
+// Hermes Agent, OpenClaw, and Goose, then totals what those tokens would cost at API
+// prices. Nothing is proxied and source logs are never modified.
 package subsidy
 
 import (
@@ -25,6 +24,7 @@ type Event struct {
 	Provider  string // "claude-code" or "codex"
 	Model     string
 	Time      time.Time
+	Calls     int64
 	In        int64
 	Out       int64
 	CacheRead int64
@@ -33,6 +33,11 @@ type Event struct {
 	// total), but Claude Code's logs carry it, so subsidy can price it.
 	CacheWrite5m int64
 	CacheWrite1h int64
+	// Some agent logs carry their own local cost estimate for models outside
+	// Burnban's table. It is only used as a fallback; known models are always
+	// repriced consistently with Burnban's table.
+	CostUSD   float64
+	CostKnown bool
 }
 
 // write1hMult is Anthropic's 1-hour cache-write premium. The pricing table

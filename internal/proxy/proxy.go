@@ -106,10 +106,16 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Prox
 // overridden by env var, which is also how tests point burnban at fakes.
 func DefaultUpstreams() map[string]Upstream {
 	return map[string]Upstream{
-		"anthropic": {envOr("BURNBAN_ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "anthropic"},
-		"openai":    {envOr("BURNBAN_OPENAI_UPSTREAM", "https://api.openai.com"), "openai"},
-		"xai":       {envOr("BURNBAN_XAI_UPSTREAM", "https://api.x.ai"), "openai"},
-		"gemini":    {envOr("BURNBAN_GEMINI_UPSTREAM", "https://generativelanguage.googleapis.com"), "gemini"},
+		"anthropic":  {envOr("BURNBAN_ANTHROPIC_UPSTREAM", "https://api.anthropic.com"), "anthropic"},
+		"openai":     {envOr("BURNBAN_OPENAI_UPSTREAM", "https://api.openai.com"), "openai"},
+		"xai":        {envOr("BURNBAN_XAI_UPSTREAM", "https://api.x.ai"), "openai"},
+		"gemini":     {envOr("BURNBAN_GEMINI_UPSTREAM", "https://generativelanguage.googleapis.com"), "gemini"},
+		"openrouter": {envOr("BURNBAN_OPENROUTER_UPSTREAM", "https://openrouter.ai/api"), "openai"},
+		"groq":       {envOr("BURNBAN_GROQ_UPSTREAM", "https://api.groq.com/openai"), "openai"},
+		"mistral":    {envOr("BURNBAN_MISTRAL_UPSTREAM", "https://api.mistral.ai"), "openai"},
+		"deepseek":   {envOr("BURNBAN_DEEPSEEK_UPSTREAM", "https://api.deepseek.com"), "openai"},
+		"ollama":     {envOr("BURNBAN_OLLAMA_UPSTREAM", "http://127.0.0.1:11434"), "openai"},
+		"vllm":       {envOr("BURNBAN_VLLM_UPSTREAM", "http://127.0.0.1:8000"), "openai"},
 	}
 }
 
@@ -338,9 +344,39 @@ func agentFrom(r *http.Request) string {
 	if v := r.Header.Get("x-burnban-agent"); v != "" {
 		return v
 	}
+	if v := r.Header.Get("x-client-name"); v != "" {
+		return v
+	}
 	ua := r.Header.Get("User-Agent")
 	if ua == "" {
 		return "unknown"
+	}
+	lower := strings.ToLower(ua)
+	// SDK user agents often hide the calling app, but popular agent clients
+	// that identify themselves should remain stable across version upgrades.
+	known := []struct {
+		name    string
+		needles []string
+	}{
+		{"claude-code", []string{"claude-code", "claude_cli", "claude-cli"}},
+		{"codex", []string{"codex_cli", "codex-cli", "codex/"}},
+		{"hermes", []string{"hermes-agent", "hermes_agent", "hermes/"}},
+		{"openclaw", []string{"openclaw", "clawdbot", "moltbot"}},
+		{"aider", []string{"aider"}},
+		{"goose", []string{"goose-ai", "goose/", "goose-cli", "goose-desktop"}},
+		{"cline", []string{"cline"}},
+		{"roo-code", []string{"roo-code", "roocode", "roo code"}},
+		{"continue", []string{"continue.dev", "continue/"}},
+		{"cursor", []string{"cursor/", "cursor-agent"}},
+		{"windsurf", []string{"windsurf"}},
+		{"opencode", []string{"opencode"}},
+	}
+	for _, client := range known {
+		for _, needle := range client.needles {
+			if strings.Contains(lower, needle) {
+				return client.name
+			}
+		}
 	}
 	if i := strings.IndexAny(ua, " ("); i > 0 {
 		ua = ua[:i]
