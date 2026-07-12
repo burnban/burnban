@@ -12,11 +12,28 @@ var version = "0.4.0-dev"
 
 func main() {
 	if len(os.Args) < 2 {
-		usage()
-		os.Exit(2)
+		// A brand-new install gets the guided first run. Once configured, the
+		// bare command opens the interface the user chose during setup.
+		cfg := loadConfig()
+		if !cfg.SetupDone {
+			if err := cmdSetup(nil); err != nil {
+				fmt.Fprintln(os.Stderr, "burnban:", terminalText(err.Error(), 500))
+				os.Exit(1)
+			}
+			return
+		}
+		if err := launchConfiguredInterface(cfg); err != nil {
+			fmt.Fprintln(os.Stderr, "burnban:", terminalText(err.Error(), 500))
+			os.Exit(1)
+		}
+		return
 	}
 	var err error
 	switch os.Args[1] {
+	case "setup":
+		err = cmdSetup(os.Args[2:])
+	case "guide":
+		err = cmdGuide(os.Args[2:])
 	case "serve":
 		err = cmdServe(os.Args[2:])
 	case "desktop":
@@ -75,6 +92,8 @@ func usage() {
 
 usage: burnban <command> [flags]
 
+  setup    guided first-run: see local usage or connect live enforcement
+  guide    plain-language walkthrough of what burnban does
   serve    run the metering proxy (point your agents at it)
   desktop  run the real meter and open its dashboard (desktop launcher)
   status   show the running meter, URL, database, and health

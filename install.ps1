@@ -367,8 +367,18 @@ try {
 
     $Version = & $Binary version
     Write-Host "Installed: $Version" -ForegroundColor Green
-    Write-Host "Desktop: double-click Burnban"
-    Write-Host "Terminal: burnban serve   |   burnban subsidy"
+    Write-Host ""
+    $InteractiveSetup = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
+    if ($InteractiveSetup) {
+        & $Binary setup --if-needed --no-launch
+        if ($LASTEXITCODE -ne 0) {
+            Write-Warning "Guided setup paused; finish later with: burnban setup"
+        }
+    } else {
+        Write-Host "Get started:"
+        Write-Host "  burnban setup   guided setup"
+        Write-Host "  burnban guide   what Burnban does, in plain language"
+    }
 } finally {
     if ($null -ne $StagedBinary) {
         Remove-Item -LiteralPath $StagedBinary -Force -ErrorAction SilentlyContinue
