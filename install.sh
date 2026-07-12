@@ -567,6 +567,17 @@ fi
 write_manifest
 
 echo "installed: $("$BIN_PATH" version)"
-echo "   real dashboard: $BIN_PATH desktop"
-echo "   terminal meter:  $BIN_PATH serve"
-echo "   local usage:     $BIN_PATH subsidy"
+echo
+
+# Hand a real person straight into the guided setup. `curl | sh` leaves stdin
+# as the pipe, so read the terminal from /dev/tty when one is attached; if
+# there is none (CI, no TTY), just point them at the command.
+if [ -r /dev/tty ] && [ -t 1 ]; then
+  if ! "$BIN_PATH" setup --if-needed --no-launch </dev/tty; then
+    echo "burnban: guided setup paused; finish later with: burnban setup" >&2
+  fi
+else
+  echo "Get started:"
+  echo "   burnban setup     guided setup: see local usage or connect enforcement"
+  echo "   burnban guide     what burnban does, in plain language"
+fi
