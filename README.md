@@ -6,7 +6,7 @@
 
 One maintainer machine produced **$4,173.49 of API-equivalent work in 30 days** on a $200/month plan: a **20.9× subsidy**. Burnban reads the local usage logs your agents already keep and gives you the same number without an account, proxy, or upload.
 
-![Burnban subsidy share card showing $4,173.49 of API-equivalent usage](docs/subsidy-share.svg)
+![Animated terminal recording of Burnban subsidy share showing $4,173.49 of API-equivalent usage](docs/subsidy-share.gif)
 
 Install on macOS or Linux:
 
