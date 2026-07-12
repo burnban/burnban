@@ -41,6 +41,11 @@ type Event struct {
 	// repriced consistently with Burnban's table.
 	CostUSD   float64
 	CostKnown bool
+	// BillingProvider names the pay-per-token provider a session was actually
+	// billed through (e.g. "openrouter") when the agent records it. Non-empty
+	// means this is real metered API spend, not flat-rate subscription usage
+	// that subsidy prices hypothetically.
+	BillingProvider string
 	// Anthropic usage metadata is retained for local observability even though
 	// the proxy ledger's cross-provider schema intentionally stays normalized.
 	ServiceTier   string

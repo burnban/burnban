@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"slices"
 	"sort"
 	"strings"
 	"time"
@@ -42,31 +43,52 @@ type DayUsage struct {
 }
 
 type ProviderUsage struct {
-	Provider     string       `json:"provider"`
-	Dir          string       `json:"-"`
-	Detected     bool         `json:"detected"`
-	Error        string       `json:"error,omitempty"`
-	Detail       string       `json:"-"`
-	Sessions     int          `json:"sessions"`
-	Partial      bool         `json:"partial"`
-	Warnings     []string     `json:"warnings,omitempty"`
-	SkippedFiles int          `json:"skipped_files,omitempty"`
-	Scan         ScanStats    `json:"-"`
-	Models       []ModelUsage `json:"models"`
-	Days         []DayUsage   `json:"days"`
+	Provider string `json:"provider"`
+	Dir      string `json:"-"`
+	Detected bool   `json:"detected"`
+	// Metered is true when this source is billed per token (a BYO-key agent, or
+	// a subscription CLI running on an API key), so its API-equivalent dollars
+	// are a real bill rather than a subsidy comparison. BillingProvider names
+	// the pay-per-token provider when the source records it (e.g. "openrouter").
+	Metered         bool         `json:"metered"`
+	BillingProvider string       `json:"billing_provider,omitempty"`
+	Error           string       `json:"error,omitempty"`
+	Detail          string       `json:"-"`
+	Sessions        int          `json:"sessions"`
+	Partial         bool         `json:"partial"`
+	Warnings        []string     `json:"warnings,omitempty"`
+	SkippedFiles    int          `json:"skipped_files,omitempty"`
+	Scan            ScanStats    `json:"-"`
+	Models          []ModelUsage `json:"models"`
+	Days            []DayUsage   `json:"days"`
 	Totals
 }
 
 type Report struct {
-	Since          time.Time       `json:"since"`
-	Until          time.Time       `json:"until"`
-	HasUsage       bool            `json:"has_usage"`
-	Partial        bool            `json:"partial"`
-	UnpricedCalls  int64           `json:"unpriced_calls"`
-	UnpricedTokens int64           `json:"unpriced_tokens"`
-	UnpricedModels []string        `json:"unpriced_models"`
-	Providers      []ProviderUsage `json:"providers"`
+	Since    time.Time `json:"since"`
+	Until    time.Time `json:"until"`
+	HasUsage bool      `json:"has_usage"`
+	Partial  bool      `json:"partial"`
+	// SubscriptionUSD is the API-equivalent value of flat-rate subscription
+	// usage (the subsidy comparison). MeteredUSD is real pay-per-token spend
+	// already billed. They sum to Totals.APIUSD.
+	SubscriptionUSD float64         `json:"subscription_usd"`
+	MeteredUSD      float64         `json:"metered_usd"`
+	UnpricedCalls   int64           `json:"unpriced_calls"`
+	UnpricedTokens  int64           `json:"unpriced_tokens"`
+	UnpricedModels  []string        `json:"unpriced_models"`
+	Providers       []ProviderUsage `json:"providers"`
 	Totals
+}
+
+// SubsidyBaseUSD is the value the subsidy multiple compares against a plan: only
+// flat-rate subscription usage. Reports built before billing classification
+// (both buckets zero) fall back to the full total for backward compatibility.
+func (r Report) SubsidyBaseUSD() float64 {
+	if r.SubscriptionUSD > 0 || r.MeteredUSD > 0 {
+		return r.SubscriptionUSD
+	}
+	return r.APIUSD
 }
 
 type ReportOptions struct {
@@ -78,6 +100,10 @@ type ReportOptions struct {
 	OpenClawDir string
 	GooseDB     string
 	ScanLimits  ScanLimits
+	// MeteredProviders forces named sources (e.g. "claude-code", "codex") into
+	// the real-spend bucket, for API-key auth or Max-20x overage that the local
+	// logs cannot reveal on their own.
+	MeteredProviders []string
 }
 
 // BuildReport auto-detects Claude Code, Codex, Hermes, OpenClaw, and Goose logs and
@@ -162,6 +188,7 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 	}
 	for _, src := range sources {
 		provider := ProviderUsage{Provider: src.name, Dir: src.dir, Models: []ModelUsage{}, Days: []DayUsage{}}
+		providerBilling := ""
 		if _, err := os.Stat(src.dir); err == nil {
 			provider.Detected = true
 		}
@@ -203,6 +230,9 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 				return
 			}
 			event = normalizeEvent(event)
+			if event.BillingProvider != "" {
+				providerBilling = event.BillingProvider
+			}
 			price, priced := priceFor(event.Model)
 			var usd, serverToolUSD float64
 			if priced {
@@ -279,6 +309,14 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 			provider.Days = append(provider.Days, DayUsage{Day: day, Totals: *totals})
 		}
 		sort.Slice(provider.Days, func(i, j int) bool { return provider.Days[i].Day < provider.Days[j].Day })
+
+		provider.Metered = providerBilling != "" || slices.Contains(opts.MeteredProviders, src.name)
+		provider.BillingProvider = providerBilling
+		if provider.Metered {
+			report.MeteredUSD += provider.APIUSD
+		} else {
+			report.SubscriptionUSD += provider.APIUSD
+		}
 		report.Providers = append(report.Providers, provider)
 	}
 	for model := range unpricedModels {
