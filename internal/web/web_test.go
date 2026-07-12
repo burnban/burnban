@@ -177,8 +177,8 @@ func TestConfiguredPublicOriginNormalizesDefaultPortsDotsAndIPv6(t *testing.T) {
 func TestMetrics(t *testing.T) {
 	srv, s := newServer(t)
 	if err := s.Insert(store.Request{
-		Ts: time.Now(), Provider: "openai", Model: "evil\"\\line\n\t\r\x1b☃",
-		Agent: "agent\t\r\x1b\"\\☃", InTokens: 1, CostUSD: .01, Status: 200, Priced: true,
+		Ts: time.Now(), Provider: "openai", Model: "evil\"\\line\n\t\r\x1b界",
+		Agent: "agent\t\r\x1b\"\\界", InTokens: 1, CostUSD: .01, Status: 200, Priced: true,
 	}); err != nil {
 		t.Fatal(err)
 	}

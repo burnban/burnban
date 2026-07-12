@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630" role="img" aria-labelledby="title desc">
+  <title id="title">Burnban subsidy share card</title>
+  <desc id="desc">A terminal card showing 4,173 dollars and 49 cents of API-equivalent usage over 30 days, 20.9 times a 200 dollar monthly plan, with the Burnban install command.</desc>
+  <rect width="1200" height="630" fill="#F6F2E6"/>
+  <path d="M0 16h1200M0 614h1200" stroke="#D9CFB6"/>
+  <path d="M0 16h1200M0 614h1200" stroke="#D9CFB6" stroke-dasharray="1 9" stroke-width="12"/>
+
+  <text x="82" y="86" fill="#F04E00" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="16" font-weight="700" letter-spacing="4">LOCAL USAGE · READ ONLY</text>
+  <text x="82" y="136" fill="#1B1610" font-family="'Schibsted Grotesk', Arial, sans-serif" font-size="42" font-weight="750">What did your plan subsidize?</text>
+
+  <rect x="82" y="178" width="1036" height="354" rx="12" fill="#1B1610"/>
+  <rect x="83" y="179" width="1034" height="352" rx="11" fill="none" stroke="#4B4032"/>
+  <circle cx="112" cy="208" r="5" fill="#F04E00"/>
+  <circle cx="132" cy="208" r="5" fill="#6E6553"/>
+  <circle cx="152" cy="208" r="5" fill="#6E6553"/>
+  <text x="184" y="214" fill="#988E71" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="13" letter-spacing="2">BURNBAN SUBSIDY · LAST 30 DAYS</text>
+  <line x1="82" y1="234" x2="1118" y2="234" stroke="#3D3424"/>
+
+  <text x="126" y="310" fill="#F04E00" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="49" font-weight="700">$4,173.49 API-EQUIVALENT</text>
+  <text x="126" y="357" fill="#F2ECD9" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="27" font-weight="700">20.9× a $200/mo plan</text>
+
+  <text x="126" y="419" fill="#988E71" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="15">Reproduce your number:</text>
+  <text x="126" y="454" fill="#F2ECD9" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="20">curl -fsSL https://burnban.sh/install | sh</text>
+  <text x="126" y="491" fill="#FFA25C" font-family="'Spline Sans Mono', ui-monospace, monospace" font-size="20" font-weight="700">burnban.dev</text>
+
+  <text x="82" y="581" fill="#6E6553" font-family="'Newsreader', Georgia, serif" font-size="18" font-style="italic">API-equivalent comparison, not a provider invoice · source logs stay on this machine</text>
+</svg>

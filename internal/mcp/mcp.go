@@ -274,7 +274,7 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if err := s.S.SetSetting(budget.KeyBanActive, "1"); err != nil {
 			return "", err
 		}
-		return "🚫 local burn ban in effect — all agent spend is paused until lifted", nil
+		return "local burn ban in effect — all agent spend is paused until lifted", nil
 	case "lift_burn_ban":
 		if err := s.requireBudgetAdmin(); err != nil {
 			return "", err

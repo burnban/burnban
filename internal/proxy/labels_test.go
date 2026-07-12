@@ -78,7 +78,7 @@ func TestExplicitIdentityBoundariesRejectBeforeForwarding(t *testing.T) {
 	// Agent lands exactly on the rune ceiling; session lands exactly on the
 	// UTF-8 byte ceiling with complete four-byte code points.
 	agent := strings.Repeat("a", maxExplicitIdentityRunes)
-	session := strings.Repeat("😀", maxExplicitIdentityBytes/4)
+	session := strings.Repeat("\U00010000", maxExplicitIdentityBytes/4)
 	status, responseBody := labelTestPost(t, srv.URL, "/openai/v1/chat/completions", body, http.Header{
 		"X-Burnban-Agent":   {agent},
 		"X-Burnban-Session": {session},
@@ -109,7 +109,7 @@ func TestExplicitIdentityBoundariesRejectBeforeForwarding(t *testing.T) {
 		{
 			name: "session over byte limit without split rune",
 			headers: http.Header{"X-Burnban-Session": {
-				strings.Repeat("😀", maxExplicitIdentityBytes/4+1),
+				strings.Repeat("\U00010000", maxExplicitIdentityBytes/4+1),
 			}},
 			field: "x-burnban-session",
 		},

@@ -757,7 +757,7 @@ func TestWarnWebhookFiresOnce(t *testing.T) {
 	}
 	select {
 	case msg := <-hits:
-		if !strings.Contains(msg, "daily cap") || !strings.Contains(msg, "⚠️") {
+		if !strings.Contains(msg, "daily cap") || !strings.Contains(msg, "burnban warning:") {
 			t.Fatalf("webhook payload = %s", msg)
 		}
 	case <-time.After(3 * time.Second):

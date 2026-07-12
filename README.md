@@ -1,20 +1,26 @@
-# 🔥 burnban
+# burnban
 
-**Meter, itemize, and cap what your AI agents spend. Meters watch. Burnban acts.**
+[![CI](https://github.com/burnban/burnban/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/burnban/burnban/actions/workflows/ci.yml)
 
-Your agents run all day on API keys, subscriptions, and agent-managed provider plans. Burnban is a single-binary local meter: it proxies and guards API-key spend in real time, and auto-detects supported local agent logs for subscription/token-plan usage. No signup, account, cloud service, or unsolicited telemetry destination: provider-bound requests still leave your machine for the upstream you configured, while Burnban keeps its ledger local.
+**A local meter that prices subscription-agent usage and caps API-key spend before the next dollar leaves.**
 
-![burnban dashboard](docs/dashboard.png)
+One maintainer machine produced **$4,173.49 of API-equivalent work in 30 days** on a $200/month plan: a **20.9× subsidy**. Burnban reads the local usage logs your agents already keep and gives you the same number without an account, proxy, or upload.
 
-> Two frontier models launched on the same day this week, four-x apart on price. You can't manage what you don't meter.
+![Burnban subsidy share card showing $4,173.49 of API-equivalent usage](docs/subsidy-share.svg)
 
-## Quickstart
-
-macOS / Linux:
+Install on macOS or Linux:
 
 ```sh
-curl -fsSL https://burnban.sh/install | sh    # CLI + desktop/application launcher
+curl -fsSL https://burnban.sh/install | sh
 ```
+
+Then get your number:
+
+```sh
+burnban subsidy --share
+```
+
+The card includes the time window, monthly-plan multiple, install command, and `burnban.dev`, ready to screenshot. Use `--plan-cost 100` for your actual monthly price, `--since 7d` for another window, or `--share --json` for the same fields as structured data.
 
 Windows PowerShell:
 
@@ -22,109 +28,81 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/burnban/burnban/main/install.ps1 | iex
 ```
 
-The release installers verify the downloaded archive against the published
-SHA-256 checksums. For a reviewable install, download the script first, inspect
-it, then run it. Releases publish SPDX SBOMs, third-party notices, and GitHub
-provenance attestations. Pin a release by setting the documented download base
-to that release instead of `latest`.
+Release installers verify the archive against published SHA-256 checksums. For a reviewable install, download the script first, inspect it, then run it. Releases also publish SPDX SBOMs, third-party notices, and GitHub provenance attestations.
 
-The installer adds a one-click **Burnban** launcher. It starts the real meter,
-opens the dashboard, and reopens the existing dashboard when Burnban is already
-running. No Electron runtime, account, or cloud service is installed. From a
-source checkout, `make build` builds the same single Go binary.
+## Price the plans you already use
 
-No traffic yet? See it alive first — fake data, fresh every run:
+Claude Code, Codex, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
 
 ```sh
-burnban demo    # opens an isolated dashboard on http://localhost:4242
+burnban subsidy                 # auto-detect all five sources; last 30 days
+burnban subsidy --since 7d      # another window
+burnban subsidy --daily --json  # daily detail or machine-readable output
 ```
 
-Demo mode never scans your real agent logs; both its proxy and subscription
-figures are deterministic fixtures and the page carries a persistent DEMO badge.
+The $4,173.49 result is a real machine's last 30 days, not a provider invoice. The calculation is cache-aware, prices Anthropic's 1-hour cache-write tier at its real 2× rate, and deduplicates repeated message IDs instead of inflating the result.
 
-Then the real thing:
+## Proxy quickstart
+
+The same binary can guard API-key traffic in real time. Start with deterministic demo data if you have no proxy traffic yet:
 
 ```sh
-# Terminal 1: run the meter (leave it running)
+burnban demo    # isolated dashboard on http://localhost:4242
+```
+
+Demo mode never scans real agent logs or forwards model traffic. For the real meter:
+
+![Burnban local dashboard](docs/dashboard.png)
+
+```sh
+# Terminal 1
 burnban serve
 ```
 
 In Terminal 2:
 
 ```sh
-# Point your agents at it (keys stay in your env — burnban never stores them)
+# Keys stay in your environment; Burnban forwards but never persists them.
 export ANTHROPIC_BASE_URL=http://localhost:4141/anthropic
 export OPENAI_BASE_URL=http://localhost:4141/openai/v1
 
-# Watch the burn
-burnban top                      # in the terminal, or
-open http://localhost:4141       # the live dashboard
+burnban top
+open http://localhost:4141
 ```
 
-Or launch **Burnban** from the desktop/application menu (equivalent to
-`burnban desktop`). The dashboard automatically detects local Claude Code,
-Codex, Hermes Agent, OpenClaw, and Goose usage and shows input, output, cache-read,
-and cache-write tokens at API-equivalent prices. Proxy-billed API-key traffic
-stays in a separate live-spend section, so a `$0` proxy ledger never hides
-subscription usage or pretends those tokens were billed.
+Or launch **Burnban** from the desktop/application menu (`burnban desktop`). The installer adds the launcher without Electron, an account, or a cloud service. The dashboard keeps subscription-log usage separate from proxy-billed traffic, so a `$0` proxy ledger never hides the work your plans performed.
 
-Set a budget and forget about surprise bills:
+Set hard local guardrails:
 
 ```sh
-burnban cap --daily 10 --weekly 40 --monthly 120   # reserve/deny against any window
-burnban cap --agent openclaw --daily 3             # that one hungry agent gets $3
-burnban cap --warn 80                              # webhook ping at 80% of any cap
-burnban ban                                        # emergency stop: pause ALL spend now
-burnban lift --today                               # resume, overriding today's local caps
+burnban cap --daily 10 --weekly 40 --monthly 120
+burnban cap --agent openclaw --daily 3
+burnban cap --warn 80
+burnban ban
+burnban lift --today
 ```
 
-Burnban serializes admission and reserves conservative request cost against
-in-flight work. Requests with a known model and output-token limit are rejected
-before forwarding when their bound does not fit. An unbounded request is allowed
-exclusively and can still overshoot by that single provider call because its final
-cost is unknowable in advance; concurrent unknown overshoot is prevented. With an
-active cap, unknown-price models are denied and incomplete/unmetered successful
-responses latch that window fail-closed until the accounting issue is corrected or
-the local cap is explicitly overridden/removed. Treat caps as strong local
-guardrails, not a provider-side billing limit.
+Burnban serializes admission and reserves conservative request cost against in-flight work. Known models with output-token limits are rejected before forwarding when they cannot fit. Unknown-price traffic and accounting gaps fail closed under an active cap; a single unbounded call can still overshoot because its final cost is unknowable in advance. These are strong local guardrails, not a provider-side billing limit.
 
-And when the bill makes you wonder:
+Reprice traffic you already ran:
 
 ```sh
-burnban whatif --since 7d       # your exact week repriced on every model
+burnban whatif --since 7d
 ```
-
-## On a flat-rate or agent-managed plan? Price local usage
-
-Claude Code, Codex, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices the same tokens with its API table:
-
-```sh
-burnban subsidy                 # auto-detect all five sources
-                                # last 30 days; --since 7d, --daily, --json
-```
-
-```
-BURNBAN LOCAL USAGE — last 30 days at API-equivalent prices
-
-CLAUDE CODE  ~/.claude/projects · 2015 sessions
-  model                      calls  in      out     cache-r   cache-w  API price
-  claude-opus-4-8            15747  7.5M    21.5M   2643.4M   120.6M   $2949.73
-  claude-fable-5             3207   919.1K  3.5M    668.9M    13.6M    $1098.57
-  claude-sonnet-4-6          2306   90.6K   446.8K  144.6M    5.1M     $70.02
-  claude-haiku-4-5-20251001  3373   50.4K   2.8M    130.0M    16.6M    $55.18
-  subtotal                                                             $4173.49
-
-TOTAL  $4173.49 at API prices
-
-  claude-code pace ≈ $4173.49/mo vs  Claude Max 20x $200 → 20.9x
-```
-
-That's a real machine's last 30 days: a $200/mo plan doing **$4,173** of API-priced work — a 20.9× subsidy. Same cache-aware table the proxy prices with, plus one thing the API bill never shows: the logs split 5-minute and 1-hour cache writes, so the 1h tier is billed at its real 2× rate. Deduped by message ID (a multi-block reply logs its usage more than once — counting that twice is how you get inflated numbers).
 
 Which door is yours?
 
-- **Per-token keys** — agent fleets, CI, production apps, Codex on an API key → `burnban serve` meters and **caps** the spend live.
-- **Flat-rate/agent-managed plan** — Claude Code, Codex, Hermes Agent, OpenClaw, Goose → the dashboard and `burnban subsidy` auto-detect supported local logs and show dollars plus token type. The day your fleet moves to keys, the meter is already installed.
+- **Flat-rate or agent-managed plan** — run `burnban subsidy` with no proxy to price supported local logs.
+- **Per-token keys** — run `burnban serve` to meter and cap spend in the request path.
+
+## Trust, by construction
+
+- **Local meter and ledger** — usage accounting and policy state stay on your machine in SQLite.
+- **Keys forwarded, never stored** — provider credentials go only to the upstream you configure and are never persisted.
+- **No Burnban telemetry path** — no account, license check, passive analytics, or code path to a Burnban-operated service exists in the MIT binary.
+- **Self-contained interface** — the dashboard, fonts, and assets are embedded or self-hosted; no CDN or third-party script is loaded.
+
+What it sees: request metadata and provider usage frames needed to meter live traffic, plus token/model/session metadata in supported local agent logs. It does not persist request or response bodies. The only extra outbound request is an optional webhook you explicitly configure; model traffic still goes to the provider or custom upstream you selected. See [data and privacy](DATA_AND_PRIVACY.md) for the exact contract.
 
 ## What you get
 
@@ -168,13 +146,13 @@ The tools in this space either **watch** or **weigh a ton**. Log reporters ([ccu
 
 |  | log reporters (ccusage…) | platform gateways (LiteLLM…) | cloud gateways (Cloudflare…) | **burnban** |
 |---|---|---|---|---|
-| local preflight spend guard | — | ✅ | ✅ | ✅ **reservation + 402 + kill switch** |
-| runs entirely on your machine | ✅ | ◐ self-hosted service | — | ✅ localhost-only default |
-| your provider keys stay yours | ✅ n/a | — virtual keys | — provider keys uploaded | ✅ pass-through, never stored |
+| local preflight spend guard | — | yes | yes | **yes — reservation + 402 + kill switch** |
+| runs entirely on your machine | yes | partly; self-hosted service | — | **yes — localhost-only default** |
+| your provider keys stay yours | yes; n/a | — virtual keys | — provider keys uploaded | **yes — pass-through, never stored** |
 | infra needed | none | Postgres + Redis + config | an account | **one binary, one local SQLite ledger** |
-| waste receipts (dupes, cache misses) | — | — | — | ✅ |
-| reprice your traffic (`whatif`) | — | — | — | ✅ |
-| agent self-throttling over MCP | — | — | — | ✅ |
+| waste receipts (dupes, cache misses) | — | — | — | yes |
+| reprice your traffic (`whatif`) | — | — | — | yes |
+| agent self-throttling over MCP | — | — | — | yes |
 
 The honest flip side: LiteLLM speaks 100+ providers and does routing, fallbacks, and org-level key issuance — if you're a platform team standing up a company gateway, use it. Burnban is for the other 99%: you, your laptop, your agents, your bill.
 

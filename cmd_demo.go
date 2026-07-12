@@ -80,7 +80,7 @@ func cmdDemo(args []string) error {
 		return err
 	}
 
-	fmt.Printf("🔥 demo traffic seeded (fake data, fresh every run) → %s\n\n", *dbPath)
+	fmt.Printf("demo traffic seeded (fake data, fresh every run) → %s\n\n", *dbPath)
 	return cmdServeWithOptions([]string{"--db", *dbPath, "--port", fmt.Sprint(*port)}, !*noOpen, true)
 }
 

@@ -84,16 +84,16 @@ func renderTop(s *store.Store, color bool) (string, error) {
 	}
 
 	var b strings.Builder
-	fmt.Fprintf(&b, "🔥 burnban top — %s\n\n", now.Format("15:04:05"))
+	fmt.Fprintf(&b, "burnban top — %s\n\n", now.Format("15:04:05"))
 	fmt.Fprintf(&b, "today   $%.4f · %d req · cache hit %s\n", sum.Cost, sum.Requests, cachePct(sum.CacheRead, sum.In))
 	fmt.Fprintf(&b, "rate    $%.4f/hr\n\n", lastHour)
 
 	if local, external, err := budget.BanStatus(s); err != nil {
 		return "", err
 	} else if local || external {
-		message := "🚫 BURN BAN IN EFFECT — all spend paused (burnban lift)"
+		message := "BURN BAN IN EFFECT — all spend paused (burnban lift)"
 		if external {
-			message = "🚫 EXTERNAL BURN BAN — contact the external policy owner"
+			message = "EXTERNAL BURN BAN — contact the external policy owner"
 		}
 		b.WriteString(colorize(message, cRed, color) + "\n\n")
 	} else if states, err := budget.Status(s, now); err != nil {

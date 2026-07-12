@@ -11,6 +11,7 @@ import (
 	"strings"
 	"text/tabwriter"
 	"time"
+	"unicode/utf8"
 
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/subsidy"
@@ -30,6 +31,7 @@ func cmdSubsidy(args []string) error {
 	gooseDB := fs.String("goose-db", subsidy.DefaultGooseDB(home), "Goose session database")
 	planCost := fs.Float64("plan-cost", 0, "what you pay per month across plans, for a single subsidy multiple")
 	daily := fs.Bool("daily", false, "per-day breakdown")
+	share := fs.Bool("share", false, "compact screenshot-ready card (defaults to a $200/mo plan comparison)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
 	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
 	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
@@ -42,6 +44,9 @@ func cmdSubsidy(args []string) error {
 	}
 	if *maxFiles <= 0 || *maxScanMB <= 0 || *maxLineMB <= 0 || *maxRecords <= 0 || *scanTimeout <= 0 {
 		return fmt.Errorf("scan limits must all be greater than zero")
+	}
+	if *planCost < 0 {
+		return fmt.Errorf("--plan-cost must be zero or greater")
 	}
 	if *maxScanMB > int64(^uint64(0)>>1)>>20 || uint64(*maxLineMB) > uint64(^uint(0)>>1)>>20 {
 		return fmt.Errorf("scan size limit is too large for this platform")
@@ -69,9 +74,13 @@ func cmdSubsidy(args []string) error {
 		return err
 	}
 
+	shareCard := subsidy.NewShareCard(report, label, *planCost)
 	if *asJSON {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
+		if *share {
+			return enc.Encode(shareCard)
+		}
 		return enc.Encode(map[string]any{
 			"since": report.Since, "until": report.Until,
 			"providers": report.Providers, "totals": report.Totals,
@@ -96,6 +105,10 @@ func cmdSubsidy(args []string) error {
 			fmt.Println("PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
 		}
 		printPricingDiagnostics(prices)
+		return nil
+	}
+	if *share {
+		fmt.Print(renderSubsidyShareCard(shareCard, stdoutIsTerminal() && os.Getenv("NO_COLOR") == ""))
 		return nil
 	}
 
@@ -220,6 +233,61 @@ func cmdSubsidy(args []string) error {
 	fmt.Println("\n  source logs are read-only · no traffic or usage leaves this machine")
 	fmt.Println("  API-key agents routed through `burnban serve` appear separately as live spend.")
 	return nil
+}
+
+const (
+	shareCardInnerWidth = 58
+	shareEmber          = "\033[38;5;202m"
+	shareBold           = "\033[1m"
+)
+
+func renderSubsidyShareCard(card subsidy.ShareCard, color bool) string {
+	border := func(left, fill, right string) string {
+		return colorize(left+strings.Repeat(fill, shareCardInnerWidth+2)+right, cDim, color)
+	}
+	row := func(value, style string) string {
+		value = terminalText(value, shareCardInnerWidth)
+		padding := shareCardInnerWidth - utf8.RuneCountInString(value)
+		if padding < 0 {
+			padding = 0
+		}
+		return colorize("│", cDim, color) + " " + colorize(value+strings.Repeat(" ", padding), style, color) + " " + colorize("│", cDim, color) + "\n"
+	}
+
+	header := "BURNBAN SUBSIDY · " + strings.ToUpper(card.Window)
+	if card.Partial {
+		header = "PARTIAL · " + header
+	}
+	plan := fmt.Sprintf("$%.0f", card.PlanCostUSD)
+	if math.Trunc(card.PlanCostUSD) != card.PlanCostUSD {
+		plan = fmt.Sprintf("$%.2f", card.PlanCostUSD)
+	}
+
+	var b strings.Builder
+	b.WriteString(border("┌", "─", "┐") + "\n")
+	b.WriteString(row(header, shareBold))
+	b.WriteString(row("", ""))
+	b.WriteString(row("$"+formatShareUSD(card.APIEquivalentUSD)+" API-EQUIVALENT", shareEmber+shareBold))
+	b.WriteString(row(fmt.Sprintf("%.1f× a %s/mo plan", card.Multiplier, plan), shareBold))
+	b.WriteString(row("", ""))
+	b.WriteString(row("Reproduce your number:", cDim))
+	b.WriteString(row(card.InstallCommand, ""))
+	b.WriteString(row(card.Website, shareEmber))
+	b.WriteString(border("└", "─", "┘") + "\n")
+	return b.String()
+}
+
+func formatShareUSD(value float64) string {
+	parts := strings.SplitN(fmt.Sprintf("%.2f", value), ".", 2)
+	whole := parts[0]
+	sign := ""
+	if strings.HasPrefix(whole, "-") {
+		sign, whole = "-", strings.TrimPrefix(whole, "-")
+	}
+	for i := len(whole) - 3; i > 0; i -= 3 {
+		whole = whole[:i] + "," + whole[i:]
+	}
+	return sign + whole + "." + parts[1]
 }
 
 func printPricingDiagnostics(prices *pricing.Table) {

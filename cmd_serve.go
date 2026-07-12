@@ -180,7 +180,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 					if openErr := openDashboard(dashboardURL(state.URL, token)); openErr != nil {
 						return openErr
 					}
-					fmt.Printf("🔥 burnban is already running — opened %s\n", state.URL)
+					fmt.Printf("burnban is already running — opened %s\n", state.URL)
 					return nil
 				}
 			}
@@ -234,9 +234,9 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	banState := ""
 	if local, external, _ := budget.BanStatus(s); local || external {
 		if external {
-			banState = "\n   🚫 EXTERNAL BURN BAN IN EFFECT — controlled by external policy\n"
+			banState = "\n   EXTERNAL BURN BAN IN EFFECT — controlled by external policy\n"
 		} else {
-			banState = "\n   🚫 BURN BAN IN EFFECT — lift with: burnban lift\n"
+			banState = "\n   BURN BAN IN EFFECT — lift with: burnban lift\n"
 		}
 	}
 
@@ -246,7 +246,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 			if openErr := openDashboard(dashboardURL(base, token)); openErr != nil {
 				return openErr
 			}
-			fmt.Printf("🔥 burnban is already running — opened %s\n", base)
+			fmt.Printf("burnban is already running — opened %s\n", base)
 			return nil
 		}
 		return err
@@ -287,7 +287,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 			name, base, name, redactURL(upstreams[name].URL), shape)
 	}
 
-	fmt.Printf(`🔥 burnban %s — the meter is running
+	fmt.Printf(`burnban %s — the meter is running
 
    dashboard   %s
 

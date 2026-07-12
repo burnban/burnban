@@ -287,7 +287,7 @@ uninstall() {
       echo "   data retained: $DATA_DIR (use --uninstall --purge to remove it)"
       rmdir "$STATE_DIR" 2>/dev/null || true
     fi
-    echo "✅ burnban removed"
+    echo "burnban removed"
     return 0
   fi
 
@@ -347,7 +347,7 @@ fetch() {
   fi
 }
 
-echo "🔥 downloading burnban for $OS/$ARCH"
+echo "downloading burnban for $OS/$ARCH"
 fetch "$ARCHIVE" "$TMP/burnban.tgz"
 fetch "$CHECKSUMS" "$TMP/checksums.txt"
 EXPECTED=$(awk -v file="$ARCHIVE" '$2 == file { print $1; exit }' "$TMP/checksums.txt")
@@ -566,7 +566,7 @@ if [ "$CREATE_DESKTOP" = 1 ]; then
 fi
 write_manifest
 
-echo "✅ installed: $("$BIN_PATH" version)"
+echo "installed: $("$BIN_PATH" version)"
 echo "   real dashboard: $BIN_PATH desktop"
 echo "   terminal meter:  $BIN_PATH serve"
 echo "   local usage:     $BIN_PATH subsidy"

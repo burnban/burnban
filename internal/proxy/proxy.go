@@ -1004,7 +1004,7 @@ func (p *Proxy) alertCapReached(d *budget.Denial) {
 	if err != nil || urlStr == "" {
 		return
 	}
-	p.queueWebhook(mark, urlStr, "🔥🚫 burnban: "+d.Message)
+	p.queueWebhook(mark, urlStr, "burnban: "+d.Message)
 }
 
 func (p *Proxy) scheduleWarn(now time.Time) {
@@ -1034,7 +1034,7 @@ func (p *Proxy) maybeWarn(now time.Time) {
 		return
 	}
 	p.queueWebhook(warn.MarkKey, urlStr, fmt.Sprintf(
-		"⚠️ burnban: %.0f%% of the %s cap burned — $%.2f of $%.2f (resets %s)",
+		"burnban warning: %.0f%% of the %s cap burned — $%.2f of $%.2f (resets %s)",
 		warn.Pct, warn.Window, warn.Spent, warn.Cap, warn.Reset))
 }
 

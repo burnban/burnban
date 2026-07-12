@@ -250,11 +250,11 @@
 <div class="scan" aria-hidden="true"></div>
 <main>
   <header class="reveal">
-    <div class="brand">🔥 BURN<em>BAN</em><span class="tag">MODEL SPEND METER</span><span id="demoBadge" class="badge hidden">DEMO DATA</span></div>
+    <div class="brand">BURN<em>BAN</em><span class="tag">MODEL SPEND METER</span><span id="demoBadge" class="badge hidden">DEMO DATA</span></div>
     <div class="status" role="status" aria-live="polite"><span id="dot" class="dot wait"></span><span id="statusText">LOADING</span>&nbsp;·&nbsp;<span id="clock">—</span></div>
   </header>
 
-  <section id="banBanner" class="ban hidden" role="alert" aria-live="assertive"><span id="banText">🚫 Burn ban in effect — all agent spend paused</span><span id="banHint" class="dim">lift with: burnban lift</span></section>
+  <section id="banBanner" class="ban hidden" role="alert" aria-live="assertive"><span id="banText">Burn ban in effect — all agent spend paused</span><span id="banHint" class="dim">lift with: burnban lift</span></section>
 
   <section id="authPrompt" class="panel auth-prompt hidden" aria-labelledby="authTitle">
     <h2 id="authTitle">Team gateway authentication</h2>
@@ -735,7 +735,7 @@
       $("localUsagePanel").classList.toggle("hidden", !localUsageEnabled);
       if (localUsageEnabled && !localUsageWasEnabled) subscription();
       $("banBanner").classList.toggle("hidden", !d.ban_active);
-      $("banText").textContent = d.external_ban ? "🚫 External burn ban — all agent spend paused" : "🚫 Burn ban in effect — all agent spend paused";
+      $("banText").textContent = d.external_ban ? "External burn ban — all agent spend paused" : "Burn ban in effect — all agent spend paused";
       $("banHint").textContent = d.external_ban ? "external policy · contact the policy owner" : "lift with: burnban lift";
       if (d.last_request_at) {
         $("routeVerify").textContent = "Routing verified · last proxied request " + new Date(d.last_request_at).toLocaleString() + ".";

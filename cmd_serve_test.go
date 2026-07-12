@@ -269,7 +269,7 @@ func TestValidateBurnbanToken(t *testing.T) {
 		{name: "network short token", token: "short", strong: true, wantErr: true},
 		{name: "spaces", token: "0123456789 abcdef", wantErr: true},
 		{name: "control", token: "0123456789\nabcdef", wantErr: true},
-		{name: "unicode", token: "0123456789abcdef☃", wantErr: true},
+		{name: "unicode", token: "0123456789abcdef界", wantErr: true},
 		{name: "low diversity", token: strings.Repeat("a", 32), strong: true, wantErr: true},
 		{name: "synthetic strong token", token: "burnban-test-network-token-not-a-secret", strong: true},
 		{name: "base64url", token: "wC0a-Safe_Random.Token=123456", strong: true},

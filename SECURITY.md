@@ -14,7 +14,7 @@ minor release. Development snapshots are not supported releases.
 
 Use GitHub's **Report a vulnerability** button in the repository Security tab.
 That opens a private security advisory visible only to repository maintainers.
-If private advisories are unavailable, email `oday@syft8.com` with
+If private advisories are unavailable, email `hello@burnban.dev` with
 `[BURNBAN SECURITY]` in the subject.
 
 Do not include live API keys, gateway tokens, raw prompts, request bodies,
@@ -33,6 +33,19 @@ Please include:
 We aim to acknowledge a report within three business days and provide an
 initial assessment within seven. Complex fixes may take longer; the reporter
 will receive progress updates during coordinated disclosure.
+
+## Why the default attack surface is small
+
+The MIT meter is one local binary with an embedded dashboard and a loopback-only
+listener by default. It has no account, telemetry, license check, update beacon,
+or network path to a Burnban-operated service. Provider keys are forwarded only
+to the upstream selected by the operator and are never persisted; request and
+response bodies are not stored. Local-agent subsidy scans read supported usage
+logs in place and never upload or modify them.
+
+An operator can explicitly add a webhook or expose the meter as an authenticated
+TLS gateway. Those choices expand the deployment surface and must be secured as
+described below, but they do not add a path back to Burnban.
 
 ## Scope
 

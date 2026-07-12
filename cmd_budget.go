@@ -206,7 +206,7 @@ func cmdBan(args []string) error {
 	if err := s.SetSetting(budget.KeyBanActive, "1"); err != nil {
 		return err
 	}
-	fmt.Println("🚫 local burn ban in effect — all agent spend is paused until `burnban lift`")
+	fmt.Println("local burn ban in effect — all agent spend is paused until `burnban lift`")
 	return nil
 }
 
