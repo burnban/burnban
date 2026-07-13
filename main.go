@@ -72,6 +72,16 @@ func main() {
 		err = cmdDoctor(os.Args[2:])
 	case "pricing":
 		err = cmdPricing(os.Args[2:])
+	case "reconcile":
+		err = cmdReconcile(os.Args[2:])
+	case "policy":
+		err = cmdPolicy(os.Args[2:])
+	case "telemetry":
+		err = cmdTelemetry(os.Args[2:])
+	case "optimize":
+		err = cmdOptimize(os.Args[2:])
+	case "downshift":
+		err = cmdDownshift(os.Args[2:])
 	case "prune":
 		err = cmdPrune(os.Args[2:])
 	case "version", "--version", "-v":
@@ -115,6 +125,11 @@ usage: burnban <command> [flags]
   bench    measure burnban's own added latency against a loopback upstream
   doctor   verify pricing, database health, server health, and agent routing
   pricing  inspect the effective price table and its provenance
+  reconcile import provider invoice evidence and report immutable variance
+  policy   validate, apply, inspect, and simulate v2 admission policies
+  telemetry export content-free OTLP/warehouse metadata (explicit opt-in)
+  optimize  content-free cache/allocation recommendations and external quality evidence
+  downshift explicit compatibility-gated budget-aware model routing
   prune    delete old ledger rows after an explicit retention window
   version  print version
 

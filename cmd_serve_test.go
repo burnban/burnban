@@ -133,6 +133,87 @@ func TestServeLifecycleHealthAndGracefulStop(t *testing.T) {
 	}
 }
 
+func TestServeOptionalTelemetryIsVisibleOnlyWhenExplicitlyEnabled(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
+	t.Setenv("BURNBAN_OTLP_ENDPOINT", "")
+	var collectorHits atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		collectorHits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer collector.Close()
+	dbPath := filepath.Join(t.TempDir(), "telemetry-lifecycle.db")
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- cmdServeWithOptions([]string{
+			"--db", dbPath, "--port", "0", "--otlp-endpoint", collector.URL,
+			"--otlp-interval", "100ms",
+		}, false, false)
+	}()
+	state := waitForServerState(t, dbPath)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	resp, err := controlRequest(ctx, state, http.MethodGet)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var status struct {
+		Telemetry *struct {
+			Enabled bool   `json:"enabled"`
+			State   string `json:"state"`
+		} `json:"telemetry"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&status); err != nil {
+		resp.Body.Close()
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	if status.Telemetry == nil || !status.Telemetry.Enabled || (status.Telemetry.State != "starting" && status.Telemetry.State != "healthy") {
+		t.Fatalf("private telemetry status = %+v", status.Telemetry)
+	}
+	var statusOutput bytes.Buffer
+	if err := cmdStatusTo([]string{"--db", dbPath, "--json"}, &statusOutput); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(statusOutput.String(), `"telemetry"`) || !strings.Contains(statusOutput.String(), `"dropped_rows":0`) {
+		t.Fatalf("status JSON omitted telemetry health: %s", statusOutput.String())
+	}
+	ctx, cancel = context.WithTimeout(context.Background(), 2*time.Second)
+	resp, err = controlRequest(ctx, state, http.MethodPost)
+	cancel()
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp.Body.Close()
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("telemetry-enabled server did not stop")
+	}
+	if collectorHits.Load() != 0 {
+		t.Fatalf("empty ledger caused %d unsolicited collector requests", collectorHits.Load())
+	}
+}
+
+func TestServeRejectsUnsafeOTLPEndpointBeforeOpeningLedger(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
+	t.Setenv("BURNBAN_OTLP_ENDPOINT", "")
+	dbPath := filepath.Join(t.TempDir(), "must-not-open-otlp.db")
+	err := cmdServeWithOptions([]string{
+		"--db", dbPath, "--port", "0", "--otlp-endpoint", "http://169.254.169.254/latest?token=secret",
+	}, false, false)
+	if err == nil || !strings.Contains(err.Error(), "credentials, query parameters") || strings.Contains(err.Error(), "secret") {
+		t.Fatalf("unsafe OTLP endpoint error = %v", err)
+	}
+	if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("unsafe OTLP config opened ledger: %v", statErr)
+	}
+}
+
 func TestTLSServeKeepsLifecycleControlOnPlainLoopback(t *testing.T) {
 	t.Setenv("BURNBAN_TOKEN", "")
 	certPath, keyPath := writeTestCertificate(t, time.Now().Add(-time.Hour), time.Now().Add(time.Hour), []string{"localhost"}, []net.IP{net.ParseIP("127.0.0.1")})

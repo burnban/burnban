@@ -29,9 +29,17 @@ type geminiLine struct {
 	Tokens      *geminiTokens `json:"tokens"`
 }
 
+const geminiMalformedWarning = "one or more Gemini CLI usage records were malformed"
+
 // ScanGemini reads Gemini CLI's automatically saved project chat records.
 // Gemini may append the same message more than once as token or tool metadata
 // arrives, so only the latest record for each message ID is emitted.
+//
+// Compatibility was checked 2026-07-12 against google-gemini/gemini-cli
+// commit f354eebaf43b25bacb176007e449bb9a638fd101. In
+// packages/core/src/services/chatRecordingTypes.ts, TokensSummary maps input,
+// output, cached, thoughts, tool, and total to the corresponding GenAI usage
+// fields; chatRecordingService.ts appends those records under project chats/.
 func ScanGemini(dir string, since time.Time, emit func(Event)) (int, error) {
 	result, err := scanGemini(dir, since, DefaultScanLimits(), emit)
 	return result.Sessions, err
@@ -55,6 +63,7 @@ func scanGemini(dir string, since time.Time, limits ScanLimits, emit func(Event)
 			}
 			var value geminiLine
 			if json.Unmarshal(line, &value) != nil {
+				scanner.stats.Warn(geminiMalformedWarning)
 				return
 			}
 			if value.SessionID != "" {
@@ -63,7 +72,17 @@ func scanGemini(dir string, since time.Time, limits ScanLimits, emit func(Event)
 			if value.ProjectHash != "" {
 				projectHash = value.ProjectHash
 			}
-			if value.Type != "gemini" || value.ID == "" || value.Tokens == nil {
+			if value.Type != "gemini" || value.Tokens == nil {
+				return
+			}
+			if value.ID == "" || !validGeminiTokens(value.Tokens) {
+				scanner.stats.Warn(geminiMalformedWarning)
+				return
+			}
+			// Validate before replacing an earlier append for the same message.
+			// A truncated or corrupt trailing update must not erase valid usage.
+			if _, err := time.Parse(time.RFC3339Nano, value.Timestamp); err != nil {
+				scanner.stats.Warn(geminiMalformedWarning)
 				return
 			}
 			if _, exists := latest[value.ID]; !exists {
@@ -78,15 +97,15 @@ func scanGemini(dir string, since time.Time, limits ScanLimits, emit func(Event)
 		contributed := false
 		for _, id := range order {
 			value := latest[id]
-			ts, err := time.Parse(time.RFC3339Nano, value.Timestamp)
-			if err != nil || ts.Before(since) {
+			ts, _ := time.Parse(time.RFC3339Nano, value.Timestamp)
+			if ts.Before(since) {
 				continue
 			}
 			tokens := value.Tokens
-			prompt := max(tokens.Input, 0)
-			cached := min(max(tokens.Cached, 0), prompt)
-			in := prompt - cached + max(tokens.Tool, 0)
-			out := max(tokens.Output, 0) + max(tokens.Thoughts, 0)
+			prompt := tokens.Input
+			cached := tokens.Cached
+			in := prompt - cached + tokens.Tool
+			out := tokens.Output + tokens.Thoughts
 			if in+out+cached == 0 {
 				continue
 			}
@@ -98,12 +117,17 @@ func scanGemini(dir string, since time.Time, limits ScanLimits, emit func(Event)
 			if projectHash == "" && sessionID == "" {
 				eventID = filepath.Base(path) + "/" + id
 			}
-			contributed = true
-			emit(Event{
+			event := Event{
 				ID: eventID, Provider: "gemini-cli", Model: model, Time: ts, Calls: 1,
 				In: in, Out: out, CacheRead: cached,
 				Confidence: sourceadapter.ConfidenceExact,
-			})
+			}
+			if err := event.Validate(); err != nil {
+				scanner.stats.Warn(geminiMalformedWarning)
+				continue
+			}
+			contributed = true
+			emit(event)
 		}
 		if contributed {
 			sessions++
@@ -111,6 +135,27 @@ func scanGemini(dir string, since time.Time, limits ScanLimits, emit func(Event)
 		return nil
 	})
 	return ScanResult{Sessions: sessions, Stats: scanner.stats}, err
+}
+
+func validGeminiTokens(tokens *geminiTokens) bool {
+	if tokens == nil || tokens.Cached > tokens.Input {
+		return false
+	}
+	values := []int64{tokens.Input, tokens.Output, tokens.Cached, tokens.Thoughts, tokens.Tool, tokens.Total}
+	for _, value := range values {
+		if value < 0 || value > sourceadapter.MaxEventTokens {
+			return false
+		}
+	}
+	expected := int64(0)
+	for _, value := range []int64{tokens.Input, tokens.Output, tokens.Thoughts, tokens.Tool} {
+		var ok bool
+		expected, ok = checkedAddUsage(expected, value)
+		if !ok || expected > sourceadapter.MaxEventTokens {
+			return false
+		}
+	}
+	return tokens.Total == expected
 }
 
 func hasPathComponent(path, component string) bool {

@@ -179,6 +179,9 @@ func TestMetrics(t *testing.T) {
 	if err := s.SetSetting(budget.KeyFuseBurst, "5m:1"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SetSetting(budget.KeyFuseFanout, "1m:10"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Insert(store.Request{
 		Ts: time.Now(), Provider: "openai", Model: "evil\"\\line\n\t\r\x1b界",
 		Agent: "agent\t\r\x1b\"\\界", InTokens: 1, CostUSD: .01, Status: 200, Priced: true,
@@ -208,6 +211,7 @@ func TestMetrics(t *testing.T) {
 		"burnban_ledger_unknown_pricing", "burnban_ledger_unmetered",
 		"burnban_ledger_incomplete", "burnban_ledger_enforcement_gaps",
 		"burnban_fuse_spend_usd", "burnban_fuse_limit_usd", "burnban_fuse_tripped",
+		"burnban_fuse_requests", "burnban_fuse_request_limit",
 	} {
 		if !strings.Contains(metrics, name) {
 			t.Errorf("metrics missing %s", name)
@@ -511,6 +515,45 @@ func TestSummaryIncludesVelocityFuseAndTripState(t *testing.T) {
 		data.Budgets[0].Name != "burst fuse" || data.Budgets[0].Kind != "fuse" ||
 		data.Budgets[0].CapUSD != 1 || data.Budgets[0].Remaining != 1 {
 		t.Fatalf("fuse summary=%+v", data)
+	}
+}
+
+func TestSummaryKeepsFanoutRequestsSeparateFromDollarBudgets(t *testing.T) {
+	srv, s := newServer(t)
+	if err := s.SetSetting(budget.KeyFuseFanout, "1m:2"); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 2; i++ {
+		if err := s.Insert(store.Request{Ts: time.Now(), Provider: "openai", Status: 200, PricingState: store.PricingUnknown}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	guard := &budget.Guard{S: s}
+	if reservation, denial, err := guard.Admit(time.Now(), "", budget.AdmissionEstimate{}); err != nil || reservation != nil ||
+		denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("fanout trip reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+
+	resp, err := http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		FuseTripped           bool   `json:"fuse_tripped"`
+		FuseRule              string `json:"fuse_rule"`
+		FuseRequests          int64  `json:"fuse_requests"`
+		FuseRequestLimit      int64  `json:"fuse_request_limit"`
+		FuseRequestWindow     string `json:"fuse_request_window"`
+		FuseProjectedRequests int64  `json:"fuse_projected_requests"`
+		Budgets               []any  `json:"budgets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if !data.FuseTripped || data.FuseRule != "fanout" || data.FuseRequests != 2 ||
+		data.FuseRequestLimit != 2 || data.FuseRequestWindow != "1m" || data.FuseProjectedRequests != 3 || len(data.Budgets) != 0 {
+		t.Fatalf("fanout summary=%+v", data)
 	}
 }
 

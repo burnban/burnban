@@ -146,6 +146,8 @@ func TestBuildReportClassifiesMetered(t *testing.T) {
 		ClaudeDir:   filepath.Join(empty, "claude"),
 		CodexDir:    filepath.Join(empty, "codex"),
 		GeminiDir:   filepath.Join(empty, "gemini"),
+		CopilotDir:  filepath.Join(empty, "copilot"),
+		CursorDB:    filepath.Join(empty, "cursor.db"),
 		OpenCodeDB:  filepath.Join(empty, "opencode.db"),
 		HermesDB:    hermes,
 		OpenClawDir: filepath.Join(empty, "openclaw"),

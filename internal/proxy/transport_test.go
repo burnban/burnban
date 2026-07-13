@@ -6,6 +6,7 @@ import (
 	"net/url"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/burnban/burnban/internal/pricing"
 )
@@ -25,6 +26,23 @@ func TestCloneDefaultTransportPreservesSafeDefaults(t *testing.T) {
 	}
 }
 
+func TestEstimateRequestHonorsScopedContractCoverage(t *testing.T) {
+	p := &Proxy{Prices: &pricing.Table{
+		Models: map[string]pricing.Price{"known": {InputPerMTok: 50, OutputPerMTok: 100}},
+		Contracts: []pricing.ContractPrice{{
+			ID: "future-priority", Provider: "anthropic", Model: "known", Region: "future-region",
+			ServiceTier: "priority", EffectiveFrom: "2026-01-01",
+			Price: pricing.Price{InputPerMTok: 1, OutputPerMTok: 2, CacheWriteMult: 2},
+		}},
+	}}
+	body := []byte(`{"model":"known","max_tokens":100,"inference_geo":"future-region","service_tier":"priority"}`)
+	estimate := p.estimateRequestAt("/v1/messages", body, "anthropic", time.Date(2026, 7, 12, 0, 0, 0, 0, time.UTC)).admission
+	want := float64(2*len(body)+200) / 1e6
+	if !estimate.Bounded || !estimate.Priced || estimate.USD != want {
+		t.Fatalf("contract estimate=%+v want bounded priced USD %.12f", estimate, want)
+	}
+}
+
 func TestWebhookTransportErrorsDoNotLeakEndpointSecrets(t *testing.T) {
 	raw := &url.Error{
 		Op:  "Post",
@@ -40,16 +58,20 @@ func TestWebhookTransportErrorsDoNotLeakEndpointSecrets(t *testing.T) {
 
 func TestStripHopHeadersIncludesConnectionExtensions(t *testing.T) {
 	header := http.Header{
-		"Connection":      {"keep-alive, X-Private-Hop", "X-Second-Hop"},
-		"Keep-Alive":      {"timeout=5"},
-		"X-Private-Hop":   {"secret"},
-		"X-Second-Hop":    {"also-secret"},
-		"X-End-To-End":    {"keep"},
-		"Content-Type":    {"application/json"},
-		"X-Burnban-Agent": {"local"},
+		"Connection":                        {"keep-alive, X-Private-Hop", "X-Second-Hop"},
+		"Keep-Alive":                        {"timeout=5"},
+		"X-Private-Hop":                     {"secret"},
+		"X-Second-Hop":                      {"also-secret"},
+		"X-End-To-End":                      {"keep"},
+		"Content-Type":                      {"application/json"},
+		"X-Burnban-Agent":                   {"local"},
+		"X-Burnban-Provider-Final-Cost-USD": {"0.000001"},
 	}
 	stripHopHeaders(header)
-	for _, name := range []string{"Connection", "Keep-Alive", "X-Private-Hop", "X-Second-Hop", "X-Burnban-Agent"} {
+	for _, name := range []string{
+		"Connection", "Keep-Alive", "X-Private-Hop", "X-Second-Hop", "X-Burnban-Agent",
+		"X-Burnban-Provider-Final-Cost-USD",
+	} {
 		if got := header.Get(name); got != "" {
 			t.Errorf("%s survived with %q", name, got)
 		}

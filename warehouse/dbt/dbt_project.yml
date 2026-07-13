@@ -1,0 +1,10 @@
+name: burnban_warehouse
+version: 1.0.0
+config-version: 2
+profile: burnban_warehouse
+model-paths: ["models"]
+clean-targets: ["target", "dbt_packages"]
+models:
+  burnban_warehouse:
+    staging:
+      +materialized: view

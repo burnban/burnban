@@ -30,6 +30,49 @@ type Usage struct {
 	Found           bool
 }
 
+// Provider counters are untrusted JSON integers. Values above this bound are
+// not credible for one response and make downstream sums/price arithmetic an
+// accounting hazard. Invalid values are saturated and marked partial so an
+// active guardrail fails closed instead of treating overflow as exact $0.
+const (
+	maxUsageTokens     int64 = 1_000_000_000_000_000
+	maxUsageCharacters int64 = 4 * maxUsageTokens
+)
+
+func sanitizeCounter(value, limit int64) (int64, bool) {
+	switch {
+	case value < 0:
+		return 0, false
+	case value > limit:
+		return limit, false
+	default:
+		return value, true
+	}
+}
+
+func boundedAdd(left, right, limit int64) (int64, bool) {
+	if left < 0 || right < 0 || left > limit || right > limit || left > limit-right {
+		return limit, false
+	}
+	return left + right, true
+}
+
+func addCharacters(current *int64, amount int) bool {
+	if amount < 0 || int64(amount) > maxUsageCharacters {
+		*current = maxUsageCharacters
+		return false
+	}
+	next, ok := boundedAdd(*current, int64(amount), maxUsageCharacters)
+	*current = next
+	return ok
+}
+
+func markPartial(u *Usage) {
+	u.Found = true
+	u.Exact = false
+	u.Incomplete = true
+}
+
 type anthropicUsage struct {
 	InputTokens         int64 `json:"input_tokens"`
 	OutputTokens        int64 `json:"output_tokens"`
@@ -45,15 +88,21 @@ type anthropicUsage struct {
 }
 
 func applyAnthropicUsage(dst *Usage, u anthropicUsage) {
-	dst.In = max(dst.In, u.InputTokens, 0)
-	dst.Out = max(dst.Out, u.OutputTokens, 0)
-	dst.CacheRead = max(dst.CacheRead, u.CacheRead, 0)
-	dst.CacheWrite = max(dst.CacheWrite, u.CacheCreation, 0)
-	detailTotal := max(u.CacheCreationDetail.Ephemeral5m, 0) + max(u.CacheCreationDetail.Ephemeral1h, 0)
+	input, inputOK := sanitizeCounter(u.InputTokens, maxUsageTokens)
+	output, outputOK := sanitizeCounter(u.OutputTokens, maxUsageTokens)
+	cacheRead, cacheReadOK := sanitizeCounter(u.CacheRead, maxUsageTokens)
+	cacheWrite, cacheWriteOK := sanitizeCounter(u.CacheCreation, maxUsageTokens)
+	cache5m, cache5mOK := sanitizeCounter(u.CacheCreationDetail.Ephemeral5m, maxUsageTokens)
+	cache1h, cache1hOK := sanitizeCounter(u.CacheCreationDetail.Ephemeral1h, maxUsageTokens)
+	dst.In = max(dst.In, input)
+	dst.Out = max(dst.Out, output)
+	dst.CacheRead = max(dst.CacheRead, cacheRead)
+	dst.CacheWrite = max(dst.CacheWrite, cacheWrite)
+	detailTotal, detailOK := boundedAdd(cache5m, cache1h, maxUsageTokens)
 	if detailTotal > dst.CacheWrite {
 		dst.CacheWrite = detailTotal
 	}
-	dst.CacheWrite1h = max(dst.CacheWrite1h, min(max(u.CacheCreationDetail.Ephemeral1h, 0), dst.CacheWrite))
+	dst.CacheWrite1h = max(dst.CacheWrite1h, min(cache1h, dst.CacheWrite))
 	if u.ServiceTier != "" {
 		dst.ServiceTier = u.ServiceTier
 	}
@@ -61,12 +110,19 @@ func applyAnthropicUsage(dst *Usage, u anthropicUsage) {
 		dst.InferenceGeo = u.InferenceGeo
 	}
 	var toolCalls int64
+	toolCallsOK := true
 	for _, count := range u.ServerToolUse {
-		toolCalls += max(count, 0)
+		count, ok := sanitizeCounter(count, maxUsageTokens)
+		var addOK bool
+		toolCalls, addOK = boundedAdd(toolCalls, count, maxUsageTokens)
+		toolCallsOK = toolCallsOK && ok && addOK
 	}
 	dst.ServerToolCalls = max(dst.ServerToolCalls, toolCalls)
 	dst.FeeUnknown = dst.FeeUnknown || dst.ServerToolCalls > 0 ||
 		tierFeeUnknown(dst.ServiceTier) || geoFeeUnknown(dst.InferenceGeo)
+	if !(inputOK && outputOK && cacheReadOK && cacheWriteOK && cache5mOK && cache1hOK && detailOK && toolCallsOK) {
+		markPartial(dst)
+	}
 }
 
 func anthropicUsageFound(u anthropicUsage) bool {
@@ -114,6 +170,9 @@ func ParseAnthropicJSON(body []byte) Usage {
 		u.InferenceGeo = v.InferenceGeo
 	}
 	u.FeeUnknown = u.FeeUnknown || tierFeeUnknown(u.ServiceTier) || geoFeeUnknown(u.InferenceGeo)
+	if u.Incomplete {
+		u.Exact = false
+	}
 	return u
 }
 
@@ -144,15 +203,19 @@ func ParseOpenAIJSON(body []byte) Usage {
 	if json.Unmarshal(body, &v) != nil {
 		return Usage{}
 	}
-	in, out, cached, writes, ok := normalizeOpenAIUsage(v.Usage)
-	if !ok {
+	in, out, cached, writes, found, valid := normalizeOpenAIUsage(v.Usage)
+	if !found {
 		return Usage{}
 	}
-	return Usage{Model: v.Model, In: in, Out: out, CacheRead: cached, CacheWrite: writes,
-		ServiceTier: v.ServiceTier, FeeUnknown: tierFeeUnknown(v.ServiceTier), Found: true, Exact: true}
+	u := Usage{Model: v.Model, In: in, Out: out, CacheRead: cached, CacheWrite: writes,
+		ServiceTier: v.ServiceTier, FeeUnknown: tierFeeUnknown(v.ServiceTier), Found: true, Exact: valid}
+	if !valid {
+		markPartial(&u)
+	}
+	return u
 }
 
-func normalizeOpenAIUsage(u openAIUsage) (in, out, cached, writes int64, ok bool) {
+func normalizeOpenAIUsage(u openAIUsage) (in, out, cached, writes int64, found, valid bool) {
 	if u.PromptTokens != 0 || u.CompletionTokens != 0 ||
 		u.PromptTokensDetails.CachedTokens != 0 || u.PromptTokensDetails.CacheWriteTokens != 0 {
 		in, out = u.PromptTokens, u.CompletionTokens
@@ -164,14 +227,22 @@ func normalizeOpenAIUsage(u openAIUsage) (in, out, cached, writes int64, ok bool
 		writes = u.InputTokensDetails.CacheWriteTokens
 	}
 	if in == 0 && out == 0 && cached == 0 && writes == 0 {
-		return 0, 0, 0, 0, false
+		return 0, 0, 0, 0, false, true
 	}
-	in, out = max(in, 0), max(out, 0)
-	cached, writes = max(cached, 0), max(writes, 0)
-	// Provider totals include both subsets. Clamp inconsistent upstream data
-	// rather than allowing a negative full-price count to reduce spend.
-	in = max(in-cached-writes, 0)
-	return in, out, cached, writes, true
+	rawIn := in
+	var inOK, outOK, cachedOK, writesOK bool
+	in, inOK = sanitizeCounter(in, maxUsageTokens)
+	out, outOK = sanitizeCounter(out, maxUsageTokens)
+	cached, cachedOK = sanitizeCounter(cached, maxUsageTokens)
+	writes, writesOK = sanitizeCounter(writes, maxUsageTokens)
+	subsets, subsetsOK := boundedAdd(cached, writes, maxUsageTokens)
+	consistent := rawIn >= 0 && subsets <= in
+	if consistent {
+		in -= subsets
+	} else {
+		in = 0
+	}
+	return in, out, cached, writes, true, inOK && outOK && cachedOK && writesOK && subsetsOK && consistent
 }
 
 type geminiUsage struct {
@@ -279,9 +350,14 @@ func (t *AnthropicSSE) Feed(line []byte) {
 		}
 	case "content_block_delta":
 		if v.Delta != nil {
-			deltaChars := int64(len(v.Delta.Text) + len(v.Delta.Thinking) + len(v.Delta.PartialJSON))
-			t.chars += deltaChars
-			if deltaChars > 0 {
+			before := t.chars
+			ok := addCharacters(&t.chars, len(v.Delta.Text))
+			ok = addCharacters(&t.chars, len(v.Delta.Thinking)) && ok
+			ok = addCharacters(&t.chars, len(v.Delta.PartialJSON)) && ok
+			if !ok {
+				markPartial(&t.u)
+			}
+			if t.chars > before {
 				t.u.Found = true
 			}
 		}
@@ -292,9 +368,13 @@ func (t *AnthropicSSE) Feed(line []byte) {
 
 func (t *AnthropicSSE) Usage() Usage {
 	u := t.u
-	u.Exact = t.sawStart && t.sawDelta && t.sawStop
+	u.Exact = t.sawStart && t.sawDelta && t.sawStop && !u.Incomplete
 	if !u.Exact && u.Found {
-		u.Out = max(u.Out, (t.chars+3)/4)
+		charsPlus, ok := boundedAdd(t.chars, 3, maxUsageCharacters)
+		if !ok {
+			markPartial(&u)
+		}
+		u.Out = max(u.Out, charsPlus/4)
 		u.Estimated = true
 		u.Incomplete = true
 	}
@@ -362,16 +442,29 @@ func (t *OpenAISSE) Feed(line []byte) {
 		t.u.FeeUnknown = t.u.FeeUnknown || tierFeeUnknown(v.Response.ServiceTier)
 	}
 	charsBefore := t.chars
-	t.chars += int64(len(v.Delta))
+	validChars := addCharacters(&t.chars, len(v.Delta))
 	for _, c := range v.Choices {
-		t.chars += rawStringLen(c.Delta.Content)
-		t.chars += int64(len(c.Delta.Reasoning) + len(c.Delta.ReasoningContent) + len(c.Delta.Refusal))
+		contentLen := rawStringLen(c.Delta.Content)
+		if contentLen < 0 || contentLen > maxUsageCharacters {
+			validChars = false
+			t.chars = maxUsageCharacters
+		} else {
+			next, ok := boundedAdd(t.chars, contentLen, maxUsageCharacters)
+			t.chars = next
+			validChars = validChars && ok
+		}
+		validChars = addCharacters(&t.chars, len(c.Delta.Reasoning)) && validChars
+		validChars = addCharacters(&t.chars, len(c.Delta.ReasoningContent)) && validChars
+		validChars = addCharacters(&t.chars, len(c.Delta.Refusal)) && validChars
 		if c.Delta.FunctionCall != nil {
-			t.chars += int64(len(c.Delta.FunctionCall.Arguments))
+			validChars = addCharacters(&t.chars, len(c.Delta.FunctionCall.Arguments)) && validChars
 		}
 		for _, call := range c.Delta.ToolCalls {
-			t.chars += int64(len(call.Function.Arguments))
+			validChars = addCharacters(&t.chars, len(call.Function.Arguments)) && validChars
 		}
+	}
+	if !validChars {
+		markPartial(&t.u)
 	}
 	if t.chars > charsBefore {
 		t.u.Found = true
@@ -385,16 +478,18 @@ func (t *OpenAISSE) Feed(line []byte) {
 }
 
 func (t *OpenAISSE) setExact(raw openAIUsage) {
-	in, out, cached, writes, ok := normalizeOpenAIUsage(raw)
-	if !ok {
+	in, out, cached, writes, found, valid := normalizeOpenAIUsage(raw)
+	if !found {
 		return
 	}
 	t.u.In, t.u.Out = in, out
 	t.u.CacheRead, t.u.CacheWrite = cached, writes
 	t.u.Estimated = false
 	t.u.Found = true
-	t.u.Exact = true
-	t.u.Incomplete = false
+	t.u.Exact = valid && !t.u.Incomplete
+	if !valid {
+		markPartial(&t.u)
+	}
 	t.exact = true
 }
 
@@ -402,7 +497,11 @@ func (t *OpenAISSE) Usage() Usage {
 	u := t.u
 	if !t.exact && u.Found {
 		// No usage frame: estimate at ~4 chars/token and say so.
-		u.Out = max(u.Out, (t.chars+3)/4)
+		charsPlus, ok := boundedAdd(t.chars, 3, maxUsageCharacters)
+		if !ok {
+			markPartial(&u)
+		}
+		u.Out = max(u.Out, charsPlus/4)
 		u.Estimated = true
 		u.Incomplete = true
 		u.Exact = false
@@ -433,6 +532,7 @@ type GeminiSSE struct {
 	prompt, candidates, thoughts, cached int64
 	chars                                int64
 	usageSeen                            bool
+	invalid                              bool
 }
 
 func (t *GeminiSSE) Feed(line []byte) {
@@ -454,25 +554,34 @@ func (t *GeminiSSE) merge(v *geminiBody) {
 	}
 	for _, c := range v.Candidates {
 		for _, p := range c.Content.Parts {
-			t.chars += int64(len(p.Text))
+			if !addCharacters(&t.chars, len(p.Text)) {
+				t.invalid = true
+			}
 			if p.Text != "" {
 				t.found = true
 			}
 			if p.FunctionCall != nil {
-				t.chars += int64(len(p.FunctionCall.Name) + len(p.FunctionCall.Args))
+				if !addCharacters(&t.chars, len(p.FunctionCall.Name)) || !addCharacters(&t.chars, len(p.FunctionCall.Args)) {
+					t.invalid = true
+				}
 				t.found = true
 			}
 		}
 	}
 	if u := v.Usage; u != nil {
 		t.usageSeen = true
-		if u.PromptTokenCount > 0 || u.CandidatesTokenCount > 0 {
+		if u.PromptTokenCount != 0 || u.CandidatesTokenCount != 0 || u.ThoughtsTokenCount != 0 || u.CachedContentTokenCount != 0 {
 			t.found = true
 		}
-		t.prompt = max(t.prompt, u.PromptTokenCount)
-		t.candidates = max(t.candidates, u.CandidatesTokenCount)
-		t.thoughts = max(t.thoughts, u.ThoughtsTokenCount)
-		t.cached = max(t.cached, u.CachedContentTokenCount)
+		prompt, promptOK := sanitizeCounter(u.PromptTokenCount, maxUsageTokens)
+		candidates, candidatesOK := sanitizeCounter(u.CandidatesTokenCount, maxUsageTokens)
+		thoughts, thoughtsOK := sanitizeCounter(u.ThoughtsTokenCount, maxUsageTokens)
+		cached, cachedOK := sanitizeCounter(u.CachedContentTokenCount, maxUsageTokens)
+		t.prompt = max(t.prompt, prompt)
+		t.candidates = max(t.candidates, candidates)
+		t.thoughts = max(t.thoughts, thoughts)
+		t.cached = max(t.cached, cached)
+		t.invalid = t.invalid || !(promptOK && candidatesOK && thoughtsOK && cachedOK)
 	}
 }
 
@@ -480,16 +589,29 @@ func (t *GeminiSSE) merge(v *geminiBody) {
 // the cached subset, and thinking tokens are billed as output, so both
 // are normalized here.
 func (t *GeminiSSE) Usage() Usage {
+	out, outputOK := boundedAdd(t.candidates, t.thoughts, maxUsageTokens)
+	inputOK := t.cached <= t.prompt
+	in := int64(0)
+	if inputOK {
+		in = t.prompt - t.cached
+	}
 	u := Usage{
 		Model:     t.model,
-		In:        max(t.prompt-t.cached, 0),
-		Out:       t.candidates + t.thoughts,
+		In:        in,
+		Out:       out,
 		CacheRead: t.cached,
 		Found:     t.found,
-		Exact:     t.usageSeen,
+		Exact:     t.usageSeen && !t.invalid && inputOK && outputOK,
+	}
+	if t.invalid || !inputOK || !outputOK {
+		markPartial(&u)
 	}
 	if !t.usageSeen && u.Found {
-		u.Out = max(u.Out, (t.chars+3)/4)
+		charsPlus, ok := boundedAdd(t.chars, 3, maxUsageCharacters)
+		if !ok {
+			markPartial(&u)
+		}
+		u.Out = max(u.Out, charsPlus/4)
 		u.Estimated = true
 		u.Incomplete = true
 	}

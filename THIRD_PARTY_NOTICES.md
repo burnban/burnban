@@ -9,16 +9,17 @@ following runtime dependencies. Versions are locked by `go.mod` and `go.sum`.
 | `github.com/google/uuid` | v1.6.0 | BSD-3-Clause |
 | `github.com/mattn/go-isatty` | v0.0.20 | MIT |
 | `github.com/ncruces/go-strftime` | v1.0.0 | MIT |
-| `github.com/remyoudompheng/bigfft` | 24d4a6f8daec | BSD-3-Clause |
+| `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause |
 | `golang.org/x/sys` | v0.44.0 | BSD-3-Clause |
 | `modernc.org/libc` | v1.73.4 | BSD-3-Clause and bundled third-party terms |
 | `modernc.org/mathutil` | v1.7.1 | BSD-3-Clause |
 | `modernc.org/memory` | v1.11.0 | BSD-3-Clause and bundled third-party terms |
 | `modernc.org/sqlite` | v1.53.0 | BSD-3-Clause; SQLite portions are public domain |
 
-Official release archives and the container image include the exact upstream
-license and notice files under `third_party_licenses/` or `/licenses`. Those
-files are collected from the resolved module graph by
+Release archives and container images built by the current release workflow
+include the exact upstream license and notice files under
+`third_party_licenses/` or `/licenses`. Those files are collected from the
+resolved module graph by
 `scripts/collect_licenses.sh`, including `modernc.org/libc`'s
 `LICENSE-3RD-PARTY.md` and the additional notices distributed with
 `modernc.org/memory`.

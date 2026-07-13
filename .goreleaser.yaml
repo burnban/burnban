@@ -33,10 +33,18 @@ archives:
       - CONTRIBUTING.md
       - DATA_AND_PRIVACY.md
       - EXTERNAL_POLICY.md
+      - DOWNSHIFT_ROUTING.md
       - GOVERNANCE.md
+      - LINUX_PACKAGES.md
+      - OPTIMIZATION.md
+      - POLICY_ENGINE.md
+      - RECONCILIATION.md
       - RELEASING.md
       - SECURITY.md
+      - SIGNED_IDENTITY.md
+      - SOURCE_ADAPTERS.md
       - SUPPORT.md
+      - TELEMETRY.md
       - THIRD_PARTY_NOTICES.md
       - docs/dashboard.png
       - install.sh

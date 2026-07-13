@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"time"
 
+	"github.com/burnban/burnban/sourceadapter"
 	_ "modernc.org/sqlite"
 )
 
@@ -105,6 +106,7 @@ func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event
 			Time: time.Unix(0, int64(started*float64(time.Second))), Calls: 1,
 			In: in, Out: out, CacheRead: cacheRead, CacheWrite5m: cacheWrite,
 			BillingProvider: billingProvider,
+			Confidence:      sourceadapter.ConfidenceExact,
 		}
 		// Hermes prices via the provider's live models API, so its own estimate
 		// covers models outside Burnban's table (used only as a fallback there).

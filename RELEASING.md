@@ -1,5 +1,9 @@
 # Release process
 
+Native Linux package and repository signing is documented in
+[`LINUX_PACKAGES.md`](LINUX_PACKAGES.md). A canonical tag release requires the
+protected GPG identity and has no unsigned `.deb`/`.rpm` fallback.
+
 Only maintainers with protected-tag and release-environment access may publish
 Burnban releases. Releases are built by GitHub Actions from an annotated `v*`
 tag; binaries built on a workstation are never uploaded as official artifacts.

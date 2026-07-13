@@ -13,6 +13,7 @@
 .vscode/
 coverage.out
 dist/
+package-dist/
 /third_party_licenses/
 /qa/browser/node_modules/
 /qa/browser/playwright-report/

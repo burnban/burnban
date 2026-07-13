@@ -64,15 +64,23 @@ jobs:
           actionlint
           gitleaks git --redact --no-banner .
       - name: License policy and notice coverage
+        env:
+          # setup-go installs the requested toolchain directly. Keep go-licenses
+          # from switching to a toolchain module, which it can misclassify as a
+          # third-party dependency when locating standard-library packages.
+          GOTOOLCHAIN: local
         shell: bash
         run: |
+          expected_go="go$(awk '$1 == "go" { print $2; exit }' go.mod)"
+          test "$(go env GOVERSION)" = "$expected_go"
           go-licenses check ./... --allowed_licenses=Apache-2.0,BSD-2-Clause,BSD-3-Clause,ISC,MIT,Unlicense
           license_dir=$(mktemp -d)
           trap 'rm -rf "$license_dir"' EXIT
           sh scripts/collect_licenses.sh "$license_dir/licenses"
           while IFS= read -r module; do
-            grep -Fq "\`$module\`" THIRD_PARTY_NOTICES.md || {
-              echo "THIRD_PARTY_NOTICES.md is missing $module" >&2
+            version=$(go list -m -f '{{.Version}}' "$module")
+            grep -Fq "| \`$module\` | $version |" THIRD_PARTY_NOTICES.md || {
+              echo "THIRD_PARTY_NOTICES.md is missing resolved module $module $version" >&2
               exit 1
             }
           done < <(go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}' . | sed '/^$/d' | sort -u)
@@ -113,6 +121,13 @@ jobs:
               grep -Eq '(^|/)LICENSE$' "$archive_listing"
               grep -Eq '(^|/)DATA_AND_PRIVACY.md$' "$archive_listing"
               grep -Eq '(^|/)EXTERNAL_POLICY.md$' "$archive_listing"
+              grep -Eq '(^|/)SOURCE_ADAPTERS.md$' "$archive_listing"
+              grep -Eq '(^|/)POLICY_ENGINE.md$' "$archive_listing"
+              grep -Eq '(^|/)DOWNSHIFT_ROUTING.md$' "$archive_listing"
+              grep -Eq '(^|/)SIGNED_IDENTITY.md$' "$archive_listing"
+              grep -Eq '(^|/)RECONCILIATION.md$' "$archive_listing"
+              grep -Eq '(^|/)TELEMETRY.md$' "$archive_listing"
+              grep -Eq '(^|/)OPTIMIZATION.md$' "$archive_listing"
               grep -Eq '(^|/)SECURITY.md$' "$archive_listing"
               grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$' "$archive_listing"
               grep -Eq '(^|/)docs/dashboard.png$' "$archive_listing"
@@ -136,6 +151,134 @@ jobs:
             dist/burnban_*.zip
             dist/checksums.txt
             dist/*.sbom.spdx.json
+
+  linux-package-snapshot:
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Check Linux package configuration
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: check --config .goreleaser-packages.yaml
+      - name: Build unsigned reproducible package snapshot
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --snapshot --clean --config .goreleaser-packages.yaml
+      - name: Install pinned GoReleaser for byte reproduction
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          install-only: true
+      - name: Inspect and reproduce package bytes
+        shell: bash
+        run: |
+          set -euo pipefail
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y rpm
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
+          test "$(find package-dist -maxdepth 1 -name 'burnban_*.deb' | wc -l)" -eq 2
+          test "$(find package-dist -maxdepth 1 -name 'burnban_*.rpm' | wc -l)" -eq 2
+          docs=(
+            LICENSE README.md DATA_AND_PRIVACY.md SECURITY.md SOURCE_ADAPTERS.md
+            POLICY_ENGINE.md DOWNSHIFT_ROUTING.md SIGNED_IDENTITY.md
+            RECONCILIATION.md TELEMETRY.md OPTIMIZATION.md LINUX_PACKAGES.md
+            THIRD_PARTY_NOTICES.md
+          )
+          for package in package-dist/burnban_*.deb; do
+            dpkg-deb --info "$package" >/dev/null
+            listing="$work/$(basename "$package").contents"
+            dpkg-deb --contents "$package" >"$listing"
+            grep -Eq 'usr/bin/burnban$' "$listing"
+            for doc in "${docs[@]}"; do
+              grep -Eq "usr/share/doc/burnban/${doc}$" "$listing"
+            done
+            grep -Eq 'usr/share/doc/burnban/third_party_licenses/.+/LICENSE' "$listing"
+            members="$work/$(basename "$package").members"
+            ar t "$package" >"$members"
+            if grep -qx _gpgorigin "$members"; then
+              echo "ordinary CI unexpectedly created a signed Debian package" >&2
+              exit 1
+            fi
+          done
+          for package in package-dist/burnban_*.rpm; do
+            rpm -qp --info "$package" >/dev/null
+            listing="$work/$(basename "$package").contents"
+            rpm -qp --list "$package" >"$listing"
+            grep -qx '/usr/bin/burnban' "$listing"
+            for doc in "${docs[@]}"; do
+              grep -qx "/usr/share/doc/burnban/${doc}" "$listing"
+            done
+            grep -Eq '/usr/share/doc/burnban/third_party_licenses/.+/LICENSE' "$listing"
+            test "$(rpm -qp --queryformat '%{RSAHEADER}' "$package")" = "(none)"
+          done
+          (cd package-dist && sha256sum --check linux-package-checksums.txt)
+
+          expect_path_rejection() {
+            expected=$1
+            shift
+            rejection=$(mktemp)
+            if scripts/build_signed_linux_repositories.sh "$@" >"$rejection" 2>&1; then
+              echo "repository builder accepted unsafe paths: $*" >&2
+              rm -f "$rejection"
+              exit 1
+            fi
+            if ! grep -Fq "$expected" "$rejection"; then
+              echo "repository builder failed for the wrong reason: $*" >&2
+              cat "$rejection" >&2
+              rm -f "$rejection"
+              exit 1
+            fi
+            rm -f "$rejection"
+          }
+          expect_path_rejection "must be distinct direct children" \
+            package-dist package-dist package-dist/unsafe.tar.gz
+          ln -s "$RUNNER_TEMP" package-dist/unsafe-repositories
+          expect_path_rejection "paths are unsafe, overlapping, or symlinked" \
+            package-dist package-dist/unsafe-repositories package-dist/unsafe.tar.gz
+          rm package-dist/unsafe-repositories
+          mkdir package-dist/unsafe-repositories
+          expect_path_rejection "must be distinct direct children" \
+            package-dist package-dist/unsafe-repositories \
+            package-dist/unsafe-repositories/archive.tar.gz
+          rm -rf package-dist/unsafe-repositories
+          expect_path_rejection "paths are unsafe, overlapping, or symlinked" \
+            package-dist package-dist/burnban-release-signing-key.asc \
+            package-dist/unsafe.tar.gz
+          expect_path_rejection "must have a .tar.gz filename" \
+            package-dist package-dist/unsafe-repositories \
+            package-dist/burnban-release-signing-key.asc
+          first="$work/first"
+          mkdir "$first"
+          cp package-dist/burnban_*.deb package-dist/burnban_*.rpm package-dist/linux-package-checksums.txt "$first/"
+          goreleaser release --snapshot --clean --config .goreleaser-packages.yaml
+          cmp "$first/linux-package-checksums.txt" package-dist/linux-package-checksums.txt
+          for original in "$first"/burnban_*; do
+            cmp "$original" "package-dist/$(basename "$original")"
+          done
+      - name: Upload unsigned package snapshot
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: linux-package-snapshot
+          retention-days: 5
+          if-no-files-found: error
+          path: |
+            package-dist/burnban_*.deb
+            package-dist/burnban_*.rpm
+            package-dist/linux-package-checksums.txt
 
   installer:
     needs: release-snapshot

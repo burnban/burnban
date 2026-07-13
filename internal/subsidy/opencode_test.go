@@ -187,6 +187,8 @@ func TestBuildReportIncludesOpenCodeAndRequiresManualBilling(t *testing.T) {
 		ClaudeDir:   missing,
 		CodexDir:    missing,
 		GeminiDir:   missing,
+		CopilotDir:  missing,
+		CursorDB:    missing,
 		HermesDB:    missing,
 		OpenClawDir: missing,
 		GooseDB:     missing,

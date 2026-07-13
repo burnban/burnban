@@ -2,8 +2,10 @@ package subsidy
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -85,6 +87,78 @@ func TestScanGeminiSurfacesRecordLimit(t *testing.T) {
 	}
 }
 
+func TestScanGeminiRejectsMalformedAndInconsistentUsage(t *testing.T) {
+	tests := []struct {
+		name string
+		line string
+	}{
+		{"broken json", `{"type":"gemini","tokens":`},
+		{"cached exceeds input", `{"id":"bad","timestamp":"2026-07-10T12:00:02Z","type":"gemini","model":"gemini-2.5-pro","tokens":{"input":10,"output":1,"cached":11,"thoughts":0,"tool":0,"total":11}}`},
+		{"negative", `{"id":"bad","timestamp":"2026-07-10T12:00:02Z","type":"gemini","model":"gemini-2.5-pro","tokens":{"input":10,"output":-1,"cached":0,"thoughts":0,"tool":0,"total":9}}`},
+		{"inconsistent total", `{"id":"bad","timestamp":"2026-07-10T12:00:02Z","type":"gemini","model":"gemini-2.5-pro","tokens":{"input":10,"output":1,"cached":0,"thoughts":2,"tool":3,"total":15}}`},
+		{"composite overflow", fmt.Sprintf(`{"id":"bad","timestamp":"2026-07-10T12:00:02Z","type":"gemini","model":"gemini-2.5-pro","tokens":{"input":%d,"output":1,"cached":0,"thoughts":0,"tool":0,"total":%d}}`, sourceadapter.MaxEventTokens, sourceadapter.MaxEventTokens)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			chatDir := filepath.Join(root, "project", "chats")
+			if err := os.MkdirAll(chatDir, 0o755); err != nil {
+				t.Fatal(err)
+			}
+			body := `{"sessionId":"private-session","projectHash":"private-project"}` + "\n" + tt.line + "\n"
+			if err := os.WriteFile(filepath.Join(chatDir, "session.jsonl"), []byte(body), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			var events []Event
+			result, err := scanGemini(root, time.Time{}, DefaultScanLimits(), func(event Event) {
+				events = append(events, event)
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(events) != 0 || result.Sessions != 0 || !result.Stats.Partial ||
+				!slices.Contains(result.Stats.Warnings, geminiMalformedWarning) {
+				t.Fatalf("malformed result=%+v events=%+v", result, events)
+			}
+			encoded, _ := json.Marshal(result)
+			if strings.Contains(string(encoded), "private-session") || strings.Contains(string(encoded), "private-project") {
+				t.Fatalf("malformed diagnostics leaked source metadata: %s", encoded)
+			}
+		})
+	}
+}
+
+func TestScanGeminiInvalidTrailingDuplicatePreservesValidUsage(t *testing.T) {
+	root := t.TempDir()
+	chatDir := filepath.Join(root, "project", "chats")
+	if err := os.MkdirAll(chatDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := strings.Join([]string{
+		`{"sessionId":"session","projectHash":"project"}`,
+		`{"id":"message","timestamp":"2026-07-10T12:00:00Z","type":"gemini","model":"gemini-2.5-pro","tokens":{"input":10,"output":2,"cached":3,"thoughts":1,"tool":4,"total":17}}`,
+		`{"id":"message","timestamp":"not-a-timestamp","type":"gemini","model":"private-trailing-model","tokens":{"input":100,"output":20,"cached":0,"thoughts":0,"tool":0,"total":120}}`,
+	}, "\n") + "\n"
+	if err := os.WriteFile(filepath.Join(chatDir, "session.jsonl"), []byte(body), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	var events []Event
+	result, err := scanGemini(root, time.Time{}, DefaultScanLimits(), func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 1 || result.Sessions != 1 || events[0].Model != "gemini-2.5-pro" ||
+		events[0].In != 11 || events[0].Out != 3 || events[0].CacheRead != 3 {
+		t.Fatalf("preserved result=%+v events=%+v", result, events)
+	}
+	if !result.Stats.Partial || !slices.Contains(result.Stats.Warnings, geminiMalformedWarning) {
+		t.Fatalf("missing trailing-record diagnostic: %+v", result)
+	}
+}
+
 func TestBuildReportIncludesGeminiAdapter(t *testing.T) {
 	root := t.TempDir()
 	chatDir := filepath.Join(root, "gemini", "project-hash", "chats")
@@ -105,6 +179,8 @@ func TestBuildReportIncludesGeminiAdapter(t *testing.T) {
 		Since:     time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Until:     time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: missing, CodexDir: missing, GeminiDir: filepath.Join(root, "gemini"),
+		CopilotDir: missing,
+		CursorDB:   missing,
 		OpenCodeDB: missing, HermesDB: missing, OpenClawDir: missing, GooseDB: missing,
 	})
 	if err != nil {
@@ -127,8 +203,8 @@ func TestBuildReportIncludesGeminiAdapter(t *testing.T) {
 
 func TestBuiltinAdapterManifests(t *testing.T) {
 	adapters := BuiltinAdapters()
-	if len(adapters) != 7 {
-		t.Fatalf("built-in adapters = %d, want 7", len(adapters))
+	if len(adapters) != 9 {
+		t.Fatalf("built-in adapters = %d, want 9", len(adapters))
 	}
 	seen := map[string]bool{}
 	for _, adapter := range adapters {
@@ -146,6 +222,12 @@ func TestBuiltinAdapterManifests(t *testing.T) {
 	}
 	if !seen["opencode"] {
 		t.Fatal("OpenCode adapter not registered")
+	}
+	if !seen["github-copilot-cli"] {
+		t.Fatal("GitHub Copilot CLI adapter not registered")
+	}
+	if !seen["cursor"] {
+		t.Fatal("Cursor adapter not registered")
 	}
 }
 

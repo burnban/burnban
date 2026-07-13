@@ -1,6 +1,7 @@
 package budget_test
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -254,6 +255,210 @@ func TestFuseSettingValidation(t *testing.T) {
 	}
 }
 
+func TestFanoutFuseCountsInFlightWithoutDollarPricing(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseFanout, "1m:2"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	first, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{})
+	if err != nil || denial != nil || first == nil {
+		t.Fatalf("first fanout admission=%v denial=%+v err=%v", first, denial, err)
+	}
+	second, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{})
+	if err != nil || denial != nil || second == nil {
+		t.Fatalf("second fanout admission=%v denial=%+v err=%v", second, denial, err)
+	}
+	third, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{})
+	if err != nil || third != nil || denial == nil || denial.Type != "burnban_fuse_tripped" ||
+		!strings.Contains(denial.Message, "projected 3 requests") {
+		t.Fatalf("third fanout admission=%v denial=%+v err=%v", third, denial, err)
+	}
+	first.Release()
+	second.Release()
+
+	snapshot, err := budget.FuseStatus(s, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Tripped || snapshot.TripRule != "fanout" || snapshot.TripLimitRequests != 2 || snapshot.TripProjectedRequests != 3 {
+		t.Fatalf("fanout snapshot=%+v", snapshot)
+	}
+}
+
+func TestFanoutFuseSerializesConcurrentAdmissionsAtExactLimit(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseFanout, "1m:10"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	reservations := make(chan *budget.Reservation, 100)
+	denials := make(chan *budget.Denial, 100)
+	errors := make(chan error, 100)
+	var wg sync.WaitGroup
+	for i := 0; i < 100; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			reservation, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{})
+			switch {
+			case err != nil:
+				errors <- err
+			case reservation != nil:
+				reservations <- reservation
+			default:
+				denials <- denial
+			}
+		}()
+	}
+	wg.Wait()
+	close(reservations)
+	close(denials)
+	close(errors)
+	if len(errors) != 0 {
+		t.Fatalf("concurrent admission errors=%d first=%v", len(errors), <-errors)
+	}
+	if len(reservations) != 10 || len(denials) != 90 {
+		t.Fatalf("concurrent fanout admitted=%d denied=%d, want 10/90", len(reservations), len(denials))
+	}
+	for reservation := range reservations {
+		reservation.Release()
+	}
+	for denial := range denials {
+		if denial == nil || denial.Type != "burnban_fuse_tripped" {
+			t.Fatalf("unexpected concurrent fanout denial=%+v", denial)
+		}
+	}
+	if snapshot := guard.Reservations(); snapshot.InFlight != 0 || snapshot.ReservedUSD != 0 {
+		t.Fatalf("concurrent fanout leaked reservations: %+v", snapshot)
+	}
+}
+
+func TestBaselineFuseUsesSameUTCSlotMedianAndMinimumFloor(t *testing.T) {
+	s := newStore(t)
+	at := now.Add(30 * time.Minute)
+	currentStart := at.UTC().Truncate(time.Hour)
+	for day, usd := range []float64{1, 1, 10, 0, 1, 1, 1} {
+		if usd != 0 {
+			spend(t, s, currentStart.Add(-time.Duration(day+1)*24*time.Hour).Add(10*time.Minute), usd)
+		}
+	}
+	// Large traffic in a different slot must not inflate the comparator.
+	spend(t, s, currentStart.Add(-24*time.Hour).Add(-time.Minute), 100)
+	spend(t, s, currentStart.Add(5*time.Minute), 1.9)
+
+	raw, err := budget.EncodeFuseBaseline(budget.FuseBaselinePolicy{
+		Version: 1, Window: time.Hour, Multiplier: 2, LookbackDays: 7, MinimumUSD: 0.25,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyFuseBaseline, raw); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	reservation, denial, err := guard.Admit(at, "", budget.AdmissionEstimate{USD: 0.2, Priced: true, Bounded: true})
+	if err != nil || reservation != nil || denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("baseline crossing=%v denial=%+v err=%v", reservation, denial, err)
+	}
+	snapshot, err := budget.FuseStatus(s, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var baseline budget.FuseRuleState
+	for _, rule := range snapshot.Rules {
+		if rule.Name == "baseline" {
+			baseline = rule
+		}
+	}
+	if baseline.CapUSD != 2 || baseline.BaselineMedianUSD != 1 || baseline.BaselineMultiplier != 2 || baseline.SpentUSD != 1.9 ||
+		baseline.ProjectedTimeToLimit < 90*time.Second || baseline.ProjectedTimeToLimit > 2*time.Minute {
+		t.Fatalf("baseline status=%+v", baseline)
+	}
+
+	// A completely idle history still gets the explicit absolute floor.
+	s2 := newStore(t)
+	raw, err = budget.EncodeFuseBaseline(budget.FuseBaselinePolicy{
+		Version: 1, Window: time.Hour, Multiplier: 3, LookbackDays: 7, MinimumUSD: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s2.SetSetting(budget.KeyFuseBaseline, raw); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err = budget.FuseStatus(s2, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Rules) != 1 || snapshot.Rules[0].CapUSD != 0.5 || snapshot.Rules[0].BaselineMedianUSD != 0 {
+		t.Fatalf("idle baseline floor=%+v", snapshot.Rules)
+	}
+}
+
+func TestBaselineFuseRefreshesAfterBackdatedLedgerMutation(t *testing.T) {
+	s := newStore(t)
+	at := now.Add(30 * time.Minute)
+	currentStart := at.UTC().Truncate(time.Hour)
+	raw, err := budget.EncodeFuseBaseline(budget.FuseBaselinePolicy{
+		Version: 1, Window: time.Hour, Multiplier: 2, LookbackDays: 7, MinimumUSD: 0.5,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyFuseBaseline, raw); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	if denial, err := guard.Check(at, ""); err != nil || denial != nil {
+		t.Fatalf("warm empty baseline denial=%+v err=%v", denial, err)
+	}
+	// Four populated same-time slots make the seven-day median $10. If the
+	// historical cache remained at its old zero value, this $1 estimate would
+	// cross the $0.50 floor and trip instead of fitting under the new $20 cap.
+	for day := 1; day <= 4; day++ {
+		spend(t, s, currentStart.Add(-time.Duration(day)*24*time.Hour).Add(10*time.Minute), 10)
+	}
+	reservation, denial, err := guard.Admit(at, "", budget.AdmissionEstimate{USD: 1, Priced: true, Bounded: true})
+	if err != nil || denial != nil || reservation == nil {
+		t.Fatalf("backdated refresh reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+	reservation.Release()
+	snapshot, err := budget.FuseStatus(s, at)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snapshot.Rules) != 1 || snapshot.Rules[0].BaselineMedianUSD != 10 || snapshot.Rules[0].CapUSD != 20 {
+		t.Fatalf("refreshed baseline=%+v", snapshot.Rules)
+	}
+}
+
+func TestFanoutAndBaselineSettingValidation(t *testing.T) {
+	for _, raw := range []string{"", "1m", "0:1", "1m:0", "2h:4", "1m:1000001", "1m:1.5"} {
+		if _, _, err := budget.ParseFuseFanout(raw); err == nil {
+			t.Errorf("fanout %q accepted", raw)
+		}
+	}
+	for _, policy := range []budget.FuseBaselinePolicy{
+		{Version: 2, Window: time.Hour, Multiplier: 3, LookbackDays: 14, MinimumUSD: 1},
+		{Version: 1, Window: 7 * time.Minute, Multiplier: 3, LookbackDays: 14, MinimumUSD: 1},
+		{Version: 1, Window: time.Hour, Multiplier: 1, LookbackDays: 14, MinimumUSD: 1},
+		{Version: 1, Window: time.Hour, Multiplier: 3, LookbackDays: 6, MinimumUSD: 1},
+		{Version: 1, Window: time.Hour, Multiplier: 3, LookbackDays: 14, MinimumUSD: 0},
+	} {
+		if _, err := budget.EncodeFuseBaseline(policy); err == nil {
+			t.Errorf("invalid baseline accepted: %+v", policy)
+		}
+	}
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseBaseline, "{\"version\":1,\"Version\":1,\"window\":\"1h\",\"multiplier\":3,\"lookback_days\":14,\"minimum_usd\":1}"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.FuseStatus(s, now); err == nil {
+		t.Fatal("case-ambiguous baseline setting accepted")
+	}
+}
+
 func TestEnforcementGapFailsClosedAndTinyGuidanceKeepsCents(t *testing.T) {
 	s := newStore(t)
 	if err := s.Insert(store.Request{
@@ -483,6 +688,60 @@ func TestExternalPolicyIsStricterAndCannotBeOverridden(t *testing.T) {
 	}
 	if got := states[0]; got.CapUSD != 5 || got.LocalCapUSD != 10 || got.ExternalCapUSD != 5 || got.Source != "external" {
 		t.Fatalf("daily state = %+v", got)
+	}
+}
+
+func TestTemporaryExternalIncreaseExpiresLocallyWhileOffline(t *testing.T) {
+	s := newStore(t)
+	guard := &budget.Guard{S: s}
+	queryNow := now.UTC().Truncate(time.Second)
+	spend(t, s, queryNow.Add(-time.Hour), 12)
+	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "15"); err != nil {
+		t.Fatal(err)
+	}
+	expires := queryNow.Add(10 * time.Minute)
+	raw := fmt.Sprintf(`{"version":1,"exceptions":[{"request_id":"apr_one","window":"daily","amount_usd":5,"valid_until":%q}]}`,
+		expires.Format(time.RFC3339))
+	if err := s.SetSetting(budget.KeyExternalPolicyExceptions, raw); err != nil {
+		t.Fatal(err)
+	}
+	if denial, err := guard.Check(queryNow, ""); err != nil || denial != nil {
+		t.Fatalf("active temporary increase denied: denial=%+v err=%v", denial, err)
+	}
+	states, err := budget.Status(s, queryNow)
+	if err != nil || states[0].ExternalCapUSD != 15 {
+		t.Fatalf("active state=%+v err=%v", states, err)
+	}
+	denial, err := guard.Check(expires, "")
+	if err != nil || denial == nil || denial.Type != "burnban_external_cap_reached" {
+		t.Fatalf("offline expiry denial=%+v err=%v", denial, err)
+	}
+	states, err = budget.Status(s, expires)
+	if err != nil || states[0].ExternalCapUSD != 10 || states[0].CapUSD != 10 {
+		t.Fatalf("expired state=%+v err=%v", states, err)
+	}
+}
+
+func TestTemporaryExternalIncreaseScheduleFailsClosed(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyExternalDailyCapUSD, "15"); err != nil {
+		t.Fatal(err)
+	}
+	for _, raw := range []string{
+		`{"version":2,"exceptions":[]}`,
+		`{"version":1,"exceptions":[{"request_id":"same","window":"daily","amount_usd":5,"valid_until":"2026-07-01T00:00:00Z"},{"request_id":"same","window":"daily","amount_usd":5,"valid_until":"2026-07-01T00:00:00Z"}]}`,
+		`{"version":1,"exceptions":[{"request_id":"apr","window":"daily","amount_usd":20,"valid_until":"2026-07-01T00:00:00Z"}]}`,
+		`{"version":1,"version":1,"exceptions":[]}`,
+		`{"Version":1,"exceptions":[]}`,
+		`{"version":1,"exceptions":[{"request_id":"apr","window":"daily","amount_usd":1,"amount_usd":5,"valid_until":"2026-07-01T00:00:00Z"}]}`,
+		string([]byte{'{', '"', 'v', 'e', 'r', 's', 'i', 'o', 'n', '"', ':', '1', ',', '"', 'e', 'x', 'c', 'e', 'p', 't', 'i', 'o', 'n', 's', '"', ':', '[', ']', ',', '"', 0xff, '"', ':', '0', '}'}),
+	} {
+		if err := s.SetSetting(budget.KeyExternalPolicyExceptions, raw); err != nil {
+			t.Fatal(err)
+		}
+		if denial, err := (&budget.Guard{S: s}).Check(now, ""); err == nil || denial != nil {
+			t.Fatalf("unsafe schedule did not fail closed: denial=%+v err=%v raw=%s", denial, err, raw)
+		}
 	}
 }
 

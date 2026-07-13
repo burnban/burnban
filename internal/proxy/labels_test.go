@@ -14,6 +14,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/policy"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 )
@@ -65,6 +66,30 @@ func labelTestPost(t *testing.T, base, path string, body []byte, headers http.He
 		t.Fatal(err)
 	}
 	return resp.StatusCode, string(responseBody)
+}
+
+func TestNewRejectsUnsafeUpstreamRouteNames(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "route-names.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = s.Close() })
+
+	for _, name := range []string{"", ".", "..", "-hidden", "_hidden", "has/slash", "has space", strings.Repeat("a", 65)} {
+		t.Run(name, func(t *testing.T) {
+			_, err := New(s, &pricing.Table{}, map[string]Upstream{
+				name: {URL: "https://example.test", Shape: "openai"},
+			})
+			if err == nil {
+				t.Fatalf("New accepted unsafe upstream route name %q", name)
+			}
+		})
+	}
+	if _, err := New(s, &pricing.Table{}, map[string]Upstream{
+		"safe.route_name-1": {URL: "https://example.test", Shape: "openai"},
+	}); err != nil {
+		t.Fatalf("New rejected safe upstream route name: %v", err)
+	}
 }
 
 func TestExplicitIdentityBoundariesRejectBeforeForwarding(t *testing.T) {
@@ -216,6 +241,66 @@ func TestProviderDerivedLabelsAreBoundedAfterFullModelPricing(t *testing.T) {
 	}
 	if persistedLabel(fullModel) == persistedLabel(fullModel+"different") {
 		t.Fatal("different oversized model IDs collapsed to one display label")
+	}
+}
+
+func TestPolicyMatchesCompleteModelInsteadOfTruncatedDisplayLabel(t *testing.T) {
+	model := strings.Repeat("a", maxPersistedLabelBytes+32) + "-blocked-tail"
+	response := []byte(`{"model":"known","usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		model: {InputPerMTok: 1, OutputPerMTok: 1},
+	}}
+	srv, s, hits := labelTestProxy(t, response, prices)
+	document := policy.Document{
+		APIVersion: policy.APIVersion, Kind: policy.Kind,
+		Metadata: policy.Metadata{Name: "long-model", Namespace: "long-model", Revision: 1},
+		Mode:     policy.ModeEnforce,
+		Rules: []policy.Rule{{ID: "deny-tail", Match: policy.Match{
+			Model: policy.AccessList{Deny: []string{"*-blocked-tail"}},
+		}}},
+	}
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := policy.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyPolicyDocument(store.PolicyDocumentRecord{
+		APIVersion: compiled.Document.APIVersion, Name: compiled.Document.Metadata.Name,
+		Namespace: compiled.Document.Metadata.Namespace, Revision: compiled.Document.Metadata.Revision,
+		Digest: compiled.Digest, Source: "local", DocumentJSON: string(compiled.Canonical),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	body, err := json.Marshal(map[string]any{"model": model, "max_tokens": 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, responseBody := labelTestPost(t, srv.URL, "/openai/v1/chat/completions", body, nil)
+	if status != http.StatusForbidden || hits.Load() != 0 {
+		t.Fatalf("long model bypassed deny rule: status=%d hits=%d body=%q", status, hits.Load(), responseBody)
+	}
+}
+
+func TestMalformedOrUnboundedAdmissionMetadataIsRejected(t *testing.T) {
+	response := []byte(`{"model":"known","usage":{"prompt_tokens":1,"completion_tokens":1}}`)
+	prices := &pricing.Table{Models: map[string]pricing.Price{"known": {InputPerMTok: 1, OutputPerMTok: 1}}}
+	srv, _, hits := labelTestProxy(t, response, prices)
+	for name, body := range map[string][]byte{
+		"wrong model type": []byte(`{"model":7,"max_tokens":1}`),
+		"oversized model":  []byte(`{"model":"` + strings.Repeat("x", maxPolicyAdmissionLabelBytes+1) + `","max_tokens":1}`),
+	} {
+		t.Run(name, func(t *testing.T) {
+			status, _ := labelTestPost(t, srv.URL, "/openai/v1/chat/completions", body, nil)
+			if status != http.StatusBadRequest {
+				t.Fatalf("status=%d, want 400", status)
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("invalid admission metadata reached upstream: hits=%d", hits.Load())
 	}
 }
 

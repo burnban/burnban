@@ -25,6 +25,7 @@ import (
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/proxy"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/telemetry"
 	"github.com/burnban/burnban/internal/web"
 )
 
@@ -108,6 +109,12 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	tlsKey := fs.String("tls-key", "", "TLS private key for non-loopback/team mode")
 	allowInsecure := fs.Bool("allow-insecure-http", false, "allow plaintext on a non-loopback bind (only behind a TLS reverse proxy)")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
+	otlpEndpoint := fs.String("otlp-endpoint", os.Getenv("BURNBAN_OTLP_ENDPOINT"), "opt-in OTLP/HTTP base endpoint (or BURNBAN_OTLP_ENDPOINT)")
+	otlpAuthEnv := fs.String("otlp-auth-env", "BURNBAN_OTLP_AUTHORIZATION", "environment variable containing the complete OTLP Authorization header")
+	otlpAllowPrivate := fs.Bool("otlp-allow-private-network", false, "allow a TLS OTLP collector on an RFC 1918/ULA address")
+	otlpBatch := fs.Int("otlp-batch", 128, "maximum prompt-free ledger rows per asynchronous OTLP batch")
+	otlpMaxBacklog := fs.Int64("otlp-max-backlog", 10_000, "maximum pending OTLP ledger rows before oldest rows are recorded as dropped")
+	otlpInterval := fs.Duration("otlp-interval", 2*time.Second, "interval between asynchronous OTLP ledger polls")
 	custom := upstreamFlags{}
 	fs.Var(custom, "upstream", "extra upstream as name=url (repeatable; OpenAI-shaped unless url is prefixed anthropic:/gemini:): groq, mistral, openrouter, ollama, vllm…")
 	fs.Parse(args)
@@ -120,6 +127,18 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	}
 	if *port < 0 || *port > 65535 {
 		return fmt.Errorf("--port must be between 0 and 65535")
+	}
+	var telemetrySink *telemetry.HTTPExporter
+	if *otlpEndpoint != "" {
+		sink, telemetryErr := telemetry.NewHTTPExporter(telemetry.HTTPConfig{
+			Endpoint: *otlpEndpoint, AuthorizationEnv: *otlpAuthEnv,
+			AllowPrivateNetwork: *otlpAllowPrivate, ServiceName: "burnban",
+			ServiceVersion: version,
+		})
+		if telemetryErr != nil {
+			return fmt.Errorf("configure optional OTLP export: %w", telemetryErr)
+		}
+		telemetrySink = sink
 	}
 	var parsedPublic *url.URL
 	if *publicURL != "" {
@@ -172,6 +191,17 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 		return err
 	}
 	defer s.Close()
+	var telemetryWorker *telemetry.Worker
+	if telemetrySink != nil {
+		telemetryWorker, err = telemetry.NewWorker(s, telemetrySink, telemetry.WorkerConfig{
+			BatchSize: *otlpBatch, MaxBacklog: *otlpMaxBacklog,
+			PollInterval: *otlpInterval,
+			Logf:         func(format string, args ...any) { fmt.Fprintf(os.Stderr, format+"\n", args...) },
+		})
+		if err != nil {
+			return fmt.Errorf("configure optional OTLP worker: %w", err)
+		}
+	}
 	lease, err := s.AcquireLease("serve", 15*time.Second)
 	if err != nil {
 		if errors.Is(err, store.ErrLeaseHeld) {
@@ -228,6 +258,10 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	authState := "open (localhost only)"
 	if token != "" {
 		authState = "token required (BURNBAN_TOKEN)"
+	}
+	telemetryState := "off (no outbound telemetry)"
+	if telemetryWorker != nil {
+		telemetryState = "OTLP metadata export enabled (content-free, asynchronous)"
 	}
 
 	capState := capBanner(s)
@@ -311,10 +345,11 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
    db    %s
    cap   %s
    auth  %s
+   otlp  %s
 %s
    watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, banState)
+`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, telemetryState, banState)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())
@@ -344,10 +379,14 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	controlMux.HandleFunc("GET /api/control/status", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
 		w.Header().Set("Content-Type", "application/json")
-		_ = json.NewEncoder(w).Encode(map[string]any{
+		status := map[string]any{
 			"ok": true, "pid": os.Getpid(), "version": version,
 			"started_at": state.StartedAt, "health": p.Health(),
-		})
+		}
+		if telemetryWorker != nil {
+			status["telemetry"] = telemetryWorker.Stats()
+		}
+		_ = json.NewEncoder(w).Encode(status)
 	})
 	controlMux.HandleFunc("POST /api/control/stop", func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Cache-Control", "no-store")
@@ -384,6 +423,16 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	}
 	ctx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
+	if telemetryWorker != nil {
+		telemetryWorker.Start(ctx)
+		defer func() {
+			stopCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			if err := telemetryWorker.Stop(stopCtx); err != nil {
+				fmt.Fprintf(os.Stderr, "burnban: stop optional telemetry worker: %v\n", err)
+			}
+		}()
+	}
 	leaseCtx, cancelLease := context.WithCancel(context.Background())
 	defer cancelLease()
 	leaseLost := make(chan error, 1)
@@ -550,6 +599,10 @@ func capBanner(s *store.Store) string {
 	if fuses, err := budget.FuseStatus(s, time.Now()); err == nil {
 		for _, fuse := range fuses.Rules {
 			parts = append(parts, fmt.Sprintf("$%.2f/rolling %s (%s fuse)", fuse.CapUSD, budget.FormatFuseDuration(fuse.Window), fuse.Name))
+		}
+		if fuses.Fanout != nil {
+			parts = append(parts, fmt.Sprintf("%d requests/rolling %s (fanout fuse)",
+				fuses.Fanout.LimitRequests, budget.FormatFuseDuration(fuses.Fanout.Window)))
 		}
 	}
 	if len(parts) == 0 {

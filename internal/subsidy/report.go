@@ -2,6 +2,7 @@ package subsidy
 
 import (
 	"fmt"
+	"math"
 	"os"
 	"slices"
 	"sort"
@@ -48,11 +49,15 @@ type ProviderUsage struct {
 	Privacy        sourceadapter.Privacy `json:"privacy"`
 	Dir            string                `json:"-"`
 	Detected       bool                  `json:"detected"`
-	// Metered is true when this source is billed per token (a BYO-key agent, or
-	// a subscription CLI running on an API key), so its API-equivalent dollars
-	// are a real bill rather than a subsidy comparison. BillingProvider names
-	// the pay-per-token provider when the source records it (e.g. "openrouter").
-	Metered         bool         `json:"metered"`
+	// Metered is true when all priced usage from this source is billed per
+	// token. MixedBilling is true when the source contains both subscription
+	// and metered events. The per-event buckets always sum to APIUSD.
+	Metered         bool    `json:"metered"`
+	MixedBilling    bool    `json:"mixed_billing,omitempty"`
+	SubscriptionUSD float64 `json:"subscription_usd"`
+	MeteredUSD      float64 `json:"metered_usd"`
+	// BillingProvider names the pay-per-token provider when the source records
+	// it (e.g. "openrouter"), or "multiple" when events name several providers.
 	BillingProvider string       `json:"billing_provider,omitempty"`
 	Error           string       `json:"error,omitempty"`
 	Detail          string       `json:"-"`
@@ -99,6 +104,8 @@ type ReportOptions struct {
 	ClaudeDir   string
 	CodexDir    string
 	GeminiDir   string
+	CopilotDir  string
+	CursorDB    string
 	OpenCodeDB  string
 	HermesDB    string
 	OpenClawDir string
@@ -125,15 +132,20 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 	if opts.Since.IsZero() {
 		opts.Since = opts.Until.Add(-30 * 24 * time.Hour)
 	}
+	if opts.Since.After(opts.Until) {
+		return Report{}, fmt.Errorf("report start must not be after report end")
+	}
 	home, _ := os.UserHomeDir()
 	pathOverrides := map[string]string{
-		"claude-code": opts.ClaudeDir,
-		"codex":       opts.CodexDir,
-		"gemini-cli":  opts.GeminiDir,
-		"opencode":    opts.OpenCodeDB,
-		"hermes":      opts.HermesDB,
-		"openclaw":    opts.OpenClawDir,
-		"goose":       opts.GooseDB,
+		"claude-code":        opts.ClaudeDir,
+		"codex":              opts.CodexDir,
+		"gemini-cli":         opts.GeminiDir,
+		"github-copilot-cli": opts.CopilotDir,
+		"cursor":             opts.CursorDB,
+		"opencode":           opts.OpenCodeDB,
+		"hermes":             opts.HermesDB,
+		"openclaw":           opts.OpenClawDir,
+		"goose":              opts.GooseDB,
 	}
 	for id, path := range opts.SourcePaths {
 		pathOverrides[id] = path
@@ -199,7 +211,11 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 			Provider: src.manifest.ID, AdapterVersion: src.manifest.APIVersion,
 			Privacy: src.manifest.Privacy, Dir: src.dir, Models: []ModelUsage{}, Days: []DayUsage{},
 		}
+		forcedMetered := slices.Contains(opts.MeteredProviders, src.manifest.ID)
 		providerBilling := ""
+		multipleBillingProviders := false
+		hasSubscriptionUsage := false
+		hasMeteredUsage := false
 		if _, err := os.Stat(src.dir); err == nil {
 			provider.Detected = true
 		}
@@ -207,39 +223,26 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 		modelPriced := map[string]bool{}
 		modelPricingSource := map[string]string{}
 		days := map[string]*Totals{}
-		add := func(t *Totals, event Event, usd, serverToolUSD float64) {
-			calls := event.Calls
-			if calls <= 0 {
-				calls = 1
-			}
-			t.Calls += calls
-			t.In += event.In
-			t.Out += event.Out
-			t.CacheRead += event.CacheRead
-			t.CacheWrite5m += event.CacheWrite5m
-			t.CacheWrite1h += event.CacheWrite1h
-			t.CacheWrite += event.CacheWrite5m + event.CacheWrite1h
-			t.APIUSD += usd
-			t.ServerToolUSD += serverToolUSD
-			if event.ServiceTier != "" {
-				if t.ServiceTiers == nil {
-					t.ServiceTiers = map[string]int64{}
-				}
-				t.ServiceTiers[event.ServiceTier] += calls
-			}
-			if event.InferenceGeo != "" {
-				if t.InferenceGeos == nil {
-					t.InferenceGeos = map[string]int64{}
-				}
-				t.InferenceGeos[event.InferenceGeo] += calls
-			}
-			t.ServerToolUse.WebSearchRequests += event.ServerToolUse.WebSearchRequests
-			t.ServerToolUse.WebFetchRequests += event.ServerToolUse.WebFetchRequests
-		}
 		seenEvents := map[string]struct{}{}
+		invalidEvents := false
+		aggregationRejected := false
+		estimatedEvents := false
+		partialEvents := false
 		result, err := src.adapter.Scan(src.dir, opts.Since, opts.ScanLimits, func(event Event) {
-			if event.Time.After(opts.Until) {
+			event = normalizeEvent(event)
+			event.Provider = src.manifest.ID
+			if !event.Time.IsZero() && (event.Time.Before(opts.Since) || event.Time.After(opts.Until)) {
 				return
+			}
+			if validationErr := event.Validate(); validationErr != nil {
+				invalidEvents = true
+				return
+			}
+			switch event.Confidence {
+			case sourceadapter.ConfidenceEstimated:
+				estimatedEvents = true
+			case sourceadapter.ConfidencePartial:
+				partialEvents = true
 			}
 			if event.ID != "" {
 				if _, duplicate := seenEvents[event.ID]; duplicate {
@@ -247,13 +250,9 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 				}
 				seenEvents[event.ID] = struct{}{}
 			}
-			event = normalizeEvent(event)
-			event.Provider = src.manifest.ID
-			if event.BillingProvider != "" {
-				providerBilling = event.BillingProvider
-			}
 			price, priced := priceFor(event.Model)
 			var usd, serverToolUSD float64
+			pricingSource := "unknown"
 			if priced {
 				usd = Cost(price, event.In, event.Out, event.CacheRead, event.CacheWrite5m, event.CacheWrite1h)
 				if event.InferenceGeo == "us" {
@@ -261,42 +260,118 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 				}
 				serverToolUSD = serverToolCost(event.ServerToolUse)
 				usd += serverToolUSD
-				modelPricingSource[event.Model] = "table"
+				pricingSource = "table"
 			} else if event.CostKnown {
 				usd = event.CostUSD
 				priced = true
-				modelPricingSource[event.Model] = "source"
-			} else {
-				calls := event.Calls
-				if calls <= 0 {
-					calls = 1
+				pricingSource = "source"
+			}
+			model := models[event.Model]
+			newModel := model == nil
+			if model == nil {
+				model = &Totals{}
+			}
+			dayKey := event.Time.Local().Format("2006-01-02")
+			day := days[dayKey]
+			newDay := day == nil
+			if day == nil {
+				day = &Totals{}
+			}
+			targets := []*Totals{model, day, &provider.Totals, &report.Totals}
+			for _, target := range targets {
+				if !canAddTotals(target, event, usd, serverToolUSD) {
+					aggregationRejected = true
+					return
 				}
-				report.UnpricedCalls += calls
-				report.UnpricedTokens += event.In + event.Out + event.CacheRead + event.CacheWrite5m + event.CacheWrite1h
-				unpricedModels[event.Model] = struct{}{}
-				if modelPricingSource[event.Model] == "" {
-					modelPricingSource[event.Model] = "unknown"
+			}
+			var nextUnpricedCalls, nextUnpricedTokens int64
+			if !priced {
+				var ok bool
+				nextUnpricedCalls, ok = checkedAddUsage(report.UnpricedCalls, event.Calls)
+				if !ok {
+					aggregationRejected = true
+					return
+				}
+				eventTokens, ok := eventTokenTotal(event)
+				if !ok {
+					aggregationRejected = true
+					return
+				}
+				nextUnpricedTokens, ok = checkedAddUsage(report.UnpricedTokens, eventTokens)
+				if !ok {
+					aggregationRejected = true
+					return
+				}
+			}
+			eventMetered := forcedMetered || event.BillingProvider != ""
+			providerBucket := provider.SubscriptionUSD
+			reportBucket := report.SubscriptionUSD
+			if eventMetered {
+				providerBucket = provider.MeteredUSD
+				reportBucket = report.MeteredUSD
+			}
+			nextProviderBucket, ok := checkedAddUSD(providerBucket, usd)
+			if !ok {
+				aggregationRejected = true
+				return
+			}
+			nextReportBucket, ok := checkedAddUSD(reportBucket, usd)
+			if !ok {
+				aggregationRejected = true
+				return
+			}
+
+			for _, target := range targets {
+				addTotals(target, event, usd, serverToolUSD)
+			}
+			if newModel {
+				models[event.Model] = model
+			}
+			if newDay {
+				days[dayKey] = day
+			}
+			if eventMetered {
+				provider.MeteredUSD = nextProviderBucket
+				report.MeteredUSD = nextReportBucket
+				hasMeteredUsage = true
+			} else {
+				provider.SubscriptionUSD = nextProviderBucket
+				report.SubscriptionUSD = nextReportBucket
+				hasSubscriptionUsage = true
+			}
+			if event.BillingProvider != "" {
+				if providerBilling == "" {
+					providerBilling = event.BillingProvider
+				} else if providerBilling != event.BillingProvider {
+					multipleBillingProviders = true
 				}
 			}
 			if priced {
 				modelPriced[event.Model] = true
+				if pricingSource == "table" || modelPricingSource[event.Model] == "" || modelPricingSource[event.Model] == "unknown" {
+					modelPricingSource[event.Model] = pricingSource
+				}
+			} else if modelPricingSource[event.Model] == "" {
+				modelPricingSource[event.Model] = "unknown"
 			}
-			model := models[event.Model]
-			if model == nil {
-				model = &Totals{}
-				models[event.Model] = model
+			if !priced {
+				report.UnpricedCalls = nextUnpricedCalls
+				report.UnpricedTokens = nextUnpricedTokens
+				unpricedModels[event.Model] = struct{}{}
 			}
-			dayKey := event.Time.Local().Format("2006-01-02")
-			day := days[dayKey]
-			if day == nil {
-				day = &Totals{}
-				days[dayKey] = day
-			}
-			add(model, event, usd, serverToolUSD)
-			add(day, event, usd, serverToolUSD)
-			add(&provider.Totals, event, usd, serverToolUSD)
-			add(&report.Totals, event, usd, serverToolUSD)
 		})
+		if invalidEvents {
+			result.Stats.Warn("one or more invalid adapter events were rejected")
+		}
+		if aggregationRejected {
+			result.Stats.Warn("one or more adapter events exceeded report aggregation limits")
+		}
+		if estimatedEvents {
+			result.Stats.Warn("one or more adapter events contain estimated usage")
+		}
+		if partialEvents {
+			result.Stats.Warn("one or more adapter events contain partial usage")
+		}
 		provider.Sessions = result.Sessions
 		provider.Scan = result.Stats
 		provider.Partial = result.Stats.Partial
@@ -329,12 +404,12 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 		}
 		sort.Slice(provider.Days, func(i, j int) bool { return provider.Days[i].Day < provider.Days[j].Day })
 
-		provider.Metered = providerBilling != "" || slices.Contains(opts.MeteredProviders, src.manifest.ID)
-		provider.BillingProvider = providerBilling
-		if provider.Metered {
-			report.MeteredUSD += provider.APIUSD
+		provider.Metered = hasMeteredUsage && !hasSubscriptionUsage
+		provider.MixedBilling = hasMeteredUsage && hasSubscriptionUsage
+		if multipleBillingProviders {
+			provider.BillingProvider = "multiple"
 		} else {
-			report.SubscriptionUSD += provider.APIUSD
+			provider.BillingProvider = providerBilling
 		}
 		report.Providers = append(report.Providers, provider)
 	}
@@ -347,15 +422,107 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 }
 
 func normalizeEvent(event Event) Event {
-	event.In = max(event.In, 0)
-	event.Out = max(event.Out, 0)
-	event.CacheRead = max(event.CacheRead, 0)
-	event.CacheWrite5m = max(event.CacheWrite5m, 0)
-	event.CacheWrite1h = max(event.CacheWrite1h, 0)
-	event.ServerToolUse.WebSearchRequests = max(event.ServerToolUse.WebSearchRequests, 0)
-	event.ServerToolUse.WebFetchRequests = max(event.ServerToolUse.WebFetchRequests, 0)
-	if event.Confidence == "" {
-		event.Confidence = sourceadapter.ConfidenceExact
+	if event.Calls == 0 {
+		event.Calls = 1
 	}
 	return event
+}
+
+const maxInt64 = int64(^uint64(0) >> 1)
+
+func checkedAddUsage(a, b int64) (int64, bool) {
+	if a < 0 || b < 0 || a > maxInt64-b {
+		return 0, false
+	}
+	return a + b, true
+}
+
+func checkedAddUSD(a, b float64) (float64, bool) {
+	if a < 0 || b < 0 || math.IsNaN(a) || math.IsNaN(b) || math.IsInf(a, 0) || math.IsInf(b, 0) {
+		return 0, false
+	}
+	sum := a + b
+	if math.IsNaN(sum) || math.IsInf(sum, 0) {
+		return 0, false
+	}
+	return sum, true
+}
+
+func eventTokenTotal(event Event) (int64, bool) {
+	total := int64(0)
+	var ok bool
+	for _, value := range []int64{event.In, event.Out, event.CacheRead, event.CacheWrite5m, event.CacheWrite1h} {
+		total, ok = checkedAddUsage(total, value)
+		if !ok {
+			return 0, false
+		}
+	}
+	return total, true
+}
+
+func canAddTotals(t *Totals, event Event, usd, serverToolUSD float64) bool {
+	write, ok := checkedAddUsage(event.CacheWrite5m, event.CacheWrite1h)
+	if !ok {
+		return false
+	}
+	integerPairs := [][2]int64{
+		{t.Calls, event.Calls},
+		{t.In, event.In},
+		{t.Out, event.Out},
+		{t.CacheRead, event.CacheRead},
+		{t.CacheWrite5m, event.CacheWrite5m},
+		{t.CacheWrite1h, event.CacheWrite1h},
+		{t.CacheWrite, write},
+		{t.ServerToolUse.WebSearchRequests, event.ServerToolUse.WebSearchRequests},
+		{t.ServerToolUse.WebFetchRequests, event.ServerToolUse.WebFetchRequests},
+	}
+	for _, pair := range integerPairs {
+		if _, ok := checkedAddUsage(pair[0], pair[1]); !ok {
+			return false
+		}
+	}
+	if event.ServiceTier != "" {
+		if _, ok := checkedAddUsage(t.ServiceTiers[event.ServiceTier], event.Calls); !ok {
+			return false
+		}
+	}
+	if event.InferenceGeo != "" {
+		if _, ok := checkedAddUsage(t.InferenceGeos[event.InferenceGeo], event.Calls); !ok {
+			return false
+		}
+	}
+	if _, ok := checkedAddUSD(t.APIUSD, usd); !ok {
+		return false
+	}
+	if _, ok := checkedAddUSD(t.ServerToolUSD, serverToolUSD); !ok {
+		return false
+	}
+	return true
+}
+
+func addTotals(t *Totals, event Event, usd, serverToolUSD float64) {
+	write := event.CacheWrite5m + event.CacheWrite1h
+	t.Calls += event.Calls
+	t.In += event.In
+	t.Out += event.Out
+	t.CacheRead += event.CacheRead
+	t.CacheWrite5m += event.CacheWrite5m
+	t.CacheWrite1h += event.CacheWrite1h
+	t.CacheWrite += write
+	t.APIUSD += usd
+	t.ServerToolUSD += serverToolUSD
+	if event.ServiceTier != "" {
+		if t.ServiceTiers == nil {
+			t.ServiceTiers = map[string]int64{}
+		}
+		t.ServiceTiers[event.ServiceTier] += event.Calls
+	}
+	if event.InferenceGeo != "" {
+		if t.InferenceGeos == nil {
+			t.InferenceGeos = map[string]int64{}
+		}
+		t.InferenceGeos[event.InferenceGeo] += event.Calls
+	}
+	t.ServerToolUse.WebSearchRequests += event.ServerToolUse.WebSearchRequests
+	t.ServerToolUse.WebFetchRequests += event.ServerToolUse.WebFetchRequests
 }

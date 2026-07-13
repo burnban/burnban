@@ -122,6 +122,12 @@ func TestValidateModelsRejectsUnsafeRates(t *testing.T) {
 		"incomplete long tier": {InputPerMTok: 1, OutputPerMTok: 1, LongContextThreshold: 100, LongInputMult: 2},
 		"free with rate":       {Free: true, InputPerMTok: 1},
 		"partial provenance":   {InputPerMTok: 1, OutputPerMTok: 1, Source: "https://example.test"},
+		"secret source": {InputPerMTok: 1, OutputPerMTok: 1,
+			Source: "https://user:secret@example.test/pricing?signature=secret", EffectiveFrom: "2026-01-01", VerifiedDate: "2026-01-01"},
+		"deceptive source": {InputPerMTok: 1, OutputPerMTok: 1,
+			Source: "https://example.test/pricing/\u202esecret", EffectiveFrom: "2026-01-01", VerifiedDate: "2026-01-01"},
+		"hostless source": {InputPerMTok: 1, OutputPerMTok: 1,
+			Source: "https://:443/pricing", EffectiveFrom: "2026-01-01", VerifiedDate: "2026-01-01"},
 	} {
 		if err := validateModels(map[string]Price{"bad": price}); err == nil {
 			t.Errorf("%s was accepted", name)
@@ -129,6 +135,43 @@ func TestValidateModelsRejectsUnsafeRates(t *testing.T) {
 	}
 	if err := validateModels(map[string]Price{"local": {Free: true}}); err != nil {
 		t.Fatalf("explicit free model rejected: %v", err)
+	}
+	if err := validateModels(map[string]Price{"unsafe\u202e": {Free: true}}); err == nil {
+		t.Fatal("unsafe model label was accepted")
+	}
+}
+
+func TestReadPricingOverrideBoundsAndStableRegularTarget(t *testing.T) {
+	dir := t.TempDir()
+	if _, err := readPricingOverride(dir); err == nil {
+		t.Fatal("directory pricing override was accepted")
+	}
+	path := filepath.Join(dir, "oversized.json")
+	file, err := os.Create(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := file.Truncate(maxPricingOverrideBytes + 1); err != nil {
+		file.Close()
+		t.Fatal(err)
+	}
+	if err := file.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := readPricingOverride(path); err == nil {
+		t.Fatal("oversized pricing override was accepted")
+	}
+
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, []byte(`{"models":{"local":{"free":true}}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "pricing.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if data, err := readPricingOverride(link); err != nil || len(data) == 0 {
+		t.Fatalf("stable regular symlink rejected: bytes=%d err=%v", len(data), err)
 	}
 }
 

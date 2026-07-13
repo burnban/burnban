@@ -1,0 +1,94 @@
+version: 2
+project_name: burnban-linux-packages
+dist: package-dist
+
+before:
+  hooks:
+    - go mod verify
+    - sh scripts/collect_licenses.sh third_party_licenses
+
+builds:
+  - id: burnban-linux
+    binary: burnban
+    env:
+      - CGO_ENABLED=0
+    goos: [linux]
+    goarch: [amd64, arm64]
+    flags:
+      - -trimpath
+      - -buildvcs=false
+    ldflags:
+      - -s -w -X main.version={{ .Version }}
+
+nfpms:
+  - id: linux-packages
+    ids: [burnban-linux]
+    package_name: burnban
+    file_name_template: "burnban_{{ .Version }}_{{ .Arch }}"
+    formats: [deb, rpm]
+    vendor: Burnban
+    homepage: https://burnban.dev
+    maintainer: Burnban Release Engineering <release@burnban.dev>
+    description: Local-first AI agent spend visibility and enforcement
+    license: MIT
+    bindir: /usr/bin
+    section: utils
+    priority: optional
+    mtime: "{{ .CommitDate }}"
+    contents:
+      - src: LICENSE
+        dst: /usr/share/doc/burnban/LICENSE
+      - src: README.md
+        dst: /usr/share/doc/burnban/README.md
+      - src: DATA_AND_PRIVACY.md
+        dst: /usr/share/doc/burnban/DATA_AND_PRIVACY.md
+      - src: SECURITY.md
+        dst: /usr/share/doc/burnban/SECURITY.md
+      - src: SOURCE_ADAPTERS.md
+        dst: /usr/share/doc/burnban/SOURCE_ADAPTERS.md
+      - src: POLICY_ENGINE.md
+        dst: /usr/share/doc/burnban/POLICY_ENGINE.md
+      - src: DOWNSHIFT_ROUTING.md
+        dst: /usr/share/doc/burnban/DOWNSHIFT_ROUTING.md
+      - src: SIGNED_IDENTITY.md
+        dst: /usr/share/doc/burnban/SIGNED_IDENTITY.md
+      - src: RECONCILIATION.md
+        dst: /usr/share/doc/burnban/RECONCILIATION.md
+      - src: TELEMETRY.md
+        dst: /usr/share/doc/burnban/TELEMETRY.md
+      - src: OPTIMIZATION.md
+        dst: /usr/share/doc/burnban/OPTIMIZATION.md
+      - src: LINUX_PACKAGES.md
+        dst: /usr/share/doc/burnban/LINUX_PACKAGES.md
+      - src: THIRD_PARTY_NOTICES.md
+        dst: /usr/share/doc/burnban/THIRD_PARTY_NOTICES.md
+      # Expand files instead of using nFPM's tree type. Tree entries preserve
+      # the generated directory's runtime mtimes and mode (mktemp is 0700),
+      # which makes package bytes nondeterministic and documentation unreadable
+      # to non-root users.
+      - src: third_party_licenses/**/*
+        dst: /usr/share/doc/burnban/third_party_licenses
+    rpm:
+      group: Applications/System
+      compression: gzip
+      signature:
+        # Empty in snapshots; a protected tag job provides this file.
+        key_file: '{{ index .Env "BURNBAN_RELEASE_GPG_KEY_FILE" }}'
+    deb:
+      compression: gzip
+      lintian_overrides:
+        - statically-linked-binary
+      signature:
+        type: origin
+        # Empty in snapshots; a protected tag job provides this file.
+        key_file: '{{ index .Env "BURNBAN_RELEASE_GPG_KEY_FILE" }}'
+
+checksum:
+  name_template: linux-package-checksums.txt
+  algorithm: sha256
+  ids: [linux-packages]
+
+report_sizes: true
+
+changelog:
+  disable: true

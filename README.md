@@ -32,10 +32,10 @@ Release installers verify the archive against published SHA-256 checksums. For a
 
 ## Price the plans you already use
 
-Claude Code, Codex, Gemini CLI, OpenCode, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
+Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose retain local usage metadata. Burnban reads those stores in place, read-only, and prices the input, output, cache-read, and cache-write dimensions each source actually exposes with its dated API table:
 
 ```sh
-burnban subsidy                 # auto-detect all seven sources; last 30 days
+burnban subsidy                 # auto-detect all nine sources; last 30 days
 burnban subsidy --since 7d      # another window
 burnban subsidy --daily --json  # daily detail or machine-readable output
 ```
@@ -44,7 +44,7 @@ The $4,173.49 result is a real machine's last 30 days, not a provider invoice. T
 
 Local readers implement a versioned, metadata-only [source adapter contract](SOURCE_ADAPTERS.md). Each adapter is read-only, offline, resource-bounded, fixture-tested, and declares its privacy behavior. The registry remains compile-time; Burnban never downloads or executes plugins.
 
-Gemini CLI and OpenCode histories do not prove whether the selected traffic was subscription/free-tier usage or billed to an API key. Burnban therefore keeps them in the API-equivalent comparison by default; pass `--metered gemini-cli` or `--metered opencode` only when you know the selected traffic was billed. OpenCode's database path can be overridden with `--opencode-db`.
+Gemini CLI, GitHub Copilot CLI, Cursor, and OpenCode histories do not prove whether the selected traffic was subscription/included usage or separately billed model credentials. Burnban therefore keeps them in the API-equivalent comparison by default; use `--metered` only when you can classify the selected window. Copilot, Cursor, and OpenCode discovery can be overridden with `--copilot-dir`, `--cursor-db`, and `--opencode-db`. Cursor's undocumented composer store exposes per-turn input/output totals but not cache or reasoning decomposition; Burnban requires exact ordered header/message associations, marks its events/report `partial`, and prices all stored input at the full-input rate.
 
 ## Proxy quickstart
 
@@ -82,17 +82,24 @@ Set hard local guardrails:
 burnban cap --daily 10 --weekly 40 --monthly 120
 burnban cap --agent openclaw --daily 3
 burnban cap --warn 80
-burnban fuse --hourly 20 --burst 5m:4 --cooldown 15m
+burnban fuse --hourly 20 --burst 5m:4 --fanout 1m:120 --cooldown 15m
+burnban fuse --baseline 3x --baseline-window 1h --baseline-days 14 --baseline-minimum .25
 burnban ban
 burnban lift --today
 ```
 
-The spend-velocity fuse stops loops and fan-out before they can consume a much
+The deterministic fuse stops loops and fan-out before they can consume a much
 larger daily allowance. `--hourly 20` limits every rolling hour; `--burst 5m:4`
-limits every rolling five minutes. Crossing either threshold—using recorded
-spend plus conservative in-flight request bounds—starts a restart-safe 15-minute
-cooldown. Run `burnban fuse` for the live reason and runway. Use
-`burnban fuse --reset` to recover early or `burnban fuse --off` to remove it.
+limits every rolling five minutes; and `--fanout 1m:120` independently limits
+settled plus in-flight provider requests even when pricing is missing or the
+model is free. `--baseline 3x` compares the current fixed UTC slot with the
+median spend in that same slot over prior days, with an explicit minimum floor
+for new or idle installations. Crossing a threshold—using recorded spend plus
+conservative in-flight request bounds where dollars are involved—starts a
+restart-safe 15-minute cooldown. Run `burnban fuse` for the live reason,
+historical baseline, projected time to a dollar limit, and remaining request
+headroom. Use `burnban fuse --reset` to recover early or `burnban fuse --off`
+to remove every fuse rule.
 
 Burnban serializes admission and reserves conservative request cost against in-flight work. Known models with output-token limits are rejected before forwarding when they cannot fit. Unknown-price traffic and accounting gaps fail closed under an active dollar guardrail; a single unbounded call can still overshoot because its final cost is unknowable in advance. These are strong local guardrails, not a provider-side billing limit.
 
@@ -111,10 +118,10 @@ Which door is yours?
 
 - **Local meter and ledger** — usage accounting and policy state stay on your machine in SQLite.
 - **Keys forwarded, never stored** — provider credentials go only to the upstream you configure and are never persisted.
-- **No Burnban telemetry path** — no account, license check, passive analytics, or code path to a Burnban-operated service exists in the MIT binary.
+- **No Burnban telemetry path** — no account, license check, passive analytics, or code path to a Burnban-operated service exists in the MIT binary. Metadata-only OTLP export exists only when you point it at your own collector.
 - **Self-contained interface** — the dashboard, fonts, and assets are embedded or self-hosted; no CDN or third-party script is loaded.
 
-What it sees: request metadata and provider usage frames needed to meter live traffic, plus token/model/session metadata in supported local agent logs. It does not persist request or response bodies. The only extra outbound request is an optional webhook you explicitly configure; model traffic still goes to the provider or custom upstream you selected. See [data and privacy](DATA_AND_PRIVACY.md) for the exact contract.
+What it sees: request metadata and provider usage frames needed to meter live traffic, plus token/model/session metadata in supported local agent logs. It does not persist request or response bodies. Extra outbound traffic exists only for an optional webhook or metadata-only OTLP collector you explicitly configure; model traffic still goes to the provider or custom upstream you selected. See [data and privacy](DATA_AND_PRIVACY.md) for the exact contract.
 
 ## What you get
 
@@ -122,8 +129,12 @@ What it sees: request metadata and provider usage frames needed to meter live tr
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, last-hour spend, and every budget window. Redirected output is plain text; `--once` prints one snapshot.
 - **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
-- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
-- **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst velocity fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
+- **`burnban reconcile`** — import bounded, immutable provider invoice evidence and compare billed amounts, credits, batch adjustments, unmatched traffic, variance, confidence, and last reconciliation time without rewriting the observed ledger. See [RECONCILIATION.md](RECONCILIATION.md).
+- **OpenTelemetry + warehouse export** — opt-in, content-free OTLP/HTTP traces and GenAI metrics with bounded asynchronous delivery, plus atomic date/hour-partitioned NDJSON batches, SHA-256 manifests, a typed schema, and dbt staging contract. See [TELEMETRY.md](TELEMETRY.md).
+- **Local policy engine v2** — typed/versioned provider, model, route, tier, and geo allow/deny rules; rolling/fixed request and token windows; concurrency and maximum-call-cost bounds; observe/warn/enforce rollout; durable explanations, historical simulation, six workload templates, and metadata-only enforcement/identity/bypass coverage health. See [POLICY_ENGINE.md](POLICY_ENGINE.md).
+- **Explicit budget-aware downshift** — after Policy v2, exact operator-allowlisted equivalent model families can warn and then move compatible bounded requests to a cheaper provider or local Ollama/vLLM route. Dialect, tool schema, modality, context, structured-output, identity, and actual target-price gates fail closed; historical dry-run or an audited force reason is required before activation. See [DOWNSHIFT_ROUTING.md](DOWNSHIFT_ROUTING.md).
+- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model usage confidence and API-equivalent prices.
+- **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst spend, same-slot historical-baseline, and request fan-out fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
 - **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active dollar guardrails fail safe around accounting gaps.
 - **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state.
 
@@ -144,9 +155,12 @@ burnban serve  ──►  anthropic / openai / gemini / xai / any --upstream
 ```
 
 Burnban binds to `127.0.0.1` by default and validates loopback `Host`, `Origin`,
-and browser fetch metadata to resist DNS rebinding. It does not rewrite request
-bodies; it may normalize hop-by-hop transport framing while relaying responses.
-API keys are forwarded to the configured upstream and never persisted.
+and browser fetch metadata to resist DNS rebinding. Ordinary proxy traffic is
+byte-semantic pass-through; the only model rewrite is an explicitly activated,
+compatibility-gated downshift rule, which changes the model selector and records
+the exact choice. Burnban may normalize hop-by-hop transport framing while
+relaying responses. API keys are forwarded unchanged to the configured upstream
+and never persisted or selected from a vault.
 
 The primary metered surfaces are text-generation endpoints using Anthropic,
 OpenAI-compatible, and Gemini usage shapes. Other successful POST endpoints are
@@ -229,6 +243,19 @@ identities are rejected above 128 Unicode characters or 256 UTF-8 bytes rather
 than truncated into a different cap identity. Provider/client-derived display
 labels are sanitized and bounded with a deterministic hash suffix.
 
+Agent/session labels and unsigned team/user/project headers remain cooperative
+attribution. An enrolled Personal or Teams sidecar can instead issue a
+two-minute, one-use `X-Burnban-Identity` proof bound to the exact POST route,
+query, and body. The OSS proxy verifies the device's Ed25519 signature and
+server-authorized principal/service-account/cost-center mapping. Projects are
+authenticated only when named exactly in the server grant; the current
+wildcard grants keep signed project labels explicitly self-reported. The proxy
+strips the proof locally, rejects override attempts, and records field-level
+authenticated versus self-reported/unverified confidence. Provider credentials
+are unchanged. See
+[device-bound signed identity](SIGNED_IDENTITY.md) for issuance, offline
+expiry/revocation, and the same-user compromise boundary.
+
 OpenAI streaming note: send `stream_options: {"include_usage": true}` for exact
 provider counts. Without it Burnban estimates observed text, tool-call arguments,
 reasoning deltas, and request input; truncated/cancelled streams are explicitly
@@ -244,8 +271,8 @@ Cursor — can query local spend in natural language:
 claude mcp add burnban -- burnban mcp
 ```
 
-Read-only is the secure default. It exposes `spend_summary`, `burn_status`, and
-`pricing_diagnostics`; `burn_status` reports calendar budgets, rolling fuse
+Read-only is the secure default. It exposes `spend_summary`, `burn_status`,
+`pricing_diagnostics`, and `policy_status`; `burn_status` reports calendar budgets, rolling fuse
 runway/cooldowns, and a named agent's daily spent/cap/remaining position.
 Everything runs over stdio against the local database—no network and no
 provider keys.
@@ -261,6 +288,22 @@ That opt-in adds strict-argument `set_daily_cap` (daily/weekly/monthly),
 `burn_ban`, and `lift_burn_ban` tools. Prompt content cannot turn a read-only
 MCP process into an administrator, and missing `usd` is rejected rather than
 interpreted as “remove the cap.”
+
+An independently gated tool can ask a Burnban Teams human for temporary runway
+without granting the agent budget authority:
+
+```sh
+export BURNBAN_TEAMS_URL=https://teams.example.com
+export BURNBAN_TEAMS_METER_ID=mtr_...
+export BURNBAN_TEAMS_METER_TOKEN=bbt_...
+claude mcp add burnban-requester -- burnban mcp --allow-budget-requests
+```
+
+`request_budget_exception` is fixed to that enrolled meter and creates only a
+pending, expiring request with a reason and ticket. It cannot approve, deny,
+break glass, or change a local cap. The HTTPS client rejects redirects and
+mismatched receipts; the response always states that human authorization is
+required. This is the only MCP mode that contacts a control plane.
 
 `burn_status` reports spent/cap/**remaining** per calendar and rolling window,
 which turns budgets into something agents can plan around: an agent that can
@@ -301,7 +344,12 @@ Three deployment shapes:
    `burnban subsidy` remains available as a local CLI workflow on that host.
    Agent/session labels are self-asserted by any client holding the shared token:
    they are useful cooperative attribution and cap labels, not authenticated
-   user identity or a tamper-resistant team policy boundary.
+   user identity. Optional Personal/Teams enrollment adds a separate
+   device-bound signed identity envelope; it does not replace this gateway token
+   or the provider key. Enforcing team/user policy requires exact signed
+   attribution; project enforcement additionally requires an exact project in
+   the server grant. Wildcard or omitted projects fail closed, as does a stale
+   short-lived trust grant.
 3. **Docker** — the image runs as an unprivileged UID with `/data` as its
    writable volume. Bind the host side to loopback and put TLS at your ingress:
    `docker build -t burnban . && docker run -e BURNBAN_TOKEN=... -p 127.0.0.1:4141:4141 -v burnban-data:/data burnban serve --host 0.0.0.0 --allow-insecure-http --public-url https://burnban.example.com`.
@@ -316,8 +364,11 @@ And the plumbing your existing stack expects:
   and ban state. Retained-ledger gauges can decrease after an explicit `prune`;
   they are not monotonic counters.
 - **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`), when a cap trips, and for each velocity-fuse incident.
-- **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines. Spreadsheet formulas and terminal controls in provider-controlled labels are neutralized.
-- **Audit trail** — every request row (timestamp, provider route, model, self-asserted agent/session labels, tokens, usage/pricing confidence, cost, status) lives in plain SQLite you can query directly. Request bodies are never stored; duplicate heuristics use a keyed local fingerprint.
+- **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger, including frozen price source/reference/effective dates/confidence, for cost allocation; `--format json` for pipelines. Spreadsheet formulas and terminal controls in provider-controlled labels are neutralized.
+- **Content-free optimization** — `burnban optimize cache` emits metadata-only large-context/cache-reuse receipts, while `burnban optimize allocation` proposes (and never applies) agent, project, authenticated meter, or authenticated team budgets and replays historical blocked-call impact. A narrow immutable external-score API can constrain `whatif` only when the candidate has supplied cohort coverage. See [OPTIMIZATION.md](OPTIMIZATION.md).
+- **Budget-aware routing evidence** — `burnban downshift simulate` replays content-free compatibility receipts before activation; selected/requested routes, models, reasons, config digest, and source/target admission costs flow to finance export and optional telemetry. Burnban never stores an upstream URL, credential, prompt, or tool schema for routing. See [DOWNSHIFT_ROUTING.md](DOWNSHIFT_ROUTING.md).
+- **OTLP/warehouse export** — `burnban serve --otlp-endpoint https://otel.example.com:4318` opts into metadata-only OTLP/HTTP export to your collector; `burnban telemetry export` creates bounded, checksum-manifested NDJSON object batches. Both omit prompt/response/header content. See [TELEMETRY.md](TELEMETRY.md).
+- **Audit trail** — every request row (timestamp, provider route, model, agent/session labels, authenticated or self-reported identity provenance, tokens, usage/pricing confidence, price provenance, cost, status) lives in plain SQLite you can query directly. Imported invoices and reconciliation adjustments are immutable separate tables; request bodies are never stored and duplicate heuristics use a keyed local fingerprint.
 
 ## Pricing table
 
@@ -341,6 +392,13 @@ creating `~/.burnban/pricing.json`:
 {"models": {"grok-4.5": {"input_per_mtok": 2.0, "output_per_mtok": 6.0, "cache_read_mult": 0.1}}}
 ```
 
+The same file supports dated customer contract rates scoped by provider,
+model, region, and service tier. Every request freezes the winning source,
+reference, effective dates, and confidence on its ledger row. Provider final
+cost beats contract pricing, contract pricing beats public list price, and an
+unsupported or expired price remains visibly unknown. Configuration and
+invoice examples are in [RECONCILIATION.md](RECONCILIATION.md).
+
 Overrides are decoded strictly: misspelled fields, trailing JSON, negative or
 non-finite values, and zero paid input/output rates are rejected. A truly free
 model must say `"free": true` explicitly.
@@ -352,6 +410,13 @@ burnban status                         # running PID, URL, DB, start time
 burnban doctor                         # DB write, price freshness, health, recent routing
 burnban stop                           # authenticated local graceful shutdown
 burnban prune --older-than 90d --yes   # explicit, irreversible ledger retention
+burnban policy templates starter > policy.json
+burnban policy simulate --since 7d policy.json
+burnban policy apply policy.json
+burnban policy coverage --since 7d
+burnban downshift simulate --since 30d downshift.json
+burnban downshift apply --since 30d downshift.json
+burnban telemetry export --since 30d --out ./exports
 ```
 
 For supervisors, `burnban status --json` emits a stable health document and
@@ -388,30 +453,33 @@ curl -fsSL https://burnban.sh/install | sh -s -- --uninstall --purge
 On Windows, save `install.ps1`, inspect it, then run
 `./install.ps1 -Uninstall` or `./install.ps1 -Uninstall -Purge`.
 
-See [data and privacy](DATA_AND_PRIVACY.md), [security reporting](SECURITY.md),
-[support](SUPPORT.md), [contributing](CONTRIBUTING.md), and
+See [data and privacy](DATA_AND_PRIVACY.md), [OpenTelemetry and warehouse export](TELEMETRY.md), [device-bound signed identity](SIGNED_IDENTITY.md),
+[security reporting](SECURITY.md), [support](SUPPORT.md), [contributing](CONTRIBUTING.md), and
 [release verification](RELEASING.md) for the full contracts.
 
 ## Free forever vs. paid
 
-Everything in this README — the proxy, dashboard, caps, velocity fuse, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and an optional operator-configured webhook. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
+Everything in this README — the proxy, dashboard, caps, velocity fuse, compatibility-gated downshift, `subsidy`, `whatif`, MCP, exports, and the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and optional operator-configured webhook or OTLP collector. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
 
 Burnban's separately maintained product ladder is:
 
 - **Personal Sync preview** — Burnban's maintained client and hosted coordination service for one person's machines. It is not yet available for purchase; the separate manual-account MVP is being validated before billing and activation are enabled.
 - **[Team](https://burnban.dev#pricing)** — $25/month for 5 users — the centralized control plane and opt-in connector for fleets: org-wide budgets pushed to every meter and still enforced locally, one dashboard across every dev/CI runner/server, per-person/CI/agent attribution, an immutable policy audit log, and chargeback exports.
-- **Enterprise** — SSO/SAML, RBAC, self-hosted (VPC) deployment, SLA and priority support, plus an optional guided 45-day rollout. [Talk to us](https://burnban.dev#pricing).
+- **Enterprise development track** — OIDC, SCIM, granular RBAC, and self-hosted deployment tooling are implemented in the separate Teams repository but are not part of the latest published meter release. SAML remains unshipped pending customer IdP metadata, certificate lifecycle, replay/RelayState validation, and live interoperability testing. SLA, priority support, and a guided rollout require a commercial engagement. [Talk to us](https://burnban.dev#pricing).
 
 The MIT meter only recognizes generic local `external_*` policy settings; it contains no sync endpoint, account, license check, vendor URL, or upload client. Meters keep enforcing their last local policy and serving traffic if a sidecar is unreachable. The seam is deliberately vendor-neutral: anyone may build and self-host their own coordinator against the documented [external-policy contract](EXTERNAL_POLICY.md). The paid products provide maintained coordination, not exclusive access to the meter or its extension point.
 
 ## Roadmap
 
-- **Cache-aware request shaping** — stabilize prompt prefixes to turn cache misses into 90%-off hits
-- **Downshift routing** — send trivial calls to a cheap tier or your local Ollama, by policy (`whatif` already tells you what it would save)
+- **Cache-aware request-shaping evidence** — report metadata-only large-context and low cache-reuse receipts; prefix stability remains unobserved because Burnban does not store prompt content or fingerprints
 - **State of Agent Spend** — opt-in anonymous aggregates, published monthly
 - **Burnban Teams** — the paid fleet control plane above; [early access](https://burnban.dev#teams)
 
 ## Development
+
+The capabilities documented on this branch describe the current development
+tree. The latest published release can lag `main`; verify the selected tag and
+its release notes before treating a source-tree feature as installed.
 
 Prerequisite: Go 1.25.12 or newer. From a source checkout:
 

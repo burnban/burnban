@@ -95,15 +95,52 @@ func TestGeminiFunctionCallWithoutUsageIsEstimated(t *testing.T) {
 
 func TestGeminiCachedSubsetCannotMakeInputNegative(t *testing.T) {
 	u := ParseGeminiJSON([]byte(`{"modelVersion":"gemini-test","usageMetadata":{"promptTokenCount":10,"cachedContentTokenCount":20}}`))
-	if u.In != 0 || u.CacheRead != 20 || !u.Exact {
+	if u.In != 0 || u.CacheRead != 20 || u.Exact || !u.Incomplete {
 		t.Fatalf("gemini normalized usage = %+v", u)
 	}
 }
 
 func TestOpenAIUsageClampsInvalidSubsets(t *testing.T) {
 	u := ParseOpenAIJSON([]byte(`{"model":"gpt-5.6-sol","usage":{"input_tokens":10,"output_tokens":-4,"input_tokens_details":{"cached_tokens":20,"cache_write_tokens":30}}}`))
-	if u.In != 0 || u.Out != 0 || u.CacheRead != 20 || u.CacheWrite != 30 || !u.Found {
+	if u.In != 0 || u.Out != 0 || u.CacheRead != 20 || u.CacheWrite != 30 || !u.Found || u.Exact || !u.Incomplete {
 		t.Fatalf("invalid counts were not safely normalized: %+v", u)
+	}
+}
+
+func TestCompositeUsageOverflowIsSaturatedAndPartial(t *testing.T) {
+	maxInt := `9223372036854775807`
+	tests := []struct {
+		name string
+		use  Usage
+	}{
+		{
+			name: "gemini output composition",
+			use:  ParseGeminiJSON([]byte(`{"modelVersion":"gemini-test","usageMetadata":{"promptTokenCount":1,"candidatesTokenCount":` + maxInt + `,"thoughtsTokenCount":` + maxInt + `}}`)),
+		},
+		{
+			name: "anthropic cache and tools",
+			use:  ParseAnthropicJSON([]byte(`{"model":"claude-test","usage":{"input_tokens":1,"cache_creation":{"ephemeral_5m_input_tokens":` + maxInt + `,"ephemeral_1h_input_tokens":` + maxInt + `},"server_tool_use":{"web_search_requests":` + maxInt + `,"web_fetch_requests":` + maxInt + `}}}`)),
+		},
+		{
+			name: "openai cached subsets",
+			use:  ParseOpenAIJSON([]byte(`{"model":"gpt-test","usage":{"input_tokens":` + maxInt + `,"output_tokens":1,"input_tokens_details":{"cached_tokens":` + maxInt + `,"cache_write_tokens":` + maxInt + `}}}`)),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if !test.use.Found || test.use.Exact || !test.use.Incomplete {
+				t.Fatalf("overflow remained exact: %+v", test.use)
+			}
+			for name, value := range map[string]int64{
+				"in": test.use.In, "out": test.use.Out, "cache_read": test.use.CacheRead,
+				"cache_write": test.use.CacheWrite, "cache_write_1h": test.use.CacheWrite1h,
+				"server_tool_calls": test.use.ServerToolCalls,
+			} {
+				if value < 0 || value > maxUsageTokens {
+					t.Fatalf("%s escaped safe bound: %d (%+v)", name, value, test.use)
+				}
+			}
+		})
 	}
 }
 

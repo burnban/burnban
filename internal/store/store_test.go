@@ -124,6 +124,20 @@ func TestLegacySchemaMigratesAndClassifiesRows(t *testing.T) {
 	if rows[0].BodyHash != "" || sum.DupGroups != 0 {
 		t.Fatalf("legacy unkeyed fingerprint survived privacy migration: row=%+v summary=%+v", rows[0], sum)
 	}
+	if rows[0].Policy != nil || rows[0].PolicyDecisionID != 0 {
+		t.Fatalf("legacy row acquired fabricated policy metadata: %+v", rows[0])
+	}
+	if rows[0].IdentityConfidence != "unverified" || rows[0].IdentityTenant != "" ||
+		rows[0].Principal != "" || rows[0].ServiceAccount != "" || rows[0].Project != "" || rows[0].CostCenter != "" {
+		t.Fatalf("legacy row acquired fabricated authenticated identity: %+v", rows[0])
+	}
+	if rows[0].DownshiftAction != "none" || rows[0].DownshiftRule != "" || rows[0].DownshiftDigest != "" ||
+		rows[0].RequestedProvider != "" || rows[0].RequestedModel != "" {
+		t.Fatalf("legacy row acquired fabricated routing evidence: %+v", rows[0])
+	}
+	if accepted, err := s.ConsumeIdentityNonce("ed25519_migrated", "nonce_migrated", time.Now().Add(time.Minute), time.Now()); err != nil || !accepted {
+		t.Fatalf("identity replay table was not migrated: accepted=%t err=%v", accepted, err)
+	}
 }
 
 func TestUsageStatesProbeAndPrune(t *testing.T) {

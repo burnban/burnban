@@ -138,20 +138,23 @@ func scanOpenCode(path string, since time.Time, limits ScanLimits, emit func(Eve
 }
 
 func openCodeSourceSize(path string) (int, int64, error) {
-	info, err := os.Stat(path)
+	info, err := os.Lstat(path)
 	if err != nil {
 		return 0, 0, err
 	}
-	if info.IsDir() {
-		return 0, 0, fmt.Errorf("expected a database file")
+	if !info.Mode().IsRegular() {
+		return 0, 0, fmt.Errorf("expected a stable regular database file")
 	}
 	files, bytes := 1, info.Size()
 	for _, suffix := range []string{"-wal", "-shm"} {
-		aux, err := os.Stat(path + suffix)
-		if err == nil && !aux.IsDir() {
+		aux, err := os.Lstat(path + suffix)
+		if err == nil && aux.Mode().IsRegular() {
 			files++
 			bytes += aux.Size()
 			continue
+		}
+		if err == nil {
+			return 0, 0, fmt.Errorf("expected stable regular database sidecars")
 		}
 		if err != nil && !os.IsNotExist(err) {
 			return 0, 0, err

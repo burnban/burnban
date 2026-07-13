@@ -2,17 +2,60 @@ package mcp_test
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/burnban/burnban/internal/approvalclient"
 	"github.com/burnban/burnban/internal/budget"
 	"github.com/burnban/burnban/internal/mcp"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 )
+
+type fakeApprovalRequester struct {
+	request approvalclient.Request
+}
+
+func (f *fakeApprovalRequester) Request(_ context.Context, in approvalclient.Request) (approvalclient.Response, error) {
+	f.request = in
+	return approvalclient.Response{
+		ID: "apr_mcp", ScopeType: "meter", ScopeValue: "mtr_ci", Window: in.Window,
+		IncreaseUSD: in.IncreaseUSD, Status: "pending", ValidUntil: "2026-07-12T20:00:00Z",
+	}, nil
+}
+
+func TestBudgetExceptionToolCanRequestButNotApprove(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	requester := &fakeApprovalRequester{}
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"request_budget_exception","arguments":{"window":"daily","increase_usd":7.5,"reason":"finish bounded task","ticket":"OPS-7","expires_minutes":30}}}`,
+	}, "\n") + "\n"
+	var out bytes.Buffer
+	srv := &mcp.Server{S: s, Prices: testPrices(), Version: "test", In: strings.NewReader(in), Out: &out,
+		AllowBudgetRequests: true, ApprovalRequester: requester}
+	if err := srv.Run(); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "request_budget_exception") || strings.Contains(lines[0], "burn_ban") {
+		t.Fatalf("tool list=%s", lines[0])
+	}
+	if !strings.Contains(lines[1], `\"status\": \"pending\"`) || !strings.Contains(lines[1], `\"human_authorization_required\": true`) {
+		t.Fatalf("receipt=%s", lines[1])
+	}
+	if requester.request.Window != "daily" || requester.request.IncreaseUSD != 7.5 || requester.request.ExpiresIn != 30*time.Minute {
+		t.Fatalf("request=%+v", requester.request)
+	}
+}
 
 func TestServerSession(t *testing.T) {
 	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
@@ -65,8 +108,8 @@ func TestServerSession(t *testing.T) {
 	if err := json.Unmarshal([]byte(lines[1]), &tl); err != nil {
 		t.Fatal(err)
 	}
-	if len(tl.Result.Tools) != 6 {
-		t.Fatalf("tools/list returned %d tools, want 6", len(tl.Result.Tools))
+	if len(tl.Result.Tools) != 7 {
+		t.Fatalf("tools/list returned %d tools, want 7", len(tl.Result.Tools))
 	}
 
 	// Caps store at full precision (no 'f',2 truncation that turned
@@ -125,6 +168,9 @@ func TestStrictArgumentsAndAgentRemaining(t *testing.T) {
 	if err := s.SetSetting(budget.KeyFuseBurst, "5m:4"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SetSetting(budget.KeyFuseFanout, "1m:10"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Insert(store.Request{Ts: time.Now(), Agent: "codex", CostUSD: 1.25, Priced: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -152,8 +198,39 @@ func TestStrictArgumentsAndAgentRemaining(t *testing.T) {
 	if !strings.Contains(lines[2], `\"velocity_fuse\"`) || !strings.Contains(lines[2], `\"window\": \"5m\"`) {
 		t.Fatalf("velocity fuse missing: %s", lines[2])
 	}
+	if !strings.Contains(lines[2], `\"fanout\"`) || !strings.Contains(lines[2], `\"limit_requests\": 10`) {
+		t.Fatalf("fanout fuse missing: %s", lines[2])
+	}
 	if !strings.Contains(lines[3], "duplicate JSON field") {
 		t.Fatalf("duplicate mutation argument accepted: %s", lines[3])
+	}
+}
+
+func TestAgentSelectorsAreBoundedBeforeSettingsLookupOrMutation(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "t.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	in := strings.Join([]string{
+		`{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"burn_status","arguments":{"agent":"bad\u202ename"}}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"set_daily_cap","arguments":{"usd":5,"agent":"` + strings.Repeat("a", 129) + `"}}}`,
+	}, "\n") + "\n"
+	var out bytes.Buffer
+	srv := &mcp.Server{S: s, Prices: testPrices(), Version: "test", In: strings.NewReader(in), Out: &out, AllowBudgetAdmin: true}
+	if err := srv.Run(); err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimSpace(out.String()), "\n")
+	if len(lines) != 2 || !strings.Contains(lines[0], "unsafe character") || !strings.Contains(lines[1], "128 characters") {
+		t.Fatalf("unsafe agent selectors were not rejected: %s", out.String())
+	}
+	settings, err := s.GetSettings(budget.KeyAgentCapPrefix+strings.Repeat("a", 129), budget.KeyDailyCapUSD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(settings) != 0 {
+		t.Fatalf("rejected agent selector mutated settings: %+v", settings)
 	}
 }
 

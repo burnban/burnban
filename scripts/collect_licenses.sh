@@ -25,9 +25,12 @@ mkdir -p "$PARENT"
 BUILD=$(mktemp -d "$PARENT/.burnban-licenses.XXXXXX")
 trap 'rm -rf "$BUILD"' EXIT HUP INT TERM
 
-go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}' . |
-  sed '/^$/d' | sort -u |
-  while IFS= read -r module; do
+RAW_MODULES="$BUILD/.resolved-modules-raw"
+MODULES="$BUILD/.resolved-modules"
+go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}' . >"$RAW_MODULES"
+sed '/^$/d' "$RAW_MODULES" >"$BUILD/.resolved-modules-filtered"
+sort -u "$BUILD/.resolved-modules-filtered" >"$MODULES"
+while IFS= read -r module; do
     case "$module" in
       /*|*../*|*/..|..) echo "collect_licenses.sh: unsafe module path: $module" >&2; exit 1 ;;
     esac
@@ -44,7 +47,8 @@ go list -deps -f '{{with .Module}}{{if not .Main}}{{.Path}}{{end}}{{end}}' . |
       echo "collect_licenses.sh: no license file found for $module" >&2
       exit 1
     fi
-  done
+done <"$MODULES"
+rm -f "$RAW_MODULES" "$BUILD/.resolved-modules-filtered" "$MODULES"
 
 mkdir -p "$BUILD/github.com/burnban/burnban"
 cp LICENSE "$BUILD/github.com/burnban/burnban/LICENSE"

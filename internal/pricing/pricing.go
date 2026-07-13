@@ -15,10 +15,14 @@ import (
 	"sort"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 //go:embed models.json
 var embedded []byte
+
+const maxPricingOverrideBytes = 1 << 20
 
 // Price is what a model costs per million tokens. Cache and long-context
 // multipliers are applied to the base input/output rates.
@@ -53,8 +57,9 @@ type Metadata struct {
 }
 
 type Table struct {
-	Metadata Metadata         `json:"metadata,omitempty"`
-	Models   map[string]Price `json:"models"`
+	Metadata  Metadata         `json:"metadata,omitempty"`
+	Models    map[string]Price `json:"models,omitempty"`
+	Contracts []ContractPrice  `json:"contracts,omitempty"`
 
 	overrideModels []string
 }
@@ -88,7 +93,8 @@ func Load() (*Table, error) {
 	if err != nil {
 		return &t, nil
 	}
-	b, err := os.ReadFile(filepath.Join(home, ".burnban", "pricing.json"))
+	overridePath := filepath.Join(home, ".burnban", "pricing.json")
+	b, err := readPricingOverride(overridePath)
 	if os.IsNotExist(err) {
 		return &t, nil
 	}
@@ -99,13 +105,18 @@ func Load() (*Table, error) {
 	if err := decodeStrict(b, &overlay); err != nil {
 		return nil, fmt.Errorf("~/.burnban/pricing.json: %w", err)
 	}
-	if len(overlay.Models) == 0 {
-		return nil, fmt.Errorf("~/.burnban/pricing.json: models must contain at least one override")
+	if len(overlay.Models) == 0 && len(overlay.Contracts) == 0 {
+		return nil, fmt.Errorf("~/.burnban/pricing.json: models or contracts must contain at least one override")
 	}
 	if err := validateMetadata(overlay.Metadata, false); err != nil {
 		return nil, fmt.Errorf("~/.burnban/pricing.json: %w", err)
 	}
 	if err := validateModels(overlay.Models); err != nil {
+		if len(overlay.Models) != 0 {
+			return nil, fmt.Errorf("~/.burnban/pricing.json: %w", err)
+		}
+	}
+	if err := validateContracts(overlay.Contracts); err != nil {
 		return nil, fmt.Errorf("~/.burnban/pricing.json: %w", err)
 	}
 	for k, v := range overlay.Models {
@@ -113,7 +124,47 @@ func Load() (*Table, error) {
 		t.overrideModels = append(t.overrideModels, k)
 	}
 	sort.Strings(t.overrideModels)
+	t.Contracts = append(t.Contracts, overlay.Contracts...)
 	return &t, nil
+}
+
+// readPricingOverride bounds startup memory and refuses devices, pipes, and a
+// path that changes while it is read. Symlinks to a stable regular file remain
+// supported for dotfile managers, but the opened target must match both path
+// observations.
+func readPricingOverride(path string) ([]byte, error) {
+	before, err := os.Stat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !before.Mode().IsRegular() {
+		return nil, fmt.Errorf("pricing override must resolve to a regular file")
+	}
+	if before.Size() < 0 || before.Size() > maxPricingOverrideBytes {
+		return nil, fmt.Errorf("pricing override exceeds %d bytes", maxPricingOverrideBytes)
+	}
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer file.Close()
+	opened, err := file.Stat()
+	if err != nil || !opened.Mode().IsRegular() || !os.SameFile(before, opened) {
+		return nil, fmt.Errorf("pricing override changed while opening")
+	}
+	data, err := io.ReadAll(io.LimitReader(file, maxPricingOverrideBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	after, statErr := file.Stat()
+	pathAfter, pathErr := os.Stat(path)
+	if len(data) > maxPricingOverrideBytes || statErr != nil || pathErr != nil ||
+		!after.Mode().IsRegular() || !pathAfter.Mode().IsRegular() ||
+		!os.SameFile(opened, after) || !os.SameFile(after, pathAfter) ||
+		after.Size() != opened.Size() || !after.ModTime().Equal(opened.ModTime()) || int64(len(data)) != after.Size() {
+		return nil, fmt.Errorf("pricing override changed while reading or exceeds %d bytes", maxPricingOverrideBytes)
+	}
+	return data, nil
 }
 
 func decodeStrict(data []byte, dst any) error {
@@ -191,6 +242,12 @@ func validateMetadata(m Metadata, required bool) error {
 	if m.Version == "" || m.EffectiveDate == "" || m.VerifiedDate == "" || len(m.Sources) == 0 {
 		return fmt.Errorf("metadata requires version, effective_date, verified_date, and sources")
 	}
+	if err := validatePricingLabel("metadata version", m.Version, 128); err != nil {
+		return err
+	}
+	if len(m.Sources) > 256 {
+		return fmt.Errorf("metadata sources exceeds the maximum of 256")
+	}
 	if err := validateDate("metadata effective_date", m.EffectiveDate); err != nil {
 		return err
 	}
@@ -201,8 +258,8 @@ func validateMetadata(m Metadata, required bool) error {
 		return fmt.Errorf("metadata verified_date must not precede effective_date")
 	}
 	for i, source := range m.Sources {
-		if strings.TrimSpace(source.Provider) == "" {
-			return fmt.Errorf("metadata source %d requires provider", i)
+		if err := validatePricingLabel(fmt.Sprintf("metadata source %d provider", i), source.Provider, 128); err != nil {
+			return err
 		}
 		if err := validateSourceURL(source.URL); err != nil {
 			return fmt.Errorf("metadata source %q: %w", source.Provider, err)
@@ -219,8 +276,8 @@ func validateModels(models map[string]Price) error {
 		return fmt.Errorf("models must not be empty")
 	}
 	for name, p := range models {
-		if strings.TrimSpace(name) == "" {
-			return fmt.Errorf("model name must not be empty")
+		if err := validatePricingLabel("model name", name, 256); err != nil {
+			return err
 		}
 		values := map[string]float64{
 			"input_per_mtok": p.InputPerMTok, "output_per_mtok": p.OutputPerMTok,
@@ -282,9 +339,34 @@ func validateDate(field, value string) error {
 }
 
 func validateSourceURL(raw string) error {
+	if len(raw) == 0 || len(raw) > 2048 || !utf8.ValidString(raw) {
+		return fmt.Errorf("must be a bounded http or https URL")
+	}
+	for _, r := range raw {
+		// Provenance is copied to durable receipts and operator-facing exports.
+		// Require a visible ASCII URL; internationalized hosts and paths can use
+		// their standard punycode/percent-encoded wire forms without carrying
+		// terminal controls or bidi/invisible formatting into those surfaces.
+		if r < 0x21 || r > 0x7e {
+			return fmt.Errorf("must contain only visible ASCII")
+		}
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" {
-		return fmt.Errorf("must be an http or https URL with a host")
+	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.RawQuery != "" || u.Fragment != "" {
+		return fmt.Errorf("must be an http or https URL with a host and no credentials, query, or fragment")
+	}
+	return nil
+}
+
+func validatePricingLabel(field, value string, maxBytes int) error {
+	if value == "" || len(value) > maxBytes || !utf8.ValidString(value) || strings.TrimSpace(value) != value {
+		return fmt.Errorf("%s must be trimmed valid UTF-8 of at most %d bytes", field, maxBytes)
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Co, unicode.Cs) {
+			return fmt.Errorf("%s contains an unsafe Unicode character", field)
+		}
 	}
 	return nil
 }
@@ -320,19 +402,8 @@ func (t *Table) Diagnostics() Diagnostics {
 // gemini-2.5-flash rates. Unknown models return false; burnban records
 // them as unpriced rather than guessing.
 func (t *Table) Lookup(model string) (Price, bool) {
-	if p, ok := t.Models[model]; ok {
-		return p, true
-	}
-	best := ""
-	for k := range t.Models {
-		if strings.HasPrefix(model, k) && versionSuffix(model[len(k):]) && len(k) > len(best) {
-			best = k
-		}
-	}
-	if best == "" {
-		return Price{}, false
-	}
-	return t.Models[best], true
+	p, _, ok := t.lookupWithKey(model)
+	return p, ok
 }
 
 // versionSuffix reports whether s looks like a version/date tag rather

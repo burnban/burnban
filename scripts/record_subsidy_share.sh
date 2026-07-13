@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+root=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 cast=${1:-"$root/docs/subsidy-share.cast"}
 gif=${2:-"$root/docs/subsidy-share.gif"}
 tmp=$(mktemp -d "${TMPDIR:-/tmp}/burnban-share-recording.XXXXXX")

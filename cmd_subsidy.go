@@ -27,6 +27,8 @@ func cmdSubsidy(args []string) error {
 	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude", "projects"), "Claude Code session logs")
 	codexDir := fs.String("codex-dir", filepath.Join(home, ".codex", "sessions"), "Codex rollout logs")
 	geminiDir := fs.String("gemini-dir", subsidy.DefaultGeminiDir(home), "Gemini CLI project chat logs")
+	copilotDir := fs.String("copilot-dir", subsidy.DefaultCopilotDir(home), "GitHub Copilot CLI session event logs")
+	cursorDB := fs.String("cursor-db", subsidy.DefaultCursorDB(home), "Cursor global composer metadata database")
 	openCodeDB := fs.String("opencode-db", subsidy.DefaultOpenCodeDB(home), "OpenCode usage database")
 	hermesDB := fs.String("hermes-db", defaultHermesDB(home), "Hermes state database")
 	openClawDir := fs.String("openclaw-dir", defaultOpenClawDir(home), "OpenClaw state directory")
@@ -35,7 +37,7 @@ func cmdSubsidy(args []string) error {
 	daily := fs.Bool("daily", false, "per-day breakdown")
 	share := fs.Bool("share", false, "compact screenshot-ready card (defaults to a $200/mo plan comparison)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
-	meteredArg := fs.String("metered", "", "comma-separated sources known to be billed per token (e.g. claude-code,codex,gemini-cli,opencode); auto-detected where auth proves it")
+	meteredArg := fs.String("metered", "", "comma-separated sources known to be billed per token (e.g. claude-code,codex,gemini-cli,github-copilot-cli,cursor,opencode); auto-detected where auth proves it")
 	noAutoMetered := fs.Bool("no-auto-metered", false, "do not auto-classify sources as metered from current API-key auth state")
 	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
 	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
@@ -71,8 +73,8 @@ func cmdSubsidy(args []string) error {
 	until := time.Now()
 	report, err := subsidy.BuildReport(prices, subsidy.ReportOptions{
 		Since: from, Until: until,
-		ClaudeDir: *claudeDir, CodexDir: *codexDir, GeminiDir: *geminiDir,
-		OpenCodeDB: *openCodeDB, HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
+		ClaudeDir: *claudeDir, CodexDir: *codexDir, GeminiDir: *geminiDir, CopilotDir: *copilotDir,
+		CursorDB: *cursorDB, OpenCodeDB: *openCodeDB, HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
 		MeteredProviders: metered,
 		ScanLimits: subsidy.ScanLimits{
 			MaxFiles: *maxFiles, MaxBytes: *maxScanMB << 20, MaxLineBytes: *maxLineMB << 20,
@@ -130,7 +132,9 @@ func cmdSubsidy(args []string) error {
 			continue
 		}
 		tag := "subscription · API-equivalent"
-		if provider.Metered {
+		if provider.MixedBilling {
+			tag = fmt.Sprintf("MIXED · $%.2f subscription + $%.2f billed", provider.SubscriptionUSD, provider.MeteredUSD)
+		} else if provider.Metered {
 			tag = "REAL API SPEND · billed"
 			if provider.BillingProvider != "" {
 				tag = "REAL API SPEND · billed via " + provider.BillingProvider
@@ -219,12 +223,12 @@ func cmdSubsidy(args []string) error {
 		}
 		for _, provider := range report.Providers {
 			providerPlans := plans[provider.Provider]
-			// Metered sources are a real bill, not a plan subsidy; comparing them
-			// to a subscription price would be meaningless.
-			if provider.Metered || provider.APIUSD <= 0 || len(providerPlans) == 0 {
+			// Compare only the subscription portion. A mixed provider can contain
+			// separately billed events that must not inflate the plan subsidy.
+			if provider.Metered || provider.SubscriptionUSD <= 0 || len(providerPlans) == 0 {
 				continue
 			}
-			pace := provider.APIUSD / windowDays * 30
+			pace := provider.SubscriptionUSD / windowDays * 30
 			var shown []plan
 			for _, item := range providerPlans {
 				if pace/item.usd <= plausibleSubsidy {
@@ -371,6 +375,10 @@ func subsidyTitle(provider string) string {
 		return "CODEX"
 	case "gemini-cli":
 		return "GEMINI CLI"
+	case "github-copilot-cli":
+		return "GITHUB COPILOT CLI"
+	case "cursor":
+		return "CURSOR"
 	case "opencode":
 		return "OPENCODE"
 	case "hermes":

@@ -1,0 +1,9 @@
+version: 2
+
+sources:
+  - name: burnban_raw
+    schema: "{{ var('burnban_raw_schema', 'burnban_raw') }}"
+    tables:
+      - name: requests
+        identifier: "{{ var('burnban_raw_table', 'requests') }}"
+        description: Verified, typed burnban.telemetry.v1 NDJSON rows.

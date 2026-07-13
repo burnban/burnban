@@ -146,10 +146,11 @@ func scanClaude(dir string, since time.Time, limits ScanLimits, emit func(Event)
 			w5m, w1h := cacheWriteSplit(u.CacheCreation, u.CacheDetail.Ephemeral5m, u.CacheDetail.Ephemeral1h)
 			contributed = true
 			emit(Event{
-				Provider: "claude-code", Model: v.Message.Model, Time: ts,
+				Provider: "claude-code", Model: v.Message.Model, Time: ts, Calls: 1,
 				In: u.InputTokens, Out: u.OutputTokens, CacheRead: u.CacheRead,
 				CacheWrite5m: w5m, CacheWrite1h: w1h,
 				ServiceTier: u.ServiceTier, InferenceGeo: u.InferenceGeo, ServerToolUse: u.ServerToolUse,
+				Confidence: sourceadapter.ConfidenceExact,
 			})
 		})
 		if contributed {
@@ -252,8 +253,9 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 				}
 				contributed = true
 				emit(Event{
-					Provider: "codex", Model: model, Time: ts,
+					Provider: "codex", Model: model, Time: ts, Calls: 1,
 					In: in, Out: d.Output, CacheRead: d.Cached,
+					Confidence: sourceadapter.ConfidenceExact,
 				})
 			}
 		})
@@ -266,6 +268,7 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 }
 
 var errScanLimit = errors.New("scan limit reached")
+var errNonRegularLog = errors.New("log file is not a stable regular file")
 
 type fileScanner struct {
 	limits   ScanLimits
@@ -310,10 +313,20 @@ func (s *fileScanner) walkJSONLMatching(dir string, since time.Time, accept func
 		if accept != nil && !accept(path) {
 			return nil
 		}
+		if d.Type()&fs.ModeType != 0 {
+			s.stats.FilesSkipped++
+			s.stats.Warn("one or more non-regular log files were skipped")
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			s.stats.FilesSkipped++
 			s.stats.Warn("one or more log files could not be inspected")
+			return nil
+		}
+		if !info.Mode().IsRegular() {
+			s.stats.FilesSkipped++
+			s.stats.Warn("one or more non-regular log files were skipped")
 			return nil
 		}
 		if info.ModTime().Before(since) {
@@ -356,11 +369,25 @@ func (r *countingReader) Read(p []byte) (int, error) {
 }
 
 func (s *fileScanner) eachLine(path string, fn func(line []byte)) error {
+	before, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if !before.Mode().IsRegular() {
+		return errNonRegularLog
+	}
 	f, err := os.Open(path)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	after, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	if !after.Mode().IsRegular() || !os.SameFile(before, after) {
+		return errNonRegularLog
+	}
 	reader := &countingReader{r: f}
 	remaining := s.limits.MaxBytes - s.stats.BytesScanned
 	if remaining <= 0 {

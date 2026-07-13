@@ -20,13 +20,22 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+      - uses: zgosalvez/github-actions-ensure-sha-pinned-actions@9e9574ef04ea69da568d6249bd69539ccc704e74 # v4.0.0
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
       - name: Source and tag preflight
         shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
-          test "$(git cat-file -t "$GITHUB_REF_NAME")" = tag
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          test "$(git cat-file -t "$tag_ref")" = tag
+          test "$(git rev-parse "$tag_ref^{commit}")" = "$(git rev-parse HEAD)"
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          git show-ref --verify --quiet "$default_ref"
+          git merge-base --is-ancestor HEAD "$default_ref"
           mapfile -t gofiles < <(git ls-files '*.go')
           test -z "$(gofmt -l "${gofiles[@]}")"
           go mod tidy -diff
@@ -73,6 +82,13 @@ jobs:
               grep -Eq '(^|/)LICENSE$' "$archive_listing"
               grep -Eq '(^|/)DATA_AND_PRIVACY.md$' "$archive_listing"
               grep -Eq '(^|/)EXTERNAL_POLICY.md$' "$archive_listing"
+              grep -Eq '(^|/)SOURCE_ADAPTERS.md$' "$archive_listing"
+              grep -Eq '(^|/)POLICY_ENGINE.md$' "$archive_listing"
+              grep -Eq '(^|/)DOWNSHIFT_ROUTING.md$' "$archive_listing"
+              grep -Eq '(^|/)SIGNED_IDENTITY.md$' "$archive_listing"
+              grep -Eq '(^|/)RECONCILIATION.md$' "$archive_listing"
+              grep -Eq '(^|/)TELEMETRY.md$' "$archive_listing"
+              grep -Eq '(^|/)OPTIMIZATION.md$' "$archive_listing"
               grep -Eq '(^|/)SECURITY.md$' "$archive_listing"
               grep -Eq '(^|/)THIRD_PARTY_NOTICES.md$' "$archive_listing"
               grep -Eq '(^|/)docs/dashboard.png$' "$archive_listing"
@@ -96,6 +112,107 @@ jobs:
             dist/burnban_*.zip
             dist/checksums.txt
             dist/*.sbom.spdx.json
+
+  signed-linux-packages:
+    if: github.repository == 'burnban/burnban'
+    needs: preflight
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    environment: release
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: zgosalvez/github-actions-ensure-sha-pinned-actions@9e9574ef04ea69da568d6249bd69539ccc704e74 # v4.0.0
+      - name: Revalidate canonical signed source
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          test "$(git cat-file -t "$tag_ref")" = tag
+          test "$(git rev-parse "$tag_ref^{commit}")" = "$(git rev-parse HEAD)"
+          default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
+          git show-ref --verify --quiet "$default_ref"
+          git merge-base --is-ancestor HEAD "$default_ref"
+      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+        with:
+          go-version-file: go.mod
+      - name: Install repository tooling
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --no-install-recommends -y apt-utils createrepo-c dpkg-dev rpm
+      - name: Materialize and validate protected signing identity
+        id: signing
+        shell: bash
+        env:
+          PRIVATE_KEY_B64: ${{ secrets.BURNBAN_RELEASE_GPG_PRIVATE_KEY_B64 }}
+          EXPECTED_FINGERPRINT: ${{ secrets.BURNBAN_RELEASE_GPG_FINGERPRINT }}
+        run: |
+          set -euo pipefail
+          test -n "$PRIVATE_KEY_B64"
+          fingerprint=${EXPECTED_FINGERPRINT//[[:space:]]/}
+          fingerprint=${fingerprint^^}
+          [[ "$fingerprint" =~ ^[0-9A-F]{40,64}$ ]]
+          key_file="$RUNNER_TEMP/burnban-release-private-key.asc"
+          umask 077
+          printf '%s' "$PRIVATE_KEY_B64" | base64 --decode >"$key_file"
+          actual=$(gpg --batch --show-keys --with-colons "$key_file" | awk -F: '$1=="fpr" {print toupper($10); exit}')
+          test "$actual" = "$fingerprint"
+          echo "key_file=$key_file" >>"$GITHUB_OUTPUT"
+          echo "fingerprint=$fingerprint" >>"$GITHUB_OUTPUT"
+      - name: Build signed deb and rpm packages
+        uses: goreleaser/goreleaser-action@f06c13b6b1a9625abc9e6e439d9c05a8f2190e94 # v7.2.3
+        with:
+          distribution: goreleaser
+          version: v2.17.0
+          args: release --skip=publish --clean --config .goreleaser-packages.yaml
+        env:
+          BURNBAN_RELEASE_GPG_KEY_FILE: ${{ steps.signing.outputs.key_file }}
+          NFPM_PASSPHRASE: ${{ secrets.BURNBAN_RELEASE_GPG_PASSPHRASE }}
+      - name: Verify package signatures and build signed repositories
+        shell: bash
+        env:
+          BURNBAN_RELEASE_GPG_KEY_FILE: ${{ steps.signing.outputs.key_file }}
+          BURNBAN_RELEASE_GPG_FINGERPRINT: ${{ steps.signing.outputs.fingerprint }}
+          BURNBAN_RELEASE_GPG_PASSPHRASE: ${{ secrets.BURNBAN_RELEASE_GPG_PASSPHRASE }}
+          BURNBAN_RELEASE_VERSION: ${{ github.ref_name }}
+        run: |
+          set -euo pipefail
+          export SOURCE_DATE_EPOCH
+          SOURCE_DATE_EPOCH=$(git show -s --format=%ct "$GITHUB_SHA")
+          (cd package-dist && sha256sum --check linux-package-checksums.txt)
+          scripts/build_signed_linux_repositories.sh \
+            package-dist package-dist/repositories package-dist/burnban-linux-repositories.tar.gz
+          rm -rf package-dist/repositories
+          (
+            cd package-dist
+            sha256sum burnban_*.deb burnban_*.rpm \
+              burnban-linux-repositories.tar.gz burnban-release-signing-key.asc \
+              | LC_ALL=C sort -k2,2 >signed-linux-checksums.txt
+            sha256sum --check signed-linux-checksums.txt
+          )
+      - name: Upload exact signed package bytes
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: signed-linux-packages
+          retention-days: 5
+          if-no-files-found: error
+          path: |
+            package-dist/burnban_*.deb
+            package-dist/burnban_*.rpm
+            package-dist/burnban-linux-repositories.tar.gz
+            package-dist/burnban-release-signing-key.asc
+            package-dist/signed-linux-checksums.txt
+      - name: Remove private key material
+        if: always()
+        shell: bash
+        run: rm -f -- "$RUNNER_TEMP/burnban-release-private-key.asc"
 
   installer:
     needs: preflight
@@ -249,7 +366,7 @@ jobs:
     # Tags are mirrored to private backup repositories, but only the canonical
     # public repository may create releases or provenance attestations.
     if: github.repository == 'burnban/burnban'
-    needs: [installer, container, browser-accessibility]
+    needs: [installer, container, browser-accessibility, signed-linux-packages]
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: release
@@ -267,9 +384,30 @@ jobs:
         with:
           name: release-candidate
           path: dist
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: signed-linux-packages
+          path: signed-linux
       - name: Verify carried candidate before attestation
         shell: bash
         run: (cd dist && sha256sum --check checksums.txt)
+      - name: Merge verified signed packages into the exact candidate
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd signed-linux && sha256sum --check signed-linux-checksums.txt)
+          while read -r expected filename; do
+            [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+            case "$filename" in
+              ""|*/*|*..*) echo "unsafe signed asset name: $filename" >&2; exit 1 ;;
+            esac
+            test -f "signed-linux/$filename"
+            test ! -e "dist/$filename"
+            cp "signed-linux/$filename" "dist/$filename"
+            printf '%s  %s\n' "$expected" "$filename" >>dist/checksums.txt
+          done <signed-linux/signed-linux-checksums.txt
+          LC_ALL=C sort -k2,2 -o dist/checksums.txt dist/checksums.txt
+          (cd dist && sha256sum --check checksums.txt)
       - name: Attest release artifacts
         uses: actions/attest@a1948c3f048ba23858d222213b7c278aabede763 # v4.1.1
         with:

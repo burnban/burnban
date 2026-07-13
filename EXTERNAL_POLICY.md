@@ -23,6 +23,19 @@ in_tokens, out_tokens, cache_read_tokens, cache_write_tokens, cache_write_1h_tok
 cost_usd, enforcement_unsafe
 ```
 
+Identity-aware meters also expose optional content-free attribution columns:
+
+```text
+identity_tenant, identity_device, principal, service_account
+project, cost_center, identity_confidence
+```
+
+Feature-detect those columns for compatibility with older ledgers. Confidence
+is `authenticated`, `self_reported`, or `unverified`; never infer authentication
+from a nonempty label alone. Principal and project values can identify people
+or customer work, so aggregate or omit them before upload unless the operator
+has explicitly chosen that fleet data contract.
+
 `id` is the monotonically increasing cursor within one ledger. Persist the last
 remote acknowledgement outside request history, read `(ack, to]` in bounded
 batches, and fail safely if `MAX(id)` falls below an acknowledged cursor. Group
@@ -49,6 +62,7 @@ Sidecars may write only these rows in `settings`:
 | `external_policy_version` | Monotonic policy/state revision |
 | `external_policy_source` | Unique owner chosen by the sidecar |
 | `external_policy_updated_at` | RFC 3339 computation timestamp |
+| `external_policy_exceptions_v1` | Optional bounded JSON schedule for temporary increases already included in the absolute caps |
 
 Caps are finite, positive USD values and are **absolute local caps**, not
 remaining balances. Missing or zero means “unset,” so delete an uncapped key and
@@ -57,10 +71,35 @@ $18 and may spend $2 more, write `20`, not `2`. Burnban enforces the stricter of
 the user's local cap and the external cap. A local one-day override never
 bypasses external policy.
 
-Only the cap and ban keys affect admission. Version, source, and timestamp are
-cooperative metadata for sidecar ownership and rollback protection; the meter
-stores but does not authenticate a remote controller. External policy has no
-TTL and remains enforced until its owner replaces or explicitly clears it.
+The base cap and ban have no TTL and remain enforced until their owner replaces
+or explicitly clears them. A temporary increase can expire locally without a
+sync. Write a version-1 envelope containing at most 1,000 unique request IDs:
+
+```json
+{"version":1,"exceptions":[{"request_id":"apr_...","window":"daily","amount_usd":5,"valid_until":"2026-07-12T23:00:00Z"}]}
+```
+
+The corresponding `external_cap_*` value must already include every listed
+increase. At `valid_until`, Burnban subtracts that amount from the stored cap on
+every status/admission check, including while offline. Unknown fields,
+duplicates, noncanonical UTC timestamps, invalid amounts/windows, oversized
+state, or a subtraction that would consume the entire stored cap fails closed.
+Write `{"version":1,"exceptions":[]}` when none are active; update the cap,
+schedule, version, source, and timestamp in one transaction.
+
+Version, source, and timestamp are cooperative metadata for sidecar ownership
+and rollback protection; the meter stores but does not authenticate a remote
+controller.
+
+Burnban's maintained Personal and Teams sidecars may additionally own the
+reserved `_identity_trust_grant_v1` and `_identity_trust_source_v1` settings.
+The grant contains an enrolled device's public key, authorized attribution,
+monotonic revision, and short expiry as strict canonical JSON. Its identity
+source must equal `external_policy_source`; source/device mismatch, rollback,
+same-revision mutation, staleness, or malformed state fails closed. Third-party
+coordinators must not write these `burnban-`-owned identity settings. The wire,
+storage, rotation, and threat model are documented in
+[`SIGNED_IDENTITY.md`](SIGNED_IDENTITY.md).
 
 At exact exhaustion, zero cannot be used because it disables the cap. A
 coordinator can write the device's already-synced spend, or a tiny positive
@@ -93,6 +132,9 @@ from offline devices.
 ## Security and compatibility
 
 - Protect the database and sidecar credential files as user secrets.
+- Keep device identity private keys local; register or transmit only their
+  public keys. Use atomic mode-`0600` persistence on POSIX systems and an
+  equivalently private account ACL on Windows.
 - Use TLS for remote sync; never put bearer credentials in URLs or logs.
 - Keep management credentials separate from per-device credentials.
 - Bound request/response bodies, dimensions, counters, and batch sizes.
