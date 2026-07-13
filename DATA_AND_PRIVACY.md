@@ -51,7 +51,7 @@ Burnban stopped so its SQLite WAL and shared-memory files are handled together.
 ## Local agent usage
 
 The subsidy report and dashboard read supported Claude Code, Codex, Gemini CLI,
-Hermes, OpenClaw, and Goose usage stores in place. Their validated adapter
+OpenCode, Hermes, OpenClaw, and Goose usage stores in place. Their validated adapter
 manifests require read-only, offline scanning and metadata-only output. Burnban
 extracts token/model/session metadata needed for aggregation and does not modify
 or upload those stores. Some source stores, including resumable chat histories,

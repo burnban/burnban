@@ -105,7 +105,7 @@ func TestBuildReportIncludesGeminiAdapter(t *testing.T) {
 		Since:     time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Until:     time.Date(2026, 7, 11, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: missing, CodexDir: missing, GeminiDir: filepath.Join(root, "gemini"),
-		HermesDB: missing, OpenClawDir: missing, GooseDB: missing,
+		OpenCodeDB: missing, HermesDB: missing, OpenClawDir: missing, GooseDB: missing,
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -127,8 +127,8 @@ func TestBuildReportIncludesGeminiAdapter(t *testing.T) {
 
 func TestBuiltinAdapterManifests(t *testing.T) {
 	adapters := BuiltinAdapters()
-	if len(adapters) != 6 {
-		t.Fatalf("built-in adapters = %d, want 6", len(adapters))
+	if len(adapters) != 7 {
+		t.Fatalf("built-in adapters = %d, want 7", len(adapters))
 	}
 	seen := map[string]bool{}
 	for _, adapter := range adapters {
@@ -143,6 +143,9 @@ func TestBuiltinAdapterManifests(t *testing.T) {
 	}
 	if !seen["gemini-cli"] {
 		t.Fatal("Gemini CLI adapter not registered")
+	}
+	if !seen["opencode"] {
+		t.Fatal("OpenCode adapter not registered")
 	}
 }
 

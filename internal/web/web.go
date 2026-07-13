@@ -400,6 +400,7 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []subsidy.ModelUsage{claude}, Days: []subsidy.DayUsage{}, Totals: claude.Totals},
 		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []subsidy.ModelUsage{codex}, Days: []subsidy.DayUsage{}, Totals: codex.Totals},
 		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "opencode", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "hermes", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "openclaw", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "goose", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},

@@ -27,6 +27,7 @@ func cmdSubsidy(args []string) error {
 	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude", "projects"), "Claude Code session logs")
 	codexDir := fs.String("codex-dir", filepath.Join(home, ".codex", "sessions"), "Codex rollout logs")
 	geminiDir := fs.String("gemini-dir", subsidy.DefaultGeminiDir(home), "Gemini CLI project chat logs")
+	openCodeDB := fs.String("opencode-db", subsidy.DefaultOpenCodeDB(home), "OpenCode usage database")
 	hermesDB := fs.String("hermes-db", defaultHermesDB(home), "Hermes state database")
 	openClawDir := fs.String("openclaw-dir", defaultOpenClawDir(home), "OpenClaw state directory")
 	gooseDB := fs.String("goose-db", subsidy.DefaultGooseDB(home), "Goose session database")
@@ -34,7 +35,7 @@ func cmdSubsidy(args []string) error {
 	daily := fs.Bool("daily", false, "per-day breakdown")
 	share := fs.Bool("share", false, "compact screenshot-ready card (defaults to a $200/mo plan comparison)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
-	meteredArg := fs.String("metered", "", "comma-separated sources known to be billed per token (e.g. claude-code,codex,gemini-cli); auto-detected where auth proves it")
+	meteredArg := fs.String("metered", "", "comma-separated sources known to be billed per token (e.g. claude-code,codex,gemini-cli,opencode); auto-detected where auth proves it")
 	noAutoMetered := fs.Bool("no-auto-metered", false, "do not auto-classify sources as metered from current API-key auth state")
 	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
 	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
@@ -71,7 +72,7 @@ func cmdSubsidy(args []string) error {
 	report, err := subsidy.BuildReport(prices, subsidy.ReportOptions{
 		Since: from, Until: until,
 		ClaudeDir: *claudeDir, CodexDir: *codexDir, GeminiDir: *geminiDir,
-		HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
+		OpenCodeDB: *openCodeDB, HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
 		MeteredProviders: metered,
 		ScanLimits: subsidy.ScanLimits{
 			MaxFiles: *maxFiles, MaxBytes: *maxScanMB << 20, MaxLineBytes: *maxLineMB << 20,
@@ -370,6 +371,8 @@ func subsidyTitle(provider string) string {
 		return "CODEX"
 	case "gemini-cli":
 		return "GEMINI CLI"
+	case "opencode":
+		return "OPENCODE"
 	case "hermes":
 		return "HERMES AGENT"
 	case "openclaw":

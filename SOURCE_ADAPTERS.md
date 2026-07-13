@@ -105,10 +105,31 @@ Never commit a real source log. Run:
 go test ./sourceadapter ./internal/subsidy
 ```
 
-The built-in manifests and the Gemini CLI compatibility fixture exercise the
-same public v1 contract used by new adapters.
+The built-in manifests and the Gemini CLI/OpenCode compatibility fixtures
+exercise the same public v1 contract used by new adapters.
 
 Gemini CLI's session record does not identify whether API-key or Vertex traffic
 was on a free or paid tier. Its adapter deliberately leaves `BillingProvider`
 empty; a user who knows the window was billed can opt in with
 `burnban subsidy --metered gemini-cli`.
+
+## OpenCode compatibility
+
+OpenCode support was checked on 2026-07-12 against upstream commit
+[`8168f0f`](https://github.com/anomalyco/opencode/commit/8168f0f0f6645a0ca741fe02e90ff532bce04148).
+Released builds select `opencode.db` in the `opencode` XDG data directory
+(`~/.local/share/opencode/opencode.db` without an XDG override); Burnban honors
+OpenCode's absolute or XDG-relative `OPENCODE_DB` override and also exposes
+`burnban subsidy --opencode-db`.
+
+The adapter opens the database read-only and supports both upstream message
+projections. Its SQLite query extracts only role, provider/model, timestamp,
+token, and cost metadata; it never selects prompt, response, reasoning, or tool
+content. OpenCode has already separated full-price input from cache reads and
+writes. Burnban adds reasoning to output-priced tokens and retains the source's
+cost estimate only as a fallback for models missing from Burnban's dated table.
+
+The stored provider and estimated cost do not prove whether a call used a
+subscription/OAuth allowance, a free tier, or a billed API key. The adapter
+therefore leaves `BillingProvider` empty. Users who can classify the selected
+window may opt in with `burnban subsidy --metered opencode`.

@@ -51,6 +51,11 @@ func BuiltinAdapters() []sourceadapter.Adapter {
 			scan:        scanGemini,
 		},
 		builtinAdapter{
+			manifest:    manifest("opencode", "OpenCode", "read-only SQLite message metadata"),
+			defaultPath: DefaultOpenCodeDB,
+			scan:        scanOpenCode,
+		},
+		builtinAdapter{
 			manifest:    manifest("hermes", "Hermes Agent", "read-only SQLite state database"),
 			defaultPath: DefaultHermesDB,
 			scan:        scanHermes,

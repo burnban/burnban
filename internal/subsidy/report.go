@@ -99,6 +99,7 @@ type ReportOptions struct {
 	ClaudeDir   string
 	CodexDir    string
 	GeminiDir   string
+	OpenCodeDB  string
 	HermesDB    string
 	OpenClawDir string
 	GooseDB     string
@@ -129,6 +130,7 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 		"claude-code": opts.ClaudeDir,
 		"codex":       opts.CodexDir,
 		"gemini-cli":  opts.GeminiDir,
+		"opencode":    opts.OpenCodeDB,
 		"hermes":      opts.HermesDB,
 		"openclaw":    opts.OpenClawDir,
 		"goose":       opts.GooseDB,
