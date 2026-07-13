@@ -176,6 +176,9 @@ func TestConfiguredPublicOriginNormalizesDefaultPortsDotsAndIPv6(t *testing.T) {
 
 func TestMetrics(t *testing.T) {
 	srv, s := newServer(t)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:1"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Insert(store.Request{
 		Ts: time.Now(), Provider: "openai", Model: "evil\"\\line\n\t\r\x1b界",
 		Agent: "agent\t\r\x1b\"\\界", InTokens: 1, CostUSD: .01, Status: 200, Priced: true,
@@ -201,7 +204,11 @@ func TestMetrics(t *testing.T) {
 	if resp.StatusCode != http.StatusOK || !strings.Contains(metrics, "burnban_ledger_requests") {
 		t.Fatalf("status = %d, body = %s", resp.StatusCode, body)
 	}
-	for _, name := range []string{"burnban_ledger_unknown_pricing", "burnban_ledger_unmetered", "burnban_ledger_incomplete", "burnban_ledger_enforcement_gaps"} {
+	for _, name := range []string{
+		"burnban_ledger_unknown_pricing", "burnban_ledger_unmetered",
+		"burnban_ledger_incomplete", "burnban_ledger_enforcement_gaps",
+		"burnban_fuse_spend_usd", "burnban_fuse_limit_usd", "burnban_fuse_tripped",
+	} {
 		if !strings.Contains(metrics, name) {
 			t.Errorf("metrics missing %s", name)
 		}
@@ -464,6 +471,46 @@ func TestSummaryIncludesAllBudgetsAndAgentCaps(t *testing.T) {
 	}
 	if len(data.Agents) != 1 || data.Agents[0].Agent != "codex" || data.Agents[0].CapUSD != 2.5 {
 		t.Fatalf("agents=%+v, want capped codex agent", data.Agents)
+	}
+}
+
+func TestSummaryIncludesVelocityFuseAndTripState(t *testing.T) {
+	srv, s := newServer(t)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:1"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	if reservation, denial, err := guard.Admit(time.Now(), "", budget.AdmissionEstimate{
+		USD: 1.1, Priced: true, Bounded: true,
+	}); err != nil || reservation != nil || denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("trip setup reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+	resp, err := http.Get(srv.URL + "/api/summary")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		FuseTripped   bool    `json:"fuse_tripped"`
+		FuseUntil     string  `json:"fuse_until"`
+		FuseRule      string  `json:"fuse_rule"`
+		FuseProjected float64 `json:"fuse_projected_usd"`
+		FuseLimit     float64 `json:"fuse_limit_usd"`
+		Budgets       []struct {
+			Name      string  `json:"name"`
+			Kind      string  `json:"kind"`
+			CapUSD    float64 `json:"cap_usd"`
+			Remaining float64 `json:"remaining_usd"`
+		} `json:"budgets"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if !data.FuseTripped || data.FuseUntil == "" || data.FuseRule != "burst" ||
+		data.FuseProjected != 1.1 || data.FuseLimit != 1 || len(data.Budgets) != 1 ||
+		data.Budgets[0].Name != "burst fuse" || data.Budgets[0].Kind != "fuse" ||
+		data.Budgets[0].CapUSD != 1 || data.Budgets[0].Remaining != 1 {
+		t.Fatalf("fuse summary=%+v", data)
 	}
 }
 

@@ -89,4 +89,17 @@ func BenchmarkGuardAdmission100KRows(b *testing.B) {
 		}
 		b.ReportMetric(0, "ledger_rows/op")
 	})
+	b.Run("warm_velocity_fuse", func(b *testing.B) {
+		if err := s.SetSetting(budget.KeyFuseBurst, "5m:1000"); err != nil {
+			b.Fatal(err)
+		}
+		guard := &budget.Guard{S: s}
+		run(b, guard)
+		b.ReportAllocs()
+		b.ResetTimer()
+		for i := 0; i < b.N; i++ {
+			run(b, guard)
+		}
+		b.ReportMetric(0, "ledger_rows/op")
+	})
 }

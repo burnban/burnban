@@ -87,6 +87,173 @@ func TestUnboundedAdmissionIsExclusiveAndUnknownPriceFailsClosed(t *testing.T) {
 	}
 }
 
+func TestVelocityFuseTripsBeforeForwardingAndSurvivesRestart(t *testing.T) {
+	s := newStore(t)
+	spend(t, s, now.Add(-2*time.Minute), 3.5)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyFuseCooldown, "10m"); err != nil {
+		t.Fatal(err)
+	}
+
+	guard := &budget.Guard{S: s}
+	reservation, denial, err := guard.Admit(now, "agent", budget.AdmissionEstimate{
+		USD: 0.6, Priced: true, Bounded: true,
+	})
+	if err != nil || reservation != nil || denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("crossing admission reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+	if !strings.Contains(denial.Message, "rolling 5m") || !strings.Contains(denial.Message, "$4.00") || denial.AlertMark() == "" {
+		t.Fatalf("fuse denial is not explainable/alertable: %+v", denial)
+	}
+	if raw, err := s.GetSetting(budget.KeyFuseTrip); err != nil || raw == "" {
+		t.Fatalf("persisted trip=%q err=%v", raw, err)
+	}
+
+	// A fresh guard simulates a proxy restart. The automatic cooldown remains.
+	restarted := &budget.Guard{S: s}
+	if got, err := restarted.Check(now.Add(time.Minute), ""); err != nil || got == nil || got.Type != "burnban_fuse_tripped" {
+		t.Fatalf("restart bypassed cooldown: denial=%+v err=%v", got, err)
+	}
+	snapshot, err := budget.FuseStatus(s, now.Add(time.Minute))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Tripped || snapshot.TripRule != "burst" || snapshot.TripProjected < 4.09 || snapshot.TripProjected > 4.11 {
+		t.Fatalf("fuse snapshot=%+v", snapshot)
+	}
+
+	// Once both the cooldown and rolling spend have aged out, traffic resumes.
+	if got, err := restarted.Check(now.Add(11*time.Minute), ""); err != nil || got != nil {
+		t.Fatalf("expired fuse still denied: denial=%+v err=%v", got, err)
+	}
+}
+
+func TestVelocityFuseCountsInFlightReservations(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseHourlyUSD, "1"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	first, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{USD: 0.6, Priced: true, Bounded: true})
+	if err != nil || denial != nil || first == nil || !first.CapActive() {
+		t.Fatalf("first admission=%v denial=%+v err=%v", first, denial, err)
+	}
+	second, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{USD: 0.5, Priced: true, Bounded: true})
+	if err != nil || second != nil || denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("fan-out admission=%v denial=%+v err=%v", second, denial, err)
+	}
+	if !strings.Contains(denial.Message, "$1.1000") {
+		t.Fatalf("projected reservation missing from denial: %s", denial.Message)
+	}
+	first.Release()
+	if snapshot := guard.Reservations(); snapshot.InFlight != 0 || snapshot.ReservedUSD != 0 {
+		t.Fatalf("reservations leaked: %+v", snapshot)
+	}
+}
+
+func TestVelocityFuseSettlementUpdatesWarmRollingCache(t *testing.T) {
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:1"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	if denial, err := guard.Check(now, ""); err != nil || denial != nil {
+		t.Fatalf("warm check denial=%+v err=%v", denial, err)
+	}
+	first, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{USD: 0.6, Priced: true, Bounded: true})
+	if err != nil || denial != nil || first == nil {
+		t.Fatalf("first admission=%v denial=%+v err=%v", first, denial, err)
+	}
+	if err := first.Settle(store.Request{
+		Ts: now, Provider: "openai", CostUSD: 0.6,
+		UsageState: store.UsageExact, PricingState: store.PricingPriced,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if next, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{USD: 0.5, Priced: true, Bounded: true}); err != nil || next != nil || denial == nil || denial.Type != "burnban_fuse_tripped" {
+		t.Fatalf("settled spend was absent/double-counted: admission=%v denial=%+v err=%v", next, denial, err)
+	}
+}
+
+func TestVelocityFuseRetripsAfterCooldownWhileSpendRemainsHigh(t *testing.T) {
+	s := newStore(t)
+	spend(t, s, now.Add(-time.Minute), 1.1)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyFuseCooldown, "1m"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	first, err := guard.Check(now, "")
+	if err != nil || first == nil || first.Type != "burnban_fuse_tripped" {
+		t.Fatalf("first trip=%+v err=%v", first, err)
+	}
+	secondAt := now.Add(2 * time.Minute)
+	second, err := guard.Check(secondAt, "")
+	if err != nil || second == nil || second.Type != "burnban_fuse_tripped" {
+		t.Fatalf("high velocity did not retrip: denial=%+v err=%v", second, err)
+	}
+	snapshot, err := budget.FuseStatus(s, secondAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.Tripped || !snapshot.TripStartedAt.Equal(secondAt) || !snapshot.TrippedUntil.Equal(secondAt.Add(time.Minute)) {
+		t.Fatalf("retrip snapshot=%+v", snapshot)
+	}
+}
+
+func TestVelocityFuseRollingWindowAndAccountingSafety(t *testing.T) {
+	s := newStore(t)
+	spend(t, s, now.Add(-6*time.Minute), 20) // outside the rolling burst
+	spend(t, s, now.Add(-time.Minute), 1)
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:2"); err != nil {
+		t.Fatal(err)
+	}
+	guard := &budget.Guard{S: s}
+	if denial, err := guard.Check(now, ""); err != nil || denial != nil {
+		t.Fatalf("old spend leaked into rolling window: denial=%+v err=%v", denial, err)
+	}
+	if reservation, denial, err := guard.Admit(now, "", budget.AdmissionEstimate{Priced: false}); err != nil || reservation != nil || denial == nil || denial.Type != "burnban_unpriced_request" {
+		t.Fatalf("unknown pricing did not fail closed: reservation=%v denial=%+v err=%v", reservation, denial, err)
+	}
+
+	if err := s.Insert(store.Request{
+		Ts: now.Add(-30 * time.Second), Provider: "openai", Status: 200,
+		UsageState: store.UsagePartial, PricingState: store.PricingPriced,
+		EnforcementUnsafe: true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if denial, err := guard.Check(now, ""); err != nil || denial == nil || denial.Type != "burnban_metering_gap" || !strings.Contains(denial.Message, "spend-velocity fuse") {
+		t.Fatalf("unsafe rolling accounting denial=%+v err=%v", denial, err)
+	}
+}
+
+func TestFuseSettingValidation(t *testing.T) {
+	for _, raw := range []string{"", "5m", "0:4", "5m:0.001", "2h:4", "5m:NaN"} {
+		if _, _, err := budget.ParseFuseBurst(raw); err == nil {
+			t.Errorf("burst %q accepted", raw)
+		}
+	}
+	s := newStore(t)
+	if err := s.SetSetting(budget.KeyFuseCooldown, "25h"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.FuseStatus(s, now); err == nil {
+		t.Fatal("invalid stored fuse cooldown accepted")
+	}
+	s2 := newStore(t)
+	if err := s2.SetSetting(budget.KeyFuseHourlyUSD, "0.001"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := budget.FuseStatus(s2, now); err == nil {
+		t.Fatal("sub-cent stored hourly fuse accepted")
+	}
+}
+
 func TestEnforcementGapFailsClosedAndTinyGuidanceKeepsCents(t *testing.T) {
 	s := newStore(t)
 	if err := s.Insert(store.Request{

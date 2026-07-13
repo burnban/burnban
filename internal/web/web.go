@@ -23,6 +23,7 @@ import (
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 	"github.com/burnban/burnban/internal/subsidy"
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 //go:embed index.html
@@ -393,12 +394,15 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 		Calls: 31 * multiplier, In: 26400 * multiplier, Out: 8900 * multiplier,
 		CacheRead: 240000 * multiplier, APIUSD: 0.736 * float64(multiplier),
 	}}
+	adapterVersion := sourceadapter.APIVersion
+	privacy := sourceadapter.Privacy{ReadOnly: true}
 	providers := []subsidy.ProviderUsage{
-		{Provider: "claude-code", Detected: true, Sessions: int(4 * multiplier), Models: []subsidy.ModelUsage{claude}, Days: []subsidy.DayUsage{}, Totals: claude.Totals},
-		{Provider: "codex", Detected: true, Sessions: int(3 * multiplier), Models: []subsidy.ModelUsage{codex}, Days: []subsidy.DayUsage{}, Totals: codex.Totals},
-		{Provider: "hermes", Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "openclaw", Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "goose", Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []subsidy.ModelUsage{claude}, Days: []subsidy.DayUsage{}, Totals: claude.Totals},
+		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []subsidy.ModelUsage{codex}, Days: []subsidy.DayUsage{}, Totals: codex.Totals},
+		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "hermes", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "openclaw", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "goose", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 	}
 	totals := subsidy.Totals{
 		Calls: claude.Calls + codex.Calls, In: claude.In + codex.In, Out: claude.Out + codex.Out,
@@ -486,6 +490,10 @@ func writeMetricsSnapshot(w *strings.Builder, s metricsReader, now time.Time) er
 	if err != nil {
 		return err
 	}
+	fuses, err := budget.FuseStatus(s, now)
+	if err != nil {
+		return err
+	}
 	localBan, externalBan, err := budget.BanStatus(s)
 	if err != nil {
 		return err
@@ -521,6 +529,18 @@ func writeMetricsSnapshot(w *strings.Builder, s metricsReader, now time.Time) er
 			fmt.Fprintf(w, "# HELP burnban_spend_today_usd Spend since local midnight (alias of burnban_spend_daily_usd).\n# TYPE burnban_spend_today_usd gauge\nburnban_spend_today_usd %g\n", st.Spent)
 		}
 	}
+	fmt.Fprintf(w, "# HELP burnban_fuse_spend_usd Spend in a configured rolling velocity window.\n# TYPE burnban_fuse_spend_usd gauge\n")
+	fmt.Fprintf(w, "# HELP burnban_fuse_limit_usd Configured rolling spend-velocity limit.\n# TYPE burnban_fuse_limit_usd gauge\n")
+	for _, fuse := range fuses.Rules {
+		labels := fmt.Sprintf("rule=\"%s\",window=\"%s\"", prometheusLabel(fuse.Name), prometheusLabel(budget.FormatFuseDuration(fuse.Window)))
+		fmt.Fprintf(w, "burnban_fuse_spend_usd{%s} %g\n", labels, fuse.SpentUSD)
+		fmt.Fprintf(w, "burnban_fuse_limit_usd{%s} %g\n", labels, fuse.CapUSD)
+	}
+	fuseTripped := 0
+	if fuses.Tripped {
+		fuseTripped = 1
+	}
+	fmt.Fprintf(w, "# HELP burnban_fuse_tripped Whether the spend-velocity fuse cooldown is active.\n# TYPE burnban_fuse_tripped gauge\nburnban_fuse_tripped %d\n", fuseTripped)
 	ban := 0
 	if localBan || externalBan {
 		ban = 1
@@ -599,6 +619,7 @@ type agentJSON struct {
 
 type budgetJSON struct {
 	Name      string  `json:"name"`
+	Kind      string  `json:"kind,omitempty"`
 	SpentUSD  float64 `json:"spent_usd"`
 	CapUSD    float64 `json:"cap_usd"`
 	Remaining float64 `json:"remaining_usd"`
@@ -642,6 +663,11 @@ type summaryJSON struct {
 	MonthCost       float64       `json:"month_cost"`
 	BanActive       bool          `json:"ban_active"`
 	ExternalBan     bool          `json:"external_ban"`
+	FuseTripped     bool          `json:"fuse_tripped"`
+	FuseUntil       string        `json:"fuse_until,omitempty"`
+	FuseRule        string        `json:"fuse_rule,omitempty"`
+	FuseProjected   float64       `json:"fuse_projected_usd,omitempty"`
+	FuseLimit       float64       `json:"fuse_limit_usd,omitempty"`
 	OverrideToday   bool          `json:"override_today"`
 	ExternalPolicy  bool          `json:"external_policy"`
 	Models          []modelJSON   `json:"models"`
@@ -793,8 +819,8 @@ func buildSnapshot(s summaryReader, cfg Config, now time.Time) (*summaryJSON, er
 		})
 	}
 
-	// One settings query + one ledger scan covers every budget window; the
-	// dashboard polls this endpoint every two seconds, so it must stay cheap.
+	// Calendar and rolling guardrails each batch all of their settings/cutoffs;
+	// the dashboard polls this endpoint every two seconds, so reads stay bounded.
 	states, err := budget.Status(s, now)
 	if err != nil {
 		return nil, err
@@ -829,6 +855,25 @@ func buildSnapshot(s summaryReader, cfg Config, now time.Time) (*summaryJSON, er
 				resp.MonthCost = st.Spent
 			}
 		}
+	}
+	fuses, err := budget.FuseStatus(s, now)
+	if err != nil {
+		return nil, err
+	}
+	for _, fuse := range fuses.Rules {
+		resp.HasCap = true
+		resp.Budgets = append(resp.Budgets, budgetJSON{
+			Name: fuse.Name + " fuse", Kind: "fuse", SpentUSD: fuse.SpentUSD,
+			CapUSD: fuse.CapUSD, Remaining: fuse.Remaining, Pct: fuse.Pct(),
+			Source: "local", Reset: "rolling " + budget.FormatFuseDuration(fuse.Window),
+		})
+	}
+	if fuses.Tripped {
+		resp.FuseTripped = true
+		resp.FuseUntil = fuses.TrippedUntil.Format(time.RFC3339)
+		resp.FuseRule = fuses.TripRule
+		resp.FuseProjected = fuses.TripProjected
+		resp.FuseLimit = fuses.TripLimitUSD
 	}
 	localBan, externalBan, err := budget.BanStatus(s)
 	if err != nil {

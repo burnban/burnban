@@ -28,6 +28,7 @@ func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {
 		Since:     time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC),
 		Until:     time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: codexDir,
+		GeminiDir:   filepath.Join(root, "missing-gemini"),
 		HermesDB:    filepath.Join(root, "missing-hermes.db"),
 		OpenClawDir: filepath.Join(root, "missing-openclaw"),
 		GooseDB:     filepath.Join(root, "missing-goose.db"),
@@ -38,7 +39,7 @@ func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {
 	if !report.HasUsage || report.Calls != 2 || report.In != 500 || report.Out != 400 || report.CacheRead != 650 || report.CacheWrite != 30 {
 		t.Fatalf("totals = %+v", report.Totals)
 	}
-	if len(report.Providers) != 5 || !report.Providers[0].Detected || !report.Providers[1].Detected {
+	if len(report.Providers) != 6 || !report.Providers[0].Detected || !report.Providers[1].Detected {
 		t.Fatalf("providers = %+v", report.Providers)
 	}
 	// Claude: .001 + .010 + .00005 + .00025 + .0002 = .0115.
@@ -61,7 +62,8 @@ func TestReportTracksAnthropicDimensionsAndUnknownPricing(t *testing.T) {
 	report, err := BuildReport(prices, ReportOptions{
 		Since: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Until: time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: filepath.Join(root, "missing-codex"),
-		HermesDB: filepath.Join(root, "missing-hermes"), OpenClawDir: filepath.Join(root, "missing-openclaw"),
+		GeminiDir: filepath.Join(root, "missing-gemini"),
+		HermesDB:  filepath.Join(root, "missing-hermes"), OpenClawDir: filepath.Join(root, "missing-openclaw"),
 		GooseDB: filepath.Join(root, "missing-goose"),
 	})
 	if err != nil {
@@ -107,6 +109,7 @@ func TestReportSurfacesScanLimitWithoutPaths(t *testing.T) {
 	}}, ReportOptions{
 		Since: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Until: time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: filepath.Join(root, "missing-codex"), HermesDB: filepath.Join(root, "missing-hermes"),
+		GeminiDir:   filepath.Join(root, "missing-gemini"),
 		OpenClawDir: filepath.Join(root, "missing-openclaw"), GooseDB: filepath.Join(root, "missing-goose"),
 		ScanLimits: ScanLimits{MaxFiles: 1, MaxBytes: 1 << 20, MaxLineBytes: 1 << 20, MaxRecords: 100},
 	})

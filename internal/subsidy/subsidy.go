@@ -1,6 +1,6 @@
-// Package subsidy reads the local usage stores kept by Claude Code, Codex,
-// Hermes Agent, OpenClaw, and Goose, then totals what those tokens would cost at API
-// prices. Nothing is proxied and source logs are never modified.
+// Package subsidy reads supported local usage stores, then totals what those
+// tokens would cost at API prices. Nothing is proxied and source logs are never
+// modified.
 package subsidy
 
 import (
@@ -17,68 +17,20 @@ import (
 	"time"
 
 	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 // Event is one model call recovered from a local log, normalized the same
 // way the proxy's meter normalizes live traffic: In and Out are full-price
 // tokens (OpenAI's cached subset already subtracted), CacheRead was billed
 // at the provider's cached-input discount.
-type Event struct {
-	Provider  string // "claude-code" or "codex"
-	Model     string
-	Time      time.Time
-	Calls     int64
-	In        int64
-	Out       int64
-	CacheRead int64
-	// Anthropic bills 5-minute cache writes at 1.25x input and 1-hour
-	// writes at 2x. The proxy never sees the split (the API reports one
-	// total), but Claude Code's logs carry it, so subsidy can price it.
-	CacheWrite5m int64
-	CacheWrite1h int64
-	// Some agent logs carry their own local cost estimate for models outside
-	// Burnban's table. It is only used as a fallback; known models are always
-	// repriced consistently with Burnban's table.
-	CostUSD   float64
-	CostKnown bool
-	// BillingProvider names the pay-per-token provider a session was actually
-	// billed through (e.g. "openrouter") when the agent records it. Non-empty
-	// means this is real metered API spend, not flat-rate subscription usage
-	// that subsidy prices hypothetically.
-	BillingProvider string
-	// Anthropic usage metadata is retained for local observability even though
-	// the proxy ledger's cross-provider schema intentionally stays normalized.
-	ServiceTier   string
-	InferenceGeo  string
-	ServerToolUse ServerToolUsage
-}
-
-type ServerToolUsage struct {
-	WebSearchRequests int64 `json:"web_search_requests,omitempty"`
-	WebFetchRequests  int64 `json:"web_fetch_requests,omitempty"`
-}
-
-type ScanLimits struct {
-	MaxFiles     int
-	MaxBytes     int64
-	MaxLineBytes int
-	MaxRecords   int
-	MaxDuration  time.Duration
-}
-
-type ScanStats struct {
-	Partial        bool     `json:"partial"`
-	FilesScanned   int      `json:"files_scanned,omitempty"`
-	FilesSkipped   int      `json:"files_skipped,omitempty"`
-	RecordsScanned int      `json:"records_scanned,omitempty"`
-	BytesScanned   int64    `json:"bytes_scanned,omitempty"`
-	Warnings       []string `json:"warnings,omitempty"`
-}
-
-type scanResult struct {
-	Sessions int
-	Stats    ScanStats
-}
+// Type aliases preserve the original subsidy API while the adapter contract is
+// public for first- and third-party source implementations.
+type Event = sourceadapter.Event
+type ServerToolUsage = sourceadapter.ServerToolUsage
+type ScanLimits = sourceadapter.ScanLimits
+type ScanStats = sourceadapter.ScanStats
+type ScanResult = sourceadapter.ScanResult
 
 func DefaultScanLimits() ScanLimits {
 	return ScanLimits{
@@ -105,16 +57,6 @@ func normalizeScanLimits(limits ScanLimits) ScanLimits {
 		limits.MaxDuration = defaults.MaxDuration
 	}
 	return limits
-}
-
-func (s *ScanStats) warn(message string) {
-	s.Partial = true
-	for _, existing := range s.Warnings {
-		if existing == message {
-			return
-		}
-	}
-	s.Warnings = append(s.Warnings, message)
 }
 
 // write1hMult is Anthropic's 1-hour cache-write premium. The pricing table
@@ -171,7 +113,7 @@ func ScanClaude(dir string, since time.Time, emit func(Event)) (int, error) {
 	return result.Sessions, err
 }
 
-func scanClaude(dir string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
+func scanClaude(dir string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	seen := make(map[string]struct{})
 	sessions := 0
 	scanner := newFileScanner(limits)
@@ -215,7 +157,7 @@ func scanClaude(dir string, since time.Time, limits ScanLimits, emit func(Event)
 		}
 		return ferr
 	})
-	return scanResult{Sessions: sessions, Stats: scanner.stats}, err
+	return ScanResult{Sessions: sessions, Stats: scanner.stats}, err
 }
 
 func cacheWriteSplit(total, explicit5m, explicit1h int64) (int64, int64) {
@@ -258,7 +200,7 @@ func ScanCodex(dir string, since time.Time, emit func(Event)) (int, error) {
 	return result.Sessions, err
 }
 
-func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
+func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	sessions := 0
 	scanner := newFileScanner(limits)
 	err := scanner.walkJSONL(dir, since, func(path string) error {
@@ -320,7 +262,7 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 		}
 		return ferr
 	})
-	return scanResult{Sessions: sessions, Stats: scanner.stats}, err
+	return ScanResult{Sessions: sessions, Stats: scanner.stats}, err
 }
 
 var errScanLimit = errors.New("scan limit reached")
@@ -340,6 +282,10 @@ func newFileScanner(limits ScanLimits) *fileScanner {
 // missing source means the tool is not installed; inaccessible sources are an
 // error so callers can distinguish them from a clean empty result.
 func (s *fileScanner) walkJSONL(dir string, since time.Time, visit func(path string) error) error {
+	return s.walkJSONLMatching(dir, since, nil, visit)
+}
+
+func (s *fileScanner) walkJSONLMatching(dir string, since time.Time, accept func(path string) bool, visit func(path string) error) error {
 	if _, err := os.Stat(dir); os.IsNotExist(err) {
 		return nil
 	} else if err != nil {
@@ -347,12 +293,12 @@ func (s *fileScanner) walkJSONL(dir string, since time.Time, visit func(path str
 	}
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if time.Now().After(s.deadline) {
-			s.stats.warn("scan time limit reached")
+			s.stats.Warn("scan time limit reached")
 			return errScanLimit
 		}
 		if walkErr != nil {
 			s.stats.FilesSkipped++
-			s.stats.warn("one or more log paths could not be read")
+			s.stats.Warn("one or more log paths could not be read")
 			if d != nil && d.IsDir() {
 				return fs.SkipDir
 			}
@@ -361,22 +307,25 @@ func (s *fileScanner) walkJSONL(dir string, since time.Time, visit func(path str
 		if d.IsDir() || !strings.HasSuffix(path, ".jsonl") {
 			return nil
 		}
+		if accept != nil && !accept(path) {
+			return nil
+		}
 		info, err := d.Info()
 		if err != nil {
 			s.stats.FilesSkipped++
-			s.stats.warn("one or more log files could not be inspected")
+			s.stats.Warn("one or more log files could not be inspected")
 			return nil
 		}
 		if info.ModTime().Before(since) {
 			return nil
 		}
 		if s.stats.FilesScanned >= s.limits.MaxFiles {
-			s.stats.warn("file scan limit reached")
+			s.stats.Warn("file scan limit reached")
 			return errScanLimit
 		}
 		if info.Size() > s.limits.MaxBytes-s.stats.BytesScanned {
 			s.stats.FilesSkipped++
-			s.stats.warn("byte scan limit reached")
+			s.stats.Warn("byte scan limit reached")
 			return errScanLimit
 		}
 		s.stats.FilesScanned++
@@ -385,7 +334,7 @@ func (s *fileScanner) walkJSONL(dir string, since time.Time, visit func(path str
 				return err
 			}
 			s.stats.FilesSkipped++
-			s.stats.warn("one or more log files could not be read completely")
+			s.stats.Warn("one or more log files could not be read completely")
 		}
 		return nil
 	})
@@ -415,7 +364,7 @@ func (s *fileScanner) eachLine(path string, fn func(line []byte)) error {
 	reader := &countingReader{r: f}
 	remaining := s.limits.MaxBytes - s.stats.BytesScanned
 	if remaining <= 0 {
-		s.stats.warn("byte scan limit reached")
+		s.stats.Warn("byte scan limit reached")
 		return errScanLimit
 	}
 	sc := bufio.NewScanner(io.LimitReader(reader, remaining+1))
@@ -424,12 +373,12 @@ func (s *fileScanner) eachLine(path string, fn func(line []byte)) error {
 	for sc.Scan() {
 		if time.Now().After(s.deadline) {
 			s.stats.BytesScanned += min(reader.n, remaining)
-			s.stats.warn("scan time limit reached")
+			s.stats.Warn("scan time limit reached")
 			return errScanLimit
 		}
 		if s.stats.RecordsScanned >= s.limits.MaxRecords {
 			s.stats.BytesScanned += reader.n
-			s.stats.warn("record scan limit reached")
+			s.stats.Warn("record scan limit reached")
 			return errScanLimit
 		}
 		s.stats.RecordsScanned++
@@ -438,11 +387,11 @@ func (s *fileScanner) eachLine(path string, fn func(line []byte)) error {
 	s.stats.BytesScanned += reader.n
 	if reader.n > remaining {
 		s.stats.BytesScanned -= reader.n - remaining
-		s.stats.warn("byte scan limit reached")
+		s.stats.Warn("byte scan limit reached")
 		return errScanLimit
 	}
 	if err := sc.Err(); err != nil {
-		s.stats.warn("one or more log lines exceeded the line limit or could not be read")
+		s.stats.Warn("one or more log lines exceeded the line limit or could not be read")
 		return err
 	}
 	return nil

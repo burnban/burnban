@@ -40,9 +40,9 @@ func hermesColumns(ctx context.Context, db *sql.DB) map[string]bool {
 	return cols
 }
 
-func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
+func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	limits = normalizeScanLimits(limits)
-	result := scanResult{}
+	result := ScanResult{}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return result, nil
@@ -78,7 +78,7 @@ func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event
 	rows, err := db.QueryContext(ctx, query, float64(since.UnixNano())/1e9, limits.MaxRecords+1)
 	if err != nil {
 		if ctx.Err() != nil {
-			result.Stats.warn("scan time limit reached")
+			result.Stats.Warn("scan time limit reached")
 		}
 		return result, fmt.Errorf("hermes sessions: %w", err)
 	}
@@ -86,7 +86,7 @@ func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event
 	sessions := 0
 	for rows.Next() {
 		if result.Stats.RecordsScanned >= limits.MaxRecords {
-			result.Stats.warn("record scan limit reached")
+			result.Stats.Warn("record scan limit reached")
 			break
 		}
 		result.Stats.RecordsScanned++
@@ -116,7 +116,7 @@ func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event
 	}
 	if err := rows.Err(); err != nil {
 		if ctx.Err() != nil {
-			result.Stats.warn("scan time limit reached")
+			result.Stats.Warn("scan time limit reached")
 		}
 		return result, fmt.Errorf("hermes sessions: %w", err)
 	}

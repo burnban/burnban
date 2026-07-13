@@ -32,6 +32,12 @@ the key: someone with the complete ledger and the relevant request context
 could still test a small set of candidate bodies for a match. Protect the
 database accordingly.
 
+The same SQLite database's settings table stores local/external cap values,
+velocity-fuse thresholds and cooldown/trip timestamps, warning/alert delivery
+marks, and an optional webhook URL. A fuse incident records only its rule,
+rolling duration, dollar limit, projected dollars, and start/end timestamps;
+it does not add prompt, response, credential, model, agent, or session content.
+
 On the first open by a version that uses keyed fingerprints, Burnban clears
 legacy unkeyed request hashes written by older prereleases. Those hashes cannot
 be safely transformed without the original request bodies. This privacy
@@ -44,10 +50,18 @@ Burnban stopped so its SQLite WAL and shared-memory files are handled together.
 
 ## Local agent usage
 
-The subsidy report and dashboard read supported Claude Code, Codex, Hermes,
-OpenClaw, and Goose usage stores in place. They read token/model/session metadata
-needed for aggregation and do not modify or upload those stores. Files that a
+The subsidy report and dashboard read supported Claude Code, Codex, Gemini CLI,
+Hermes, OpenClaw, and Goose usage stores in place. Their validated adapter
+manifests require read-only, offline scanning and metadata-only output. Burnban
+extracts token/model/session metadata needed for aggregation and does not modify
+or upload those stores. Some source stores, including resumable chat histories,
+also contain conversation content; their adapters discard those fields and
+never put them in a report, ledger, diagnostic, or adapter event. Files that a
 source tool itself synchronizes remain subject to that tool's privacy policy.
+
+The versioned contract and per-adapter privacy declarations are documented in
+[`SOURCE_ADAPTERS.md`](SOURCE_ADAPTERS.md). The registry is compiled into the
+binary; Burnban does not fetch or execute third-party adapter code at runtime.
 
 Host-local usage scanning is available only on a local meter (and as synthetic
 fixtures in demo mode). A team/network gateway advertises
@@ -65,9 +79,10 @@ model-provider or custom upstream. Burnban does not add a vendor upload endpoint
 Provider traffic is therefore still governed by the selected provider.
 
 The only additional outbound request made by the binary is an optional webhook
-configured by the user. Webhook messages contain the budget window, threshold,
-spend/cap amounts, reset description, or cap-denial message. Webhook URLs are
-stored in the local settings table and redacted in CLI display.
+configured by the user. Webhook messages contain the budget/fuse window,
+threshold, spend or projected/cap amounts, reset/cooldown description, or
+denial message. Webhook URLs are stored in the local settings table and
+redacted in CLI display.
 
 Prometheus metrics, dashboard APIs, exports, and MCP tools expose ledger-derived
 metadata. On a network deployment they are protected by the same Burnban token,

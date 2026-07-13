@@ -48,6 +48,7 @@ func cmdGuide(args []string) error {
 	fmt.Println("  Caps apply only to live API traffic routed through the proxy above.")
 	fmt.Println("  They do not stop or alter the local subscription usage scan.")
 	fmt.Println("    " + colorize("burnban cap --daily 10", shareEmber, color) + "  stop spend past $10/day")
+	fmt.Println("    " + colorize("burnban fuse --burst 5m:4", shareEmber, color) + "  stop loops past $4/5m")
 	fmt.Println("    " + colorize("burnban ban", shareEmber, color) + "             pause all agent spend now")
 	fmt.Println("    " + colorize("burnban lift", shareEmber, color) + "            undo the ban")
 

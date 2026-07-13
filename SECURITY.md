@@ -43,9 +43,11 @@ to the upstream selected by the operator and are never persisted; request and
 response bodies are not stored. Local-agent subsidy scans read supported usage
 logs in place and never upload or modify them.
 
-An operator can explicitly add a webhook or expose the meter as an authenticated
-TLS gateway. Those choices expand the deployment surface and must be secured as
-described below, but they do not add a path back to Burnban.
+Source adapters are compiled in, validated as read-only/offline, and emit
+metadata-only events; the binary does not download or execute plugins. An
+operator can explicitly add a webhook or expose the meter as an authenticated
+TLS gateway. Those operator choices expand the deployment surface and must be
+secured as described below, but they do not add a path back to Burnban.
 
 ## Scope
 

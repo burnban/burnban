@@ -18,9 +18,9 @@ func ScanGoose(path string, since time.Time, emit func(Event)) (int, error) {
 	return result.Sessions, err
 }
 
-func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
+func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	limits = normalizeScanLimits(limits)
-	result := scanResult{}
+	result := ScanResult{}
 	info, err := os.Stat(path)
 	if os.IsNotExist(err) {
 		return result, nil
@@ -45,7 +45,7 @@ func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)
 		ORDER BY created_timestamp LIMIT ?`, since.Unix(), limits.MaxRecords+1)
 	if err != nil {
 		if ctx.Err() != nil {
-			result.Stats.warn("scan time limit reached")
+			result.Stats.Warn("scan time limit reached")
 		}
 		return result, fmt.Errorf("goose usage ledger: %w", err)
 	}
@@ -53,7 +53,7 @@ func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)
 	sessions := map[string]struct{}{}
 	for rows.Next() {
 		if result.Stats.RecordsScanned >= limits.MaxRecords {
-			result.Stats.warn("record scan limit reached")
+			result.Stats.Warn("record scan limit reached")
 			break
 		}
 		result.Stats.RecordsScanned++
@@ -75,7 +75,7 @@ func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)
 	}
 	if err := rows.Err(); err != nil {
 		if ctx.Err() != nil {
-			result.Stats.warn("scan time limit reached")
+			result.Stats.Warn("scan time limit reached")
 		}
 		return result, fmt.Errorf("goose usage ledger: %w", err)
 	}

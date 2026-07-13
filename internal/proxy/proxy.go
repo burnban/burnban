@@ -418,7 +418,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		// Once a request may have reached the provider, a transport failure is
 		// an accounting ambiguity: the provider might have completed and billed
 		// work even though no response usage reached Burnban. Persist that gap so
-		// an active dollar cap fails closed instead of silently undercounting it.
+		// an active dollar guardrail fails closed instead of silently undercounting it.
 		if r.Method == http.MethodPost {
 			rec.LatencyMs = time.Since(start).Milliseconds()
 			rec.UsageState = store.UsageMissing
@@ -680,7 +680,7 @@ func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
 // hasUnboundedProviderTools recognizes provider-hosted tools whose request,
 // container, retrieval, or generated-asset fees are not represented in the
 // model token price table. Even when a token ceiling is present, admission
-// must be exclusive under an active cap unless those fees can be bounded.
+// must be exclusive under an active dollar guardrail unless those fees can be bounded.
 // Ordinary client-executed function tools remain bounded by max output.
 func hasUnboundedProviderTools(tools []json.RawMessage) bool {
 	for _, raw := range tools {

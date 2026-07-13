@@ -11,7 +11,7 @@ import (
 
 func cmdAlert(args []string) error {
 	fs := flag.NewFlagSet("alert", flag.ExitOnError)
-	webhook := fs.String("webhook", "", "Slack-compatible webhook URL, POSTed at the warn threshold and when a cap trips")
+	webhook := fs.String("webhook", "", "Slack-compatible webhook URL, POSTed for warnings, cap trips, and velocity-fuse incidents")
 	off := fs.Bool("off", false, "remove the webhook")
 	dbPath := fs.String("db", defaultDBPath(), "sqlite database path")
 	fs.Parse(args)
@@ -36,6 +36,9 @@ func cmdAlert(args []string) error {
 				return err
 			}
 		}
+		if err := s.DeleteSettingsWithPrefix(budget.KeyFuseAlertedPrefix); err != nil {
+			return err
+		}
 		fmt.Println("webhook removed")
 	case *webhook != "":
 		u, err := url.Parse(*webhook)
@@ -45,7 +48,7 @@ func cmdAlert(args []string) error {
 		if err := s.SetSetting(budget.KeyWebhookURL, *webhook); err != nil {
 			return err
 		}
-		fmt.Println("webhook set — burnban will POST there at the warn threshold and once per tripped cap window")
+		fmt.Println("webhook set — burnban will POST warnings, cap trips, and each velocity-fuse incident")
 	default:
 		v, err := s.GetSetting(budget.KeyWebhookURL)
 		if err != nil {

@@ -170,6 +170,7 @@ func scanSubsidyCard(window string) (subsidy.ShareCard, error) {
 		Until:       time.Now(),
 		ClaudeDir:   filepath.Join(home, ".claude", "projects"),
 		CodexDir:    filepath.Join(home, ".codex", "sessions"),
+		GeminiDir:   subsidy.DefaultGeminiDir(home),
 		HermesDB:    defaultHermesDB(home),
 		OpenClawDir: defaultOpenClawDir(home),
 		GooseDB:     subsidy.DefaultGooseDB(home),

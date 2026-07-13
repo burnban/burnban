@@ -122,6 +122,9 @@ func TestStrictArgumentsAndAgentRemaining(t *testing.T) {
 	if err := s.SetSetting(budget.KeyAgentCapPrefix+"codex", "5"); err != nil {
 		t.Fatal(err)
 	}
+	if err := s.SetSetting(budget.KeyFuseBurst, "5m:4"); err != nil {
+		t.Fatal(err)
+	}
 	if err := s.Insert(store.Request{Ts: time.Now(), Agent: "codex", CostUSD: 1.25, Priced: true}); err != nil {
 		t.Fatal(err)
 	}
@@ -145,6 +148,9 @@ func TestStrictArgumentsAndAgentRemaining(t *testing.T) {
 	}
 	if !strings.Contains(lines[2], `\"remaining_usd\": 3.75`) {
 		t.Fatalf("agent remaining missing: %s", lines[2])
+	}
+	if !strings.Contains(lines[2], `\"velocity_fuse\"`) || !strings.Contains(lines[2], `\"window\": \"5m\"`) {
+		t.Fatalf("velocity fuse missing: %s", lines[2])
 	}
 	if !strings.Contains(lines[3], "duplicate JSON field") {
 		t.Fatalf("duplicate mutation argument accepted: %s", lines[3])

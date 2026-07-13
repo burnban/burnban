@@ -46,6 +46,9 @@ test.
   changes explicitly.
 - Pricing changes must link to a first-party provider source and identify the
   date and region/tier to which the price applies.
+- Source adapters must implement `burnban.source/v1`, honor every scan limit,
+  and include synthetic compatibility fixtures. See
+  [`SOURCE_ADAPTERS.md`](SOURCE_ADAPTERS.md); never commit real agent logs.
 - Avoid unrelated formatting or refactoring in the same pull request.
 
 Maintainers may ask for a changelog or migration note before merging a breaking

@@ -239,6 +239,9 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 			banState = "\n   BURN BAN IN EFFECT — lift with: burnban lift\n"
 		}
 	}
+	if fuse, fuseErr := budget.FuseStatus(s, time.Now()); fuseErr == nil && fuse.Tripped {
+		banState += "\n   SPEND-VELOCITY FUSE TRIPPED — inspect/reset with: burnban fuse\n"
+	}
 
 	ln, err := net.Listen("tcp", addr)
 	if err != nil {
@@ -544,8 +547,13 @@ func capBanner(s *store.Store) string {
 			}
 		}
 	}
+	if fuses, err := budget.FuseStatus(s, time.Now()); err == nil {
+		for _, fuse := range fuses.Rules {
+			parts = append(parts, fmt.Sprintf("$%.2f/rolling %s (%s fuse)", fuse.CapUSD, budget.FormatFuseDuration(fuse.Window), fuse.Name))
+		}
+	}
 	if len(parts) == 0 {
-		return "none — set one: burnban cap --daily 10"
+		return "none — set one: burnban cap --daily 10 or burnban fuse --burst 5m:4"
 	}
 	return strings.Join(parts, " · ")
 }
