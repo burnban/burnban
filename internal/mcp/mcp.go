@@ -139,7 +139,7 @@ func toolDefs(allowBudgetAdmin bool) []map[string]any {
 		},
 		{
 			"name":        "burn_status",
-			"description": "Current global and per-agent budget state, including spent, cap, remaining, overrides, and burn bans.",
+			"description": "Current global, per-agent, and rolling velocity-fuse state, including spent, cap, remaining, overrides, cooldowns, and burn bans.",
 			"inputSchema": obj(map[string]any{
 				"agent": map[string]any{"type": "string", "minLength": 1, "description": "optional: return status for one reported agent name"},
 			}),
@@ -299,6 +299,11 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 			return "", err
 		} else if external {
 			msg += "; external burn ban remains active"
+		}
+		if fuse, err := budget.FuseStatus(s.S, time.Now()); err != nil {
+			return "", err
+		} else if fuse.Tripped {
+			msg += "; spend-velocity fuse remains tripped and requires `burnban fuse --reset`"
 		}
 		return msg, nil
 	default:
@@ -494,6 +499,37 @@ func (s *Server) burnStatus(agentFilter string) (string, error) {
 	}
 	if len(windows) > 0 {
 		out["budget_windows"] = windows
+	}
+	fuses, err := budget.FuseStatus(s.S, now)
+	if err != nil {
+		return "", err
+	}
+	if len(fuses.Rules) > 0 || fuses.Tripped {
+		fuseOut := map[string]any{
+			"tripped":          fuses.Tripped,
+			"cooldown":         budget.FormatFuseDuration(fuses.Cooldown),
+			"cooldown_seconds": fuses.Cooldown.Seconds(),
+		}
+		rules := map[string]any{}
+		for _, rule := range fuses.Rules {
+			rules[rule.Name] = map[string]any{
+				"window": budget.FormatFuseDuration(rule.Window), "cap_usd": rule.CapUSD,
+				"spent_usd": rule.SpentUSD, "remaining_usd": rule.Remaining,
+			}
+		}
+		if len(rules) > 0 {
+			fuseOut["rules"] = rules
+			out["has_cap"] = true
+			out["has_velocity_fuse"] = true
+		}
+		if fuses.Tripped {
+			fuseOut["trip_rule"] = fuses.TripRule
+			fuseOut["projected_usd"] = fuses.TripProjected
+			fuseOut["limit_usd"] = fuses.TripLimitUSD
+			fuseOut["until"] = fuses.TrippedUntil.Format(time.RFC3339)
+			fuseOut["reason"] = fuses.DenialMessage
+		}
+		out["velocity_fuse"] = fuseOut
 	}
 	overridden := false
 	if ov, err := s.S.GetSetting(budget.KeyOverrideDay); err != nil {

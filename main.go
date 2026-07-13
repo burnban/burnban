@@ -48,6 +48,8 @@ func main() {
 		err = cmdReport(os.Args[2:])
 	case "cap":
 		err = cmdCap(os.Args[2:])
+	case "fuse":
+		err = cmdFuse(os.Args[2:])
 	case "ban":
 		err = cmdBan(os.Args[2:])
 	case "lift":
@@ -104,11 +106,12 @@ usage: burnban <command> [flags]
   whatif   reprice a window's traffic onto other models ("what would 7d cost on haiku?")
   subsidy  price local agent/subscription logs at API rates — no proxy needed
   cap      set budgets (--daily 10 --weekly 40 --monthly 120 [--agent NAME] [--warn 80] | --off)
+  fuse     stop runaway spend velocity (--hourly 20 --burst 5m:4 [--cooldown 15m] | --off)
   ban      pause ALL agent spend immediately
   lift     lift the local ban (--today also overrides local caps)
   mcp      MCP server over stdio — plug burnban into Claude Code, Cursor, etc.
   export   dump raw request rows for finance (--since 7d --format csv|json)
-  alert    webhook for cap alerts and 80% warnings (--webhook URL | --off)
+  alert    webhook for cap/fuse incidents and 80% warnings (--webhook URL | --off)
   bench    measure burnban's own added latency against a loopback upstream
   doctor   verify pricing, database health, server health, and agent routing
   pricing  inspect the effective price table and its provenance

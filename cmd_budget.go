@@ -240,6 +240,11 @@ func cmdLift(args []string) error {
 	} else if external {
 		msg += "; external burn ban remains in effect"
 	}
+	if fuse, err := budget.FuseStatus(s, time.Now()); err != nil {
+		return err
+	} else if fuse.Tripped {
+		msg += "; spend-velocity fuse remains tripped — reset it with `burnban fuse --reset`"
+	}
 	fmt.Println(msg)
 	return nil
 }

@@ -145,6 +145,7 @@ func TestBuildReportClassifiesMetered(t *testing.T) {
 		Until:       time.Date(2026, 8, 1, 0, 0, 0, 0, time.UTC),
 		ClaudeDir:   filepath.Join(empty, "claude"),
 		CodexDir:    filepath.Join(empty, "codex"),
+		GeminiDir:   filepath.Join(empty, "gemini"),
 		HermesDB:    hermes,
 		OpenClawDir: filepath.Join(empty, "openclaw"),
 		GooseDB:     filepath.Join(empty, "goose.db"),

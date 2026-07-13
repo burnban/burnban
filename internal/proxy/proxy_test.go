@@ -389,6 +389,34 @@ func TestDailyCapBlocks(t *testing.T) {
 	}
 }
 
+func TestVelocityFuseTripsBeforeUpstream(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	if err := s.SetSetting(budget.KeyFuseHourlyUSD, "0.01"); err != nil {
+		t.Fatal(err)
+	}
+	resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(
+		`{"model":"claude-opus-4-7","max_tokens":1000000,"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(string(body), "burnban_fuse_tripped") || hits.Load() != 0 {
+		t.Fatalf("status=%d hits=%d body=%s", resp.StatusCode, hits.Load(), body)
+	}
+	if raw, err := s.GetSetting(budget.KeyFuseTrip); err != nil || raw == "" {
+		t.Fatalf("trip was not durable: raw=%q err=%v", raw, err)
+	}
+}
+
 func TestAgentCapBlocksOnlyThatAgent(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -695,6 +723,63 @@ func TestDistinctWindowAlertsSameDay(t *testing.T) {
 		t.Fatal("weekly cap should deny")
 	}
 	wait("weekly burn cap")
+}
+
+func TestVelocityFuseAlertsOncePerIncident(t *testing.T) {
+	hits := make(chan string, 4)
+	hook := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		hits <- string(body)
+	}))
+	t.Cleanup(hook.Close)
+
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("tripped fuse must stop traffic before the upstream")
+	}))
+	if err := s.SetSetting(budget.KeyWebhookURL, hook.URL); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetSetting(budget.KeyFuseHourlyUSD, "0.01"); err != nil {
+		t.Fatal(err)
+	}
+	call := func() {
+		resp, err := http.Post(srv.URL+"/anthropic/v1/messages", "application/json", strings.NewReader(
+			`{"model":"claude-opus-4-7","max_tokens":1000000,"messages":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+		if resp.StatusCode != http.StatusPaymentRequired {
+			t.Fatalf("status=%d, want 402", resp.StatusCode)
+		}
+	}
+	wait := func() {
+		t.Helper()
+		select {
+		case message := <-hits:
+			if !strings.Contains(message, "spend-velocity fuse tripped") || !strings.Contains(message, "rolling 1h") {
+				t.Fatalf("webhook=%s", message)
+			}
+		case <-time.After(3 * time.Second):
+			t.Fatal("fuse webhook never fired")
+		}
+	}
+
+	call()
+	wait()
+	call() // same persisted cooldown: no duplicate incident alert
+	select {
+	case message := <-hits:
+		t.Fatalf("fuse incident alerted twice: %s", message)
+	case <-time.After(300 * time.Millisecond):
+	}
+
+	if err := s.DeleteSetting(budget.KeyFuseTrip); err != nil {
+		t.Fatal(err)
+	}
+	call()
+	wait()
 }
 
 func TestOversizeBodyRefused(t *testing.T) {

@@ -18,14 +18,15 @@ import (
 )
 
 // cmdSubsidy prices local agent traffic that may never touch the proxy.
-// Claude Code, Codex, Hermes, OpenClaw, and Goose retain normalized token usage
-// locally; the shared report engine reads those stores without modifying them.
+// Supported coding agents retain normalized token usage locally; the shared
+// report engine reads those stores without modifying them.
 func cmdSubsidy(args []string) error {
 	home, _ := os.UserHomeDir()
 	fs := flag.NewFlagSet("subsidy", flag.ExitOnError)
 	sinceArg := fs.String("since", "30d", `window: "today", "24h", "7d", "30d", or any Go duration`)
 	claudeDir := fs.String("claude-dir", filepath.Join(home, ".claude", "projects"), "Claude Code session logs")
 	codexDir := fs.String("codex-dir", filepath.Join(home, ".codex", "sessions"), "Codex rollout logs")
+	geminiDir := fs.String("gemini-dir", subsidy.DefaultGeminiDir(home), "Gemini CLI project chat logs")
 	hermesDB := fs.String("hermes-db", defaultHermesDB(home), "Hermes state database")
 	openClawDir := fs.String("openclaw-dir", defaultOpenClawDir(home), "OpenClaw state directory")
 	gooseDB := fs.String("goose-db", subsidy.DefaultGooseDB(home), "Goose session database")
@@ -33,7 +34,7 @@ func cmdSubsidy(args []string) error {
 	daily := fs.Bool("daily", false, "per-day breakdown")
 	share := fs.Bool("share", false, "compact screenshot-ready card (defaults to a $200/mo plan comparison)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
-	meteredArg := fs.String("metered", "", "comma-separated sources billed per token, not by subscription (e.g. claude-code,codex); auto-detected from API-key auth otherwise")
+	meteredArg := fs.String("metered", "", "comma-separated sources known to be billed per token (e.g. claude-code,codex,gemini-cli); auto-detected where auth proves it")
 	noAutoMetered := fs.Bool("no-auto-metered", false, "do not auto-classify sources as metered from current API-key auth state")
 	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
 	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
@@ -69,7 +70,7 @@ func cmdSubsidy(args []string) error {
 	until := time.Now()
 	report, err := subsidy.BuildReport(prices, subsidy.ReportOptions{
 		Since: from, Until: until,
-		ClaudeDir: *claudeDir, CodexDir: *codexDir,
+		ClaudeDir: *claudeDir, CodexDir: *codexDir, GeminiDir: *geminiDir,
 		HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
 		MeteredProviders: metered,
 		ScanLimits: subsidy.ScanLimits{
@@ -354,24 +355,11 @@ func parseMeteredList(s string) []string {
 }
 
 func defaultHermesDB(home string) string {
-	base := os.Getenv("HERMES_HOME")
-	if base == "" {
-		base = filepath.Join(home, ".hermes")
-		if local := os.Getenv("LOCALAPPDATA"); local != "" {
-			native := filepath.Join(local, "hermes")
-			if _, err := os.Stat(filepath.Join(native, "state.db")); err == nil {
-				base = native
-			}
-		}
-	}
-	return filepath.Join(base, "state.db")
+	return subsidy.DefaultHermesDB(home)
 }
 
 func defaultOpenClawDir(home string) string {
-	if value := os.Getenv("OPENCLAW_STATE_DIR"); value != "" {
-		return value
-	}
-	return filepath.Join(home, ".openclaw")
+	return subsidy.DefaultOpenClawDir(home)
 }
 
 func subsidyTitle(provider string) string {
@@ -380,6 +368,8 @@ func subsidyTitle(provider string) string {
 		return "CLAUDE CODE"
 	case "codex":
 		return "CODEX"
+	case "gemini-cli":
+		return "GEMINI CLI"
 	case "hermes":
 		return "HERMES AGENT"
 	case "openclaw":

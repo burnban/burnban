@@ -118,8 +118,8 @@ type Guard struct {
 // AdmissionEstimate is a conservative preflight cost bound derived from the
 // request. Priced is false when the request's model cannot be priced. Bounded
 // is false when the provider request omitted an output-token ceiling; such a
-// call is admitted exclusively against any active cap so concurrent calls
-// cannot multiply an unknown overshoot.
+// call is admitted exclusively against any active dollar guardrail so
+// concurrent calls cannot multiply an unknown overshoot.
 type AdmissionEstimate struct {
 	USD         float64
 	Priced      bool
@@ -251,13 +251,18 @@ type Denial struct {
 	Message     string
 	Window      string
 	WindowStart time.Time
+	AlertKey    string
 }
 
 func (d *Denial) Error() string { return d.Message }
 
 // AlertMark is the settings key that dedups this denial's webhook alert.
-// Empty for denial types that don't alert (ban, agent caps).
+// Calendar windows derive it from their start; fuse incidents provide an
+// explicit key. It is empty for denial types that do not alert.
 func (d *Denial) AlertMark() string {
+	if d.AlertKey != "" {
+		return d.AlertKey
+	}
 	if d.Window == "" || d.WindowStart.IsZero() {
 		return ""
 	}
@@ -333,9 +338,9 @@ func Status(s statusReader, now time.Time) ([]WindowState, error) {
 	return out, nil
 }
 
-// Check returns a non-nil Denial when the burn ban is active, or when any
-// window's spend has reached its cap, or the calling agent has reached its
-// own daily cap. A nil, nil return means proceed.
+// Check returns a non-nil Denial when a ban/cooldown is active, a calendar or
+// rolling window has reached its limit, or the calling agent has reached its
+// daily cap. A nil, nil return means proceed.
 func (g *Guard) Check(now time.Time, agent string) (*Denial, error) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
@@ -368,12 +373,16 @@ func (g *Guard) Admit(now time.Time, agent string, estimate AdmissionEstimate) (
 			return nil, &Denial{
 				Type: "burnban_unpriced_request",
 				Message: fmt.Sprintf(
-					"cannot safely enforce an active dollar cap because %s has no known price. Add pricing or remove/override the local cap before sending it.", detail),
+					"cannot safely enforce an active dollar guardrail because %s has no known price. Add pricing or disable the active guardrail before sending it.", detail),
 			}, nil
 		}
 		if estimate.Bounded {
 			amount = estimate.USD
 			if limit, ok := state.firstCrossed(amount); ok {
+				if limit.isFuse() {
+					denial, err := g.tripFuseLocked(now, limit, amount)
+					return nil, denial, err
+				}
 				return nil, &Denial{
 					Type: "burnban_request_exceeds_remaining",
 					Message: fmt.Sprintf(
@@ -411,9 +420,14 @@ type capPosition struct {
 	start    time.Time
 	source   string
 	agent    string
+
+	fuseName     string
+	fuseWindow   time.Duration
+	fuseCooldown time.Duration
 }
 
 func (p capPosition) remaining() float64 { return p.cap - p.spent - p.reserved }
+func (p capPosition) isFuse() bool       { return p.fuseName != "" }
 
 type admissionState struct {
 	positions []capPosition
@@ -609,6 +623,7 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 	for _, w := range Windows() {
 		keys = append(keys, w.Key, w.ExternalKey)
 	}
+	keys = append(keys, fuseSettingKeys()...)
 	vals, err := g.S.GetSettings(keys...)
 	if err != nil {
 		return nil, state, err
@@ -626,7 +641,18 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 			Message: "external burn ban in effect: spend is paused by a locally configured external policy. Contact the policy owner.",
 		}, state, nil
 	}
+	trip, err := parseFuseTrip(vals[KeyFuseTrip])
+	if err != nil {
+		return nil, state, err
+	}
+	if trip != nil && now.Before(trip.Until) {
+		return trip.denial(now), state, nil
+	}
 	overrideLocal := vals[KeyOverrideDay] == now.Format("2006-01-02")
+	fuseRules, fuseCooldown, err := fuseRulesFromSettings(vals)
+	if err != nil {
+		return nil, state, err
+	}
 
 	// Local caps use the machine's calendar; external allocations use UTC so
 	// every meter attached to a coordinator evaluates the same window. One scan
@@ -664,10 +690,14 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 			return nil, state, err
 		}
 	}
-	usageRequests := make([]usageRequest, 0, len(checks)+1)
+	usageRequests := make([]usageRequest, 0, len(checks)+len(fuseRules)+1)
 	for _, check := range checks {
 		usageRequests = append(usageRequests, usageRequest{start: check.start})
 	}
+	for _, rule := range fuseRules {
+		usageRequests = append(usageRequests, usageRequest{start: rollingStart(now, rule.window)})
+	}
+	globalUsageCount := len(checks) + len(fuseRules)
 	if agentCapSet {
 		usageRequests = append(usageRequests, usageRequest{start: DayStart(now), agent: agent})
 	}
@@ -675,7 +705,7 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 	if err != nil {
 		return nil, state, err
 	}
-	g.reconcileUsageCacheLocked(usageRequests[:len(checks)], agent, agentCapSet, DayStart(now))
+	g.reconcileUsageCacheLocked(usageRequests[:globalUsageCount], agent, agentCapSet, DayStart(now))
 	if len(checks) > 0 {
 		for i, check := range checks {
 			position := capPosition{
@@ -725,11 +755,33 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 			}
 		}
 	}
+	for i, rule := range fuseRules {
+		usage := usages[len(checks)+i]
+		position := capPosition{
+			name: "rolling " + FormatFuseDuration(rule.window) + " " + rule.name,
+			cap:  rule.capUSD, spent: usage.SpentUSD, reserved: g.reservedUSD,
+			unsafe: usage.EnforcementGaps, fuseName: rule.name,
+			fuseWindow: rule.window, fuseCooldown: fuseCooldown,
+		}
+		state.positions = append(state.positions, position)
+		if position.unsafe > 0 {
+			return &Denial{
+				Type: "burnban_metering_gap",
+				Message: fmt.Sprintf(
+					"the rolling %s spend-velocity fuse is paused fail-closed: %d successful request(s) in this window had incomplete usage or unknown pricing. Correct pricing/accounting or remove the fuse.",
+					FormatFuseDuration(rule.window), position.unsafe),
+			}, state, nil
+		}
+		if position.spent+position.reserved >= position.cap {
+			denial, err := g.tripFuseLocked(now, position, 0)
+			return denial, state, err
+		}
+	}
 
 	if !agentCapSet {
 		return nil, state, nil
 	}
-	usage := usages[len(checks)]
+	usage := usages[globalUsageCount]
 	position := capPosition{
 		name: "daily agent", cap: agentCap, spent: usage.SpentUSD,
 		reserved: g.reservedByAgent[agent], unsafe: usage.EnforcementGaps,

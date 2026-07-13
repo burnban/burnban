@@ -96,30 +96,44 @@ func renderTop(s *store.Store, color bool) (string, error) {
 			message = "EXTERNAL BURN BAN — contact the external policy owner"
 		}
 		b.WriteString(colorize(message, cRed, color) + "\n\n")
-	} else if states, err := budget.Status(s, now); err != nil {
+	}
+	fuses, err := budget.FuseStatus(s, now)
+	if err != nil {
 		return "", err
+	}
+	if fuses.Tripped {
+		fmt.Fprintf(&b, "%s\n%s\n\n",
+			colorize("SPEND-VELOCITY FUSE TRIPPED — new spend paused", cRed, color),
+			terminalText(fuses.DenialMessage, 300))
+	}
+	states, err := budget.Status(s, now)
+	if err != nil {
+		return "", err
+	}
+	any := false
+	for _, st := range states {
+		if !st.Set {
+			continue
+		}
+		frac := st.Spent / st.CapUSD
+		fmt.Fprintf(&b, "%-9s %s $%.2f / $%.2f (%s)\n", st.Name,
+			colorize(bar(frac, 28), budgetBarColor(frac), color), st.Spent, st.CapUSD, terminalText(st.Source, 40))
+		any = true
+	}
+	for _, fuse := range fuses.Rules {
+		frac := fuse.SpentUSD / fuse.CapUSD
+		label := fuse.Name + "*"
+		fmt.Fprintf(&b, "%-9s %s $%.2f / $%.2f (rolling %s)\n", label,
+			colorize(bar(frac, 28), budgetBarColor(frac), color), fuse.SpentUSD, fuse.CapUSD, budget.FormatFuseDuration(fuse.Window))
+		any = true
+	}
+	if any {
+		if len(fuses.Rules) > 0 {
+			fmt.Fprintf(&b, "%s\n", colorize("* spend-velocity fuse", cDim, color))
+		}
+		b.WriteString("\n")
 	} else {
-		any := false
-		for _, st := range states {
-			if !st.Set {
-				continue
-			}
-			frac := st.Spent / st.CapUSD
-			barColor := cGreen
-			switch {
-			case frac >= 0.9:
-				barColor = cRed
-			case frac >= 0.6:
-				barColor = cYellow
-			}
-			fmt.Fprintf(&b, "%-7s %s $%.2f / $%.2f (%s)\n", st.Name, colorize(bar(frac, 30), barColor, color), st.Spent, st.CapUSD, terminalText(st.Source, 40))
-			any = true
-		}
-		if any {
-			b.WriteString("\n")
-		} else {
-			b.WriteString(colorize("budget  no cap set — burnban cap --daily 10", cDim, color) + "\n\n")
-		}
+		b.WriteString(colorize("guardrail  none — burnban cap --daily 10 · burnban fuse --burst 5m:4", cDim, color) + "\n\n")
 	}
 
 	if len(sum.Models) > 0 {
@@ -140,6 +154,17 @@ func renderTop(s *store.Store, color bool) (string, error) {
 		b.WriteString(colorize("ctrl+c to quit", cDim, true) + "\n")
 	}
 	return b.String(), nil
+}
+
+func budgetBarColor(frac float64) string {
+	switch {
+	case frac >= 0.9:
+		return cRed
+	case frac >= 0.6:
+		return cYellow
+	default:
+		return cGreen
+	}
 }
 
 func colorize(value, code string, enabled bool) string {

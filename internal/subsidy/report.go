@@ -1,15 +1,15 @@
 package subsidy
 
 import (
+	"fmt"
 	"os"
-	"path/filepath"
-	"runtime"
 	"slices"
 	"sort"
 	"strings"
 	"time"
 
 	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 // Totals is the common token and API-equivalent cost shape used by the CLI
@@ -43,9 +43,11 @@ type DayUsage struct {
 }
 
 type ProviderUsage struct {
-	Provider string `json:"provider"`
-	Dir      string `json:"-"`
-	Detected bool   `json:"detected"`
+	Provider       string                `json:"provider"`
+	AdapterVersion string                `json:"adapter_version"`
+	Privacy        sourceadapter.Privacy `json:"privacy"`
+	Dir            string                `json:"-"`
+	Detected       bool                  `json:"detected"`
 	// Metered is true when this source is billed per token (a BYO-key agent, or
 	// a subscription CLI running on an API key), so its API-equivalent dollars
 	// are a real bill rather than a subsidy comparison. BillingProvider names
@@ -96,19 +98,25 @@ type ReportOptions struct {
 	Until       time.Time
 	ClaudeDir   string
 	CodexDir    string
+	GeminiDir   string
 	HermesDB    string
 	OpenClawDir string
 	GooseDB     string
 	ScanLimits  ScanLimits
+	// AdditionalAdapters are compiled-in extensions of the v1 adapter
+	// contract. SourcePaths can override the path for any built-in or added
+	// adapter by manifest ID.
+	AdditionalAdapters []sourceadapter.Adapter
+	SourcePaths        map[string]string
 	// MeteredProviders forces named sources (e.g. "claude-code", "codex") into
 	// the real-spend bucket, for API-key auth or Max-20x overage that the local
 	// logs cannot reveal on their own.
 	MeteredProviders []string
 }
 
-// BuildReport auto-detects Claude Code, Codex, Hermes, OpenClaw, and Goose logs and
-// prices every event in the requested window. It performs no network calls
-// and never modifies the source logs.
+// BuildReport auto-detects every registered local adapter and prices its events
+// in the requested window. It performs no network calls and never modifies the
+// source stores.
 func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 	if opts.Until.IsZero() {
 		opts.Until = time.Now()
@@ -116,36 +124,17 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 	if opts.Since.IsZero() {
 		opts.Since = opts.Until.Add(-30 * 24 * time.Hour)
 	}
-	if opts.ClaudeDir == "" || opts.CodexDir == "" || opts.HermesDB == "" || opts.OpenClawDir == "" || opts.GooseDB == "" {
-		home, _ := os.UserHomeDir()
-		if opts.ClaudeDir == "" {
-			opts.ClaudeDir = filepath.Join(home, ".claude", "projects")
-		}
-		if opts.CodexDir == "" {
-			opts.CodexDir = filepath.Join(home, ".codex", "sessions")
-		}
-		if opts.HermesDB == "" {
-			hermesHome := os.Getenv("HERMES_HOME")
-			if hermesHome == "" {
-				hermesHome = filepath.Join(home, ".hermes")
-				if local := os.Getenv("LOCALAPPDATA"); local != "" {
-					native := filepath.Join(local, "hermes")
-					if _, err := os.Stat(filepath.Join(native, "state.db")); err == nil {
-						hermesHome = native
-					}
-				}
-			}
-			opts.HermesDB = filepath.Join(hermesHome, "state.db")
-		}
-		if opts.OpenClawDir == "" {
-			opts.OpenClawDir = os.Getenv("OPENCLAW_STATE_DIR")
-			if opts.OpenClawDir == "" {
-				opts.OpenClawDir = filepath.Join(home, ".openclaw")
-			}
-		}
-		if opts.GooseDB == "" {
-			opts.GooseDB = DefaultGooseDB(home)
-		}
+	home, _ := os.UserHomeDir()
+	pathOverrides := map[string]string{
+		"claude-code": opts.ClaudeDir,
+		"codex":       opts.CodexDir,
+		"gemini-cli":  opts.GeminiDir,
+		"hermes":      opts.HermesDB,
+		"openclaw":    opts.OpenClawDir,
+		"goose":       opts.GooseDB,
+	}
+	for id, path := range opts.SourcePaths {
+		pathOverrides[id] = path
 	}
 
 	report := Report{
@@ -175,19 +164,39 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 	}
 
 	type source struct {
-		name string
-		dir  string
-		scan func(string, time.Time, ScanLimits, func(Event)) (scanResult, error)
+		manifest sourceadapter.Manifest
+		dir      string
+		adapter  sourceadapter.Adapter
 	}
-	sources := []source{
-		{name: "claude-code", dir: opts.ClaudeDir, scan: scanClaude},
-		{name: "codex", dir: opts.CodexDir, scan: scanCodex},
-		{name: "hermes", dir: opts.HermesDB, scan: scanHermes},
-		{name: "openclaw", dir: opts.OpenClawDir, scan: scanOpenClaw},
-		{name: "goose", dir: opts.GooseDB, scan: scanGoose},
+	adapters := append(BuiltinAdapters(), opts.AdditionalAdapters...)
+	sources := make([]source, 0, len(adapters))
+	adapterIDs := map[string]struct{}{}
+	for _, adapter := range adapters {
+		if adapter == nil {
+			return Report{}, fmt.Errorf("source adapter must not be nil")
+		}
+		manifest := adapter.Manifest()
+		if err := manifest.Validate(); err != nil {
+			return Report{}, err
+		}
+		if _, duplicate := adapterIDs[manifest.ID]; duplicate {
+			return Report{}, fmt.Errorf("duplicate source adapter %q", manifest.ID)
+		}
+		adapterIDs[manifest.ID] = struct{}{}
+		path := pathOverrides[manifest.ID]
+		if path == "" {
+			path = adapter.DefaultPath(home)
+		}
+		if path == "" {
+			return Report{}, fmt.Errorf("source adapter %q returned an empty default path", manifest.ID)
+		}
+		sources = append(sources, source{manifest: manifest, dir: path, adapter: adapter})
 	}
 	for _, src := range sources {
-		provider := ProviderUsage{Provider: src.name, Dir: src.dir, Models: []ModelUsage{}, Days: []DayUsage{}}
+		provider := ProviderUsage{
+			Provider: src.manifest.ID, AdapterVersion: src.manifest.APIVersion,
+			Privacy: src.manifest.Privacy, Dir: src.dir, Models: []ModelUsage{}, Days: []DayUsage{},
+		}
 		providerBilling := ""
 		if _, err := os.Stat(src.dir); err == nil {
 			provider.Detected = true
@@ -225,11 +234,19 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 			t.ServerToolUse.WebSearchRequests += event.ServerToolUse.WebSearchRequests
 			t.ServerToolUse.WebFetchRequests += event.ServerToolUse.WebFetchRequests
 		}
-		result, err := src.scan(src.dir, opts.Since, opts.ScanLimits, func(event Event) {
+		seenEvents := map[string]struct{}{}
+		result, err := src.adapter.Scan(src.dir, opts.Since, opts.ScanLimits, func(event Event) {
 			if event.Time.After(opts.Until) {
 				return
 			}
+			if event.ID != "" {
+				if _, duplicate := seenEvents[event.ID]; duplicate {
+					return
+				}
+				seenEvents[event.ID] = struct{}{}
+			}
 			event = normalizeEvent(event)
+			event.Provider = src.manifest.ID
 			if event.BillingProvider != "" {
 				providerBilling = event.BillingProvider
 			}
@@ -290,7 +307,7 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 			// One incompatible or temporarily locked agent store must not hide
 			// usage from every other detected tool. Surface the source error in
 			// the report and keep the successful partial data.
-			provider.Error = "unable to scan " + src.name + " usage"
+			provider.Error = "unable to scan " + src.manifest.ID + " usage"
 			provider.Detail = err.Error()
 			report.Partial = true
 		}
@@ -310,7 +327,7 @@ func BuildReport(prices *pricing.Table, opts ReportOptions) (Report, error) {
 		}
 		sort.Slice(provider.Days, func(i, j int) bool { return provider.Days[i].Day < provider.Days[j].Day })
 
-		provider.Metered = providerBilling != "" || slices.Contains(opts.MeteredProviders, src.name)
+		provider.Metered = providerBilling != "" || slices.Contains(opts.MeteredProviders, src.manifest.ID)
 		provider.BillingProvider = providerBilling
 		if provider.Metered {
 			report.MeteredUSD += provider.APIUSD
@@ -335,43 +352,8 @@ func normalizeEvent(event Event) Event {
 	event.CacheWrite1h = max(event.CacheWrite1h, 0)
 	event.ServerToolUse.WebSearchRequests = max(event.ServerToolUse.WebSearchRequests, 0)
 	event.ServerToolUse.WebFetchRequests = max(event.ServerToolUse.WebFetchRequests, 0)
+	if event.Confidence == "" {
+		event.Confidence = sourceadapter.ConfidenceExact
+	}
 	return event
-}
-
-// DefaultGooseDB returns Goose's current per-OS data path, honoring its
-// documented GOOSE_PATH_ROOT override and legacy locations.
-func DefaultGooseDB(home string) string {
-	if root := os.Getenv("GOOSE_PATH_ROOT"); root != "" {
-		return filepath.Join(root, "data", "sessions", "sessions.db")
-	}
-	var candidates []string
-	if data := os.Getenv("XDG_DATA_HOME"); data != "" {
-		candidates = append(candidates,
-			filepath.Join(data, "goose", "sessions", "sessions.db"),
-			filepath.Join(data, "Block", "goose", "sessions", "sessions.db"))
-	}
-	if appData := os.Getenv("APPDATA"); appData != "" {
-		candidates = append(candidates, filepath.Join(appData, "Block", "goose", "sessions", "sessions.db"))
-	}
-	candidates = append(candidates,
-		filepath.Join(home, ".local", "share", "goose", "sessions", "sessions.db"),
-		filepath.Join(home, ".local", "share", "Block", "goose", "sessions", "sessions.db"),
-		filepath.Join(home, "Library", "Application Support", "Block", "goose", "sessions", "sessions.db"),
-		filepath.Join(home, "Library", "Application Support", "goose", "sessions", "sessions.db"),
-		filepath.Join(home, ".config", "goose", "sessions.db"),
-	)
-	for _, candidate := range candidates {
-		if _, err := os.Stat(candidate); err == nil {
-			return candidate
-		}
-	}
-	switch runtime.GOOS {
-	case "darwin":
-		return filepath.Join(home, "Library", "Application Support", "Block", "goose", "sessions", "sessions.db")
-	case "windows":
-		if appData := os.Getenv("APPDATA"); appData != "" {
-			return filepath.Join(appData, "Block", "goose", "sessions", "sessions.db")
-		}
-	}
-	return filepath.Join(home, ".local", "share", "goose", "sessions", "sessions.db")
 }

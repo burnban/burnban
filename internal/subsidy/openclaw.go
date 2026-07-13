@@ -36,7 +36,7 @@ func ScanOpenClaw(dir string, since time.Time, emit func(Event)) (int, error) {
 	return result.Sessions, err
 }
 
-func scanOpenClaw(dir string, since time.Time, limits ScanLimits, emit func(Event)) (scanResult, error) {
+func scanOpenClaw(dir string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	sessions := 0
 	scanner := newFileScanner(limits)
 	err := scanner.walkJSONL(dir, since, func(path string) error {
@@ -82,5 +82,5 @@ func scanOpenClaw(dir string, since time.Time, limits ScanLimits, emit func(Even
 		}
 		return err
 	})
-	return scanResult{Sessions: sessions, Stats: scanner.stats}, err
+	return ScanResult{Sessions: sessions, Stats: scanner.stats}, err
 }

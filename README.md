@@ -32,15 +32,19 @@ Release installers verify the archive against published SHA-256 checksums. For a
 
 ## Price the plans you already use
 
-Claude Code, Codex, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
+Claude Code, Codex, Gemini CLI, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
 
 ```sh
-burnban subsidy                 # auto-detect all five sources; last 30 days
+burnban subsidy                 # auto-detect all six sources; last 30 days
 burnban subsidy --since 7d      # another window
 burnban subsidy --daily --json  # daily detail or machine-readable output
 ```
 
 The $4,173.49 result is a real machine's last 30 days, not a provider invoice. The calculation is cache-aware, prices Anthropic's 1-hour cache-write tier at its real 2× rate, and deduplicates repeated message IDs instead of inflating the result.
+
+Local readers implement a versioned, metadata-only [source adapter contract](SOURCE_ADAPTERS.md). Each adapter is read-only, offline, resource-bounded, fixture-tested, and declares its privacy behavior. The registry remains compile-time; Burnban never downloads or executes plugins.
+
+Gemini CLI history does not prove whether API-key or Vertex usage was free-tier or billed. Burnban therefore keeps it in the API-equivalent comparison by default; pass `--metered gemini-cli` only when you know the selected traffic was billed.
 
 ## Proxy quickstart
 
@@ -78,11 +82,19 @@ Set hard local guardrails:
 burnban cap --daily 10 --weekly 40 --monthly 120
 burnban cap --agent openclaw --daily 3
 burnban cap --warn 80
+burnban fuse --hourly 20 --burst 5m:4 --cooldown 15m
 burnban ban
 burnban lift --today
 ```
 
-Burnban serializes admission and reserves conservative request cost against in-flight work. Known models with output-token limits are rejected before forwarding when they cannot fit. Unknown-price traffic and accounting gaps fail closed under an active cap; a single unbounded call can still overshoot because its final cost is unknowable in advance. These are strong local guardrails, not a provider-side billing limit.
+The spend-velocity fuse stops loops and fan-out before they can consume a much
+larger daily allowance. `--hourly 20` limits every rolling hour; `--burst 5m:4`
+limits every rolling five minutes. Crossing either threshold—using recorded
+spend plus conservative in-flight request bounds—starts a restart-safe 15-minute
+cooldown. Run `burnban fuse` for the live reason and runway. Use
+`burnban fuse --reset` to recover early or `burnban fuse --off` to remove it.
+
+Burnban serializes admission and reserves conservative request cost against in-flight work. Known models with output-token limits are rejected before forwarding when they cannot fit. Unknown-price traffic and accounting gaps fail closed under an active dollar guardrail; a single unbounded call can still overshoot because its final cost is unknowable in advance. These are strong local guardrails, not a provider-side billing limit.
 
 Reprice traffic you already ran:
 
@@ -106,13 +118,13 @@ What it sees: request metadata and provider usage frames needed to meter live tr
 
 ## What you get
 
-- **Local + live dashboard** at `http://localhost:4141` — auto-detected subscription/agent logs with dollar and token breakdowns, plus live proxy burn, a fuse-style budget bar, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
+- **Local + live dashboard** at `http://localhost:4141` — auto-detected subscription/agent logs with dollar and token breakdowns, plus live proxy burn, calendar/fuse guardrail bars, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, last-hour spend, and every budget window. Redirected output is plain text; `--once` prints one snapshot.
 - **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
-- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
-- **Budget guardrails** — daily, weekly, and monthly caps enforced during admission with in-flight reservations, per-agent daily caps, a retried webhook warning at 80% (yours to tune), and a manual **burn ban** kill switch.
-- **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active caps fail safe around accounting gaps.
+- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
+- **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst velocity fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
+- **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active dollar guardrails fail safe around accounting gaps.
 - **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state.
 
 ## How it works
@@ -125,7 +137,8 @@ burnban serve  ──►  anthropic / openai / gemini / xai / any --upstream
    │
    ├─ relays provider requests/responses and streams SSE as it arrives
    ├─ reads usage frames and request-side bounds, prices them (cache-aware)
-   ├─ reserves in-flight budget and fails closed on persistence/accounting gaps
+   ├─ reserves in-flight budget; trips rolling velocity fuses before runaway spend
+   ├─ fails closed on persistence, pricing, and accounting gaps
    ├─ SQLite at ~/.burnban/burnban.db — yours, greppable
    └─ refuses to forward when you're over budget
 ```
@@ -138,7 +151,7 @@ API keys are forwarded to the configured upstream and never persisted.
 The primary metered surfaces are text-generation endpoints using Anthropic,
 OpenAI-compatible, and Gemini usage shapes. Other successful POST endpoints are
 forwarded, but if Burnban cannot obtain safe usage they are marked unmetered; an
-active dollar cap then fails closed rather than pretending the call cost $0.
+active dollar guardrail then fails closed rather than pretending the call cost $0.
 
 ## Why not the big gateway?
 
@@ -232,9 +245,10 @@ claude mcp add burnban -- burnban mcp
 ```
 
 Read-only is the secure default. It exposes `spend_summary`, `burn_status`, and
-`pricing_diagnostics`; `burn_status` can report a named agent's daily
-spent/cap/remaining position. Everything runs over stdio against the local
-database—no network and no provider keys.
+`pricing_diagnostics`; `burn_status` reports calendar budgets, rolling fuse
+runway/cooldowns, and a named agent's daily spent/cap/remaining position.
+Everything runs over stdio against the local database—no network and no
+provider keys.
 
 Budget mutation tools are intentionally absent unless the human launching the
 MCP server grants that authority:
@@ -248,7 +262,10 @@ That opt-in adds strict-argument `set_daily_cap` (daily/weekly/monthly),
 MCP process into an administrator, and missing `usd` is rejected rather than
 interpreted as “remove the cap.”
 
-`burn_status` reports spent/cap/**remaining** per window, which turns budgets into something agents can plan around: an agent that can ask *"how much runway is left?"* can downshift models or stop gracefully instead of slamming into the 402.
+`burn_status` reports spent/cap/**remaining** per calendar and rolling window,
+which turns budgets into something agents can plan around: an agent that can
+ask *"how much runway is left?"* can downshift models or stop gracefully instead
+of slamming into the 402.
 
 ## For IT managers
 
@@ -295,9 +312,10 @@ And the plumbing your existing stack expects:
 
 - **Prometheus** — scrape `/metrics`: retained-ledger request/spend gauges,
   bounded per-model/per-agent gauges, spend and cap gauges for the
-  day/week/month windows, confidence states, and ban state. Retained-ledger
-  gauges can decrease after an explicit `prune`; they are not monotonic counters.
-- **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`) and again when a cap trips.
+  day/week/month and rolling fuse windows, confidence states, fuse trip state,
+  and ban state. Retained-ledger gauges can decrease after an explicit `prune`;
+  they are not monotonic counters.
+- **Alerts** — `burnban alert --webhook https://hooks.slack.com/...` posts to Slack (or anything webhook-compatible) at 80% of any cap (tune with `cap --warn`), when a cap trips, and for each velocity-fuse incident.
 - **Finance export** — `burnban export --since 7d --format csv` dumps the raw ledger for cost allocation; `--format json` for pipelines. Spreadsheet formulas and terminal controls in provider-controlled labels are neutralized.
 - **Audit trail** — every request row (timestamp, provider route, model, self-asserted agent/session labels, tokens, usage/pricing confidence, cost, status) lives in plain SQLite you can query directly. Request bodies are never stored; duplicate heuristics use a keyed local fingerprint.
 
@@ -376,7 +394,7 @@ See [data and privacy](DATA_AND_PRIVACY.md), [security reporting](SECURITY.md),
 
 ## Free forever vs. paid
 
-Everything in this README — the proxy, dashboard, caps, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and an optional operator-configured webhook. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
+Everything in this README — the proxy, dashboard, caps, velocity fuse, `subsidy`, `whatif`, MCP, exports, the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and an optional operator-configured webhook. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
 
 Burnban's separately maintained product ladder is:
 
