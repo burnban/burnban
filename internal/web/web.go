@@ -46,7 +46,10 @@ type Config struct {
 	// DisableLocalUsage prevents the server from reading host-user agent logs.
 	// Network/team exposure always forces this true below, regardless of input.
 	DisableLocalUsage bool
-	Health            func() HealthStatus
+	// LocalUsageScanLimits optionally overrides the bounded scanner envelope
+	// used by the localhost dashboard. Zero values retain the safe defaults.
+	LocalUsageScanLimits subsidy.ScanLimits
+	Health               func() HealthStatus
 }
 
 type HealthStatus struct {
@@ -71,7 +74,7 @@ func RegisterWithConfig(mux *http.ServeMux, s *store.Store, cfg Config) {
 	if cfg.Exposure == "team/network" {
 		cfg.DisableLocalUsage = true
 	}
-	subscriptions := newSubscriptionFeed(cfg.Prices)
+	subscriptions := newSubscriptionFeed(cfg.Prices, cfg.LocalUsageScanLimits)
 	summaries := newSummaryFeed(s, cfg)
 	metrics := newMetricsFeed(s)
 	registerQualityAPI(mux, s)
@@ -325,12 +328,13 @@ type cachedSubscription struct {
 type subscriptionFeed struct {
 	mu      sync.Mutex
 	prices  *pricing.Table
+	limits  subsidy.ScanLimits
 	entries map[string]cachedSubscription
 	ttl     time.Duration
 }
 
-func newSubscriptionFeed(prices *pricing.Table) *subscriptionFeed {
-	return &subscriptionFeed{prices: prices, entries: map[string]cachedSubscription{}, ttl: time.Minute}
+func newSubscriptionFeed(prices *pricing.Table, limits subsidy.ScanLimits) *subscriptionFeed {
+	return &subscriptionFeed{prices: prices, limits: limits, entries: map[string]cachedSubscription{}, ttl: time.Minute}
 }
 
 func (f *subscriptionFeed) get(window string, now time.Time) (*subscriptionResponse, error) {
@@ -359,6 +363,7 @@ func (f *subscriptionFeed) get(window string, now time.Time) (*subscriptionRespo
 	report, err := subsidy.BuildReport(f.prices, subsidy.ReportOptions{
 		Since: since, Until: now,
 		MeteredProviders: subsidy.DetectMeteredProviders(home),
+		ScanLimits:       f.limits,
 	})
 	if err != nil {
 		return nil, err

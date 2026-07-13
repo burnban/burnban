@@ -74,25 +74,14 @@ func scanOpenCode(path string, since time.Time, limits ScanLimits, emit func(Eve
 	limits = normalizeScanLimits(limits)
 	result := ScanResult{}
 
-	files, bytes, err := openCodeSourceSize(path)
-	if os.IsNotExist(err) {
-		return result, nil
-	}
+	stats, ready, err := preflightSQLiteSource(path, limits)
 	if err != nil {
 		return result, fmt.Errorf("opencode database: %w", err)
 	}
-	if files > limits.MaxFiles {
-		result.Stats.FilesSkipped = files
-		result.Stats.Warn("file scan limit reached")
+	result.Stats = stats
+	if !ready {
 		return result, nil
 	}
-	if bytes > limits.MaxBytes {
-		result.Stats.FilesSkipped = files
-		result.Stats.Warn("byte scan limit reached")
-		return result, nil
-	}
-	result.Stats.FilesScanned = files
-	result.Stats.BytesScanned = bytes
 
 	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
 	db, err := sql.Open("sqlite", uri+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(2000)")
@@ -135,32 +124,6 @@ func scanOpenCode(path string, since time.Time, limits ScanLimits, emit func(Eve
 	}
 	result.Sessions = len(sessions)
 	return result, nil
-}
-
-func openCodeSourceSize(path string) (int, int64, error) {
-	info, err := os.Lstat(path)
-	if err != nil {
-		return 0, 0, err
-	}
-	if !info.Mode().IsRegular() {
-		return 0, 0, fmt.Errorf("expected a stable regular database file")
-	}
-	files, bytes := 1, info.Size()
-	for _, suffix := range []string{"-wal", "-shm"} {
-		aux, err := os.Lstat(path + suffix)
-		if err == nil && aux.Mode().IsRegular() {
-			files++
-			bytes += aux.Size()
-			continue
-		}
-		if err == nil {
-			return 0, 0, fmt.Errorf("expected stable regular database sidecars")
-		}
-		if err != nil && !os.IsNotExist(err) {
-			return 0, 0, err
-		}
-	}
-	return files, bytes, nil
 }
 
 func openCodeTables(ctx context.Context, db *sql.DB) (map[string]bool, error) {

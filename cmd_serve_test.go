@@ -50,6 +50,23 @@ func TestUpstreamFlagRejectsUnsafeNames(t *testing.T) {
 	}
 }
 
+func TestServeRejectsInvalidLocalUsageScanLimitsBeforeOpeningLedger(t *testing.T) {
+	t.Setenv("BURNBAN_TOKEN", "")
+	for _, args := range [][]string{
+		{"--local-usage-max-scan-mb", "0"},
+		{"--local-usage-scan-timeout", "0s"},
+	} {
+		dbPath := filepath.Join(t.TempDir(), "must-not-open.db")
+		err := cmdServeWithOptions(append(args, "--db", dbPath, "--port", "0"), false, false)
+		if err == nil || !strings.Contains(err.Error(), "scan limits must be greater than zero") {
+			t.Fatalf("args=%v error=%v", args, err)
+		}
+		if _, statErr := os.Stat(dbPath); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("args=%v opened ledger: %v", args, statErr)
+		}
+	}
+}
+
 func TestServeLifecycleHealthAndGracefulStop(t *testing.T) {
 	t.Setenv("BURNBAN_TOKEN", "")
 	dbPath := filepath.Join(t.TempDir(), "lifecycle.db")

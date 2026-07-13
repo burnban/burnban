@@ -2,13 +2,14 @@ package subsidy
 
 import (
 	"database/sql"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
 
-func TestScanHermes(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+func writeHermesFixture(t *testing.T, path string) {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -26,6 +27,11 @@ func TestScanHermes(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestScanHermes(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "state.db")
+	writeHermesFixture(t, path)
 	var events []Event
 	n, err := ScanHermes(path, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), func(event Event) {
 		events = append(events, event)
@@ -65,8 +71,8 @@ func TestScanOpenClaw(t *testing.T) {
 	}
 }
 
-func TestScanGoose(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "sessions.db")
+func writeGooseFixture(t *testing.T, path string) {
+	t.Helper()
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
 		t.Fatal(err)
@@ -87,6 +93,11 @@ func TestScanGoose(t *testing.T) {
 	if err := db.Close(); err != nil {
 		t.Fatal(err)
 	}
+}
+
+func TestScanGoose(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "sessions.db")
+	writeGooseFixture(t, path)
 	var events []Event
 	n, err := ScanGoose(path, time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), func(event Event) {
 		events = append(events, event)
@@ -99,5 +110,67 @@ func TestScanGoose(t *testing.T) {
 	}
 	if got := events[0]; got.Provider != "goose" || got.Model != "openai/gpt-5.6-sol" || got.In != 100 || got.Out != 20 || got.CacheRead != 300 || got.CacheWrite5m != 40 || !got.CostKnown {
 		t.Fatalf("event = %+v", got)
+	}
+}
+
+type sqliteLimitScanner func(string, time.Time, ScanLimits, func(Event)) (ScanResult, error)
+
+func assertSQLiteByteLimits(t *testing.T, name string, writeFixture func(*testing.T, string), scan sqliteLimitScanner) {
+	t.Helper()
+	for _, tc := range []struct {
+		name         string
+		sidecar      string
+		skippedFiles int
+	}{
+		{name: "main", skippedFiles: 1},
+		{name: "wal", sidecar: "-wal", skippedFiles: 2},
+		{name: "shm", sidecar: "-shm", skippedFiles: 2},
+		{name: "rollback-journal", sidecar: "-journal", skippedFiles: 2},
+	} {
+		t.Run(name+"-oversized-"+tc.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), name+".db")
+			writeFixture(t, path)
+			info, err := os.Stat(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			maxBytes := int64(1)
+			if tc.sidecar != "" {
+				maxBytes = info.Size()
+				if err := os.WriteFile(path+tc.sidecar, []byte{0}, 0o600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			limits := DefaultScanLimits()
+			limits.MaxBytes = maxBytes
+			emitted := 0
+			result, err := scan(path, time.Time{}, limits, func(Event) { emitted++ })
+			if err != nil {
+				t.Fatal(err)
+			}
+			if emitted != 0 || result.Sessions != 0 || !result.Stats.Partial ||
+				result.Stats.FilesScanned != 0 || result.Stats.FilesSkipped != tc.skippedFiles ||
+				result.Stats.BytesScanned != 0 || !hasStr(result.Stats.Warnings, "byte scan limit reached") {
+				t.Fatalf("result=%+v emitted=%d", result, emitted)
+			}
+		})
+	}
+}
+
+func TestScanHermesHonorsSQLiteByteLimits(t *testing.T) {
+	assertSQLiteByteLimits(t, "hermes", writeHermesFixture, scanHermes)
+}
+
+func TestScanGooseHonorsSQLiteByteLimits(t *testing.T) {
+	assertSQLiteByteLimits(t, "goose", writeGooseFixture, scanGoose)
+}
+
+func TestSQLiteSourceSizeAdditionRejectsOverflow(t *testing.T) {
+	maxInt64 := int64(^uint64(0) >> 1)
+	if got, err := addSQLiteSourceSize(maxInt64-1, 1); err != nil || got != maxInt64 {
+		t.Fatalf("boundary addition = %d, %v", got, err)
+	}
+	if _, err := addSQLiteSourceSize(maxInt64, 1); err == nil {
+		t.Fatal("overflowing source sizes were accepted")
 	}
 }

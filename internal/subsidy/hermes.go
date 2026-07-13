@@ -5,7 +5,6 @@ import (
 	"database/sql"
 	"fmt"
 	"net/url"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -44,20 +43,21 @@ func hermesColumns(ctx context.Context, db *sql.DB) map[string]bool {
 func scanHermes(path string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	limits = normalizeScanLimits(limits)
 	result := ScanResult{}
-	info, err := os.Stat(path)
-	if os.IsNotExist(err) {
-		return result, nil
-	} else if err != nil {
-		return result, err
+	stats, ready, err := preflightSQLiteSource(path, limits)
+	if err != nil {
+		return result, fmt.Errorf("hermes state: %w", err)
 	}
-	result.Stats.FilesScanned = 1
-	result.Stats.BytesScanned = min(info.Size(), limits.MaxBytes)
+	result.Stats = stats
+	if !ready {
+		return result, nil
+	}
 	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
-	db, err := sql.Open("sqlite", uri+"?mode=ro&_pragma=busy_timeout(2000)")
+	db, err := sql.Open("sqlite", uri+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(2000)")
 	if err != nil {
 		return result, fmt.Errorf("hermes state: %w", err)
 	}
 	defer db.Close()
+	db.SetMaxOpenConns(1)
 	ctx, cancel := context.WithTimeout(context.Background(), limits.MaxDuration)
 	defer cancel()
 	// billing_provider and estimated_cost_usd are newer Hermes columns; older
