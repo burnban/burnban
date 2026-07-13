@@ -136,7 +136,8 @@ func TestScanCodexBaselineBeforeWindow(t *testing.T) {
 	// The session starts before the window: the pre-window total must set
 	// the baseline without being emitted, so the in-window event carries
 	// only its own delta.
-	writeLog(t, filepath.Join(root, "2026", "06", "30"), "rollout-2.jsonl", `{"timestamp":"2026-06-30T23:00:00.000Z","type":"turn_context","payload":{"model":"gpt-5.1"}}
+	writeLog(t, filepath.Join(root, "2026", "06", "30"), "rollout-2.jsonl", `{"timestamp":"2026-06-30T22:59:59.000Z","type":"session_meta","payload":{"id":"window-baseline","source":"cli"}}
+{"timestamp":"2026-06-30T23:00:00.000Z","type":"turn_context","payload":{"model":"gpt-5.1"}}
 {"timestamp":"2026-06-30T23:30:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200,"reasoning_output_tokens":0,"total_tokens":1200}}}}
 {"timestamp":"2026-07-01T00:30:00.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1100,"cached_input_tokens":650,"output_tokens":210,"reasoning_output_tokens":0,"total_tokens":1310}}}}
 `)
@@ -150,34 +151,43 @@ func TestScanCodexBaselineBeforeWindow(t *testing.T) {
 	}
 }
 
-func TestScanCodexSubagentReplayAdvancesBaselineWithoutDuplicatingParent(t *testing.T) {
+func TestScanCodexForkLineageDeduplicatesNestedReplay(t *testing.T) {
 	root := t.TempDir()
 	day := filepath.Join(root, "2026", "07", "05")
-	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+	// Name the files in reverse lineage order to prove matching does not depend
+	// on filesystem traversal finding a parent before its children.
+	writeLog(t, day, "rollout-20-root.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"root","source":"cli"}}
 {"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
 {"timestamp":"2026-07-05T10:00:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
 {"timestamp":"2026-07-05T10:01:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300},"last_token_usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":100}}}}
 `)
-	// Current Codex subagent rollouts write the child metadata first, replay the
-	// parent's history with fresh serialization timestamps, then write a
-	// trigger-turn boundary before the child's first model call. The replay must
-	// establish the 1500/900/300 baseline without emitting either parent call.
-	writeLog(t, day, "rollout-subagent.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1,"agent_path":"/root/fixture"}}},"parent_thread_id":"parent","forked_from_id":"parent"}}
-{"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+	writeLog(t, day, "rollout-10-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root","depth":1,"agent_path":"/root/fixture"}}},"parent_thread_id":"root","forked_from_id":"root"}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"root","source":"cli"}}
 {"timestamp":"2026-07-05T11:00:00.002Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
-{"timestamp":"2026-07-05T11:00:00.003Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
 {"timestamp":"2026-07-05T11:00:00.004Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300},"last_token_usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":100}}}}
-{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
 {"timestamp":"2026-07-05T11:00:01.001Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
 {"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1700,"cached_input_tokens":1000,"output_tokens":340},"last_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40}}}}
 `)
+	// The grandchild replay contains the child's trigger marker and its live
+	// usage. A first-trigger boundary would emit the copied child call again;
+	// lineage-prefix matching must suppress both inherited counters. The child
+	// also starts at the root's second counter to model a compacted parent prefix.
+	writeLog(t, day, "rollout-00-grandchild.jsonl", `{"timestamp":"2026-07-05T12:00:00.000Z","type":"session_meta","payload":{"id":"grandchild","source":{"subagent":{"thread_spawn":{"parent_thread_id":"child","depth":2,"agent_path":"/root/fixture/nested"}}},"parent_thread_id":"child","forked_from_id":"child"}}
+{"timestamp":"2026-07-05T12:00:00.001Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"root","depth":1}}},"parent_thread_id":"root","forked_from_id":"root"}}
+{"timestamp":"2026-07-05T12:00:00.002Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T12:00:00.004Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300},"last_token_usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":100}}}}
+{"timestamp":"2026-07-05T12:00:00.005Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+{"timestamp":"2026-07-05T12:00:00.006Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1700,"cached_input_tokens":1000,"output_tokens":340},"last_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40}}}}
+{"timestamp":"2026-07-05T12:00:01.001Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+{"timestamp":"2026-07-05T12:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":2000,"cached_input_tokens":1200,"output_tokens":400},"last_token_usage":{"input_tokens":300,"cached_input_tokens":200,"output_tokens":60}}}}
+`)
 
 	sessions, got := collect(t, ScanCodex, root)
-	if sessions != 2 {
-		t.Fatalf("sessions = %d, want parent and live child", sessions)
+	if sessions != 3 {
+		t.Fatalf("sessions = %d, want root, child, and grandchild", sessions)
 	}
-	if len(got) != 3 {
-		t.Fatalf("events = %d, want two parent calls plus one live child call: %+v", len(got), got)
+	if len(got) != 4 {
+		t.Fatalf("events = %d, want four unique calls across the lineage: %+v", len(got), got)
 	}
 	var totals Event
 	for _, event := range got {
@@ -185,20 +195,72 @@ func TestScanCodexSubagentReplayAdvancesBaselineWithoutDuplicatingParent(t *test
 		totals.Out += event.Out
 		totals.CacheRead += event.CacheRead
 	}
-	if totals.In != 700 || totals.Out != 340 || totals.CacheRead != 1000 {
+	if totals.In != 800 || totals.Out != 400 || totals.CacheRead != 1200 {
 		t.Fatalf("deduplicated totals = %+v", totals)
-	}
-	if child := got[2]; child.In != 100 || child.Out != 40 || child.CacheRead != 100 {
-		t.Fatalf("child delta did not use replay baseline: %+v", child)
 	}
 }
 
-func TestScanCodexSubagentWithoutLiveBoundaryFailsClosed(t *testing.T) {
+func TestScanCodexManualForkUsesForkedFromIDWithoutTriggerBoundary(t *testing.T) {
 	root := t.TempDir()
-	writeLog(t, filepath.Join(root, "2026", "07", "05"), "rollout-subagent.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}},"parent_thread_id":"parent"}}
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+	writeLog(t, day, "rollout-manual-fork.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"manual-child","source":"cli","forked_from_id":"parent"}}
 {"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
 {"timestamp":"2026-07-05T11:00:00.002Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
 {"timestamp":"2026-07-05T11:00:00.003Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":700,"output_tokens":240},"last_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40}}}}
+`)
+	sessions, got := collect(t, ScanCodex, root)
+	if sessions != 2 || len(got) != 2 {
+		t.Fatalf("manual fork result: sessions=%d events=%+v", sessions, got)
+	}
+	var totals Event
+	for _, event := range got {
+		totals.In += event.In
+		totals.Out += event.Out
+		totals.CacheRead += event.CacheRead
+	}
+	if totals.In != 500 || totals.Out != 240 || totals.CacheRead != 700 {
+		t.Fatalf("manual fork totals = %+v", totals)
+	}
+}
+
+func TestScanCodexSubagentWithoutForkedFromIDHasNoInheritedHistory(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+	writeLog(t, day, "rollout-no-history-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}},"parent_thread_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+
+	sessions, got := collect(t, ScanCodex, root)
+	if sessions != 2 || len(got) != 2 {
+		t.Fatalf("no-history subagent result: sessions=%d events=%+v", sessions, got)
+	}
+	if child := got[0]; child.In != 60 || child.CacheRead != 40 || child.Out != 20 {
+		// rollout-no-history-child sorts before rollout-parent.
+		t.Fatalf("no-history child event = %+v", child)
+	}
+}
+
+func TestScanCodexMissingForkParentFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-independent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"independent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}}
+`)
+	writeLog(t, day, "rollout-orphan-fork.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"orphan","source":"cli","forked_from_id":"missing-parent"}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:00.002Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":700,"output_tokens":240}}}}
 `)
 
 	var got []Event
@@ -208,9 +270,241 @@ func TestScanCodexSubagentWithoutLiveBoundaryFailsClosed(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial ||
-		!hasStr(result.Stats.Warnings, "one or more Codex subagent logs did not expose a live-usage boundary") {
-		t.Fatalf("unbounded fork replay result=%+v events=%+v", result, got)
+	if result.Sessions != 1 || len(got) != 1 || got[0].In != 10 || got[0].Out != 2 ||
+		!result.Stats.Partial ||
+		!hasStr(result.Stats.Warnings, "one or more Codex fork parents were unavailable; fork usage was not counted") {
+		t.Fatalf("missing-parent result=%+v events=%+v", result, got)
+	}
+}
+
+func TestScanCodexParentUsageAfterForkIsNotInherited(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+	writeLog(t, day, "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+
+	sessions, got := collect(t, ScanCodex, root)
+	if sessions != 2 || len(got) != 2 {
+		t.Fatalf("post-fork parent result: sessions=%d events=%+v", sessions, got)
+	}
+	for _, event := range got {
+		if event.In != 60 || event.CacheRead != 40 || event.Out != 20 {
+			t.Fatalf("independent post-fork event = %+v", event)
+		}
+	}
+}
+
+func TestScanCodexInvalidMetadataFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":10,"cached_input_tokens":0,"output_tokens":2}}}}
+`)
+	writeLog(t, day, "rollout-invalid-fork.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":42}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T11:00:00.002Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+	writeLog(t, day, "rollout-truncated-child-meta.jsonl", `{"type":"session_
+{"timestamp":"2026-07-05T11:30:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T11:30:00.002Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+	var got []Event
+	result, err := scanCodex(root, time.Time{}, DefaultScanLimits(), func(event Event) {
+		got = append(got, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sessions != 1 || len(got) != 1 || got[0].In != 10 || got[0].Out != 2 ||
+		!result.Stats.Partial ||
+		!hasStr(result.Stats.Warnings, "one or more Codex rollout metadata records were invalid; rollout usage was not counted") {
+		t.Fatalf("invalid metadata result=%+v events=%+v", result, got)
+	}
+}
+
+func TestScanCodexResolvesForkParentOutsideFileWindow(t *testing.T) {
+	root := t.TempDir()
+	parentDir := filepath.Join(root, "2026", "06", "30")
+	parentPath := filepath.Join(parentDir, "rollout-parent.jsonl")
+	writeLog(t, parentDir, filepath.Base(parentPath), `{"timestamp":"2026-06-30T22:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-06-30T22:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-06-30T22:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+	old := since.Add(-time.Hour)
+	if err := os.Chtimes(parentPath, old, old); err != nil {
+		t.Fatal(err)
+	}
+	writeLog(t, filepath.Join(root, "2026", "07", "05"), "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:00.002Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1200,"cached_input_tokens":700,"output_tokens":240}}}}
+`)
+
+	var got []Event
+	result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sessions != 1 || result.Stats.Partial || len(got) != 1 ||
+		got[0].In != 100 || got[0].CacheRead != 100 || got[0].Out != 40 {
+		t.Fatalf("old-parent result=%+v events=%+v", result, got)
+	}
+}
+
+func TestScanCodexNormalizesRepeatedForkCounters(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300}}}}
+{"timestamp":"2026-07-05T10:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300}}}}
+`)
+	writeLog(t, day, "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:04.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300}}}}
+{"timestamp":"2026-07-05T11:00:05.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1700,"cached_input_tokens":1000,"output_tokens":340}}}}
+`)
+
+	var got []Event
+	result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	var totals Event
+	for _, event := range got {
+		totals.In += event.In
+		totals.Out += event.Out
+		totals.CacheRead += event.CacheRead
+	}
+	if result.Sessions != 2 || result.Stats.Partial || len(got) != 3 ||
+		totals.In != 700 || totals.CacheRead != 1000 || totals.Out != 340 {
+		t.Fatalf("repeated-counter result=%+v totals=%+v events=%+v", result, totals, got)
+	}
+}
+
+func TestScanCodexDuplicateSessionIDs(t *testing.T) {
+	t.Run("longer compatible rollout is canonical", func(t *testing.T) {
+		root := t.TempDir()
+		day := filepath.Join(root, "2026", "07", "05")
+		writeLog(t, day, "rollout-00-short.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"same","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+		writeLog(t, day, "rollout-10-long.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"same","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+{"timestamp":"2026-07-05T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":150,"cached_input_tokens":60,"output_tokens":30}}}}
+`)
+		var got []Event
+		result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Sessions != 1 || result.Stats.Partial || len(got) != 2 {
+			t.Fatalf("compatible duplicates result=%+v events=%+v", result, got)
+		}
+	})
+
+	t.Run("conflicting rollouts fail closed", func(t *testing.T) {
+		root := t.TempDir()
+		day := filepath.Join(root, "2026", "07", "05")
+		for name, input := range map[string]int64{"rollout-00.jsonl": 100, "rollout-10.jsonl": 200} {
+			writeLog(t, day, name, fmt.Sprintf(`{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"same","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":%d,"cached_input_tokens":0,"output_tokens":20}}}}
+`, input))
+		}
+		var got []Event
+		result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial ||
+			!hasStr(result.Stats.Warnings, "one or more duplicate Codex rollout IDs had conflicting histories; rollout usage was not counted") {
+			t.Fatalf("conflicting duplicates result=%+v events=%+v", result, got)
+		}
+	})
+}
+
+func TestScanCodexEmptyOrCyclicForkParentFailsClosed(t *testing.T) {
+	t.Run("empty parent", func(t *testing.T) {
+		root := t.TempDir()
+		day := filepath.Join(root, "2026", "07", "05")
+		writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+`)
+		writeLog(t, day, "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+		var got []Event
+		result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial {
+			t.Fatalf("empty parent result=%+v events=%+v", result, got)
+		}
+	})
+
+	t.Run("cycle", func(t *testing.T) {
+		root := t.TempDir()
+		day := filepath.Join(root, "2026", "07", "05")
+		writeLog(t, day, "rollout-a.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"a","source":"cli","forked_from_id":"b"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+		writeLog(t, day, "rollout-b.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"b","source":"cli","forked_from_id":"a"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+		var got []Event
+		result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+		if err != nil {
+			t.Fatal(err)
+		}
+		if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial ||
+			!hasStr(result.Stats.Warnings, "one or more Codex fork lineages contained a cycle; fork usage was not counted") {
+			t.Fatalf("cycle result=%+v events=%+v", result, got)
+		}
+	})
+}
+
+func TestScanCodexTornParentFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+{"timestamp":"2026-07-05T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count"
+`)
+	writeLog(t, day, "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
+`)
+	var got []Event
+	result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) { got = append(got, event) })
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial {
+		t.Fatalf("torn-parent result=%+v events=%+v", result, got)
+	}
+}
+
+func TestCodexUsagePrefixHonorsDeadline(t *testing.T) {
+	usage := []codexUsageRecord{{Total: codexTotals{Input: 1, Output: 1}}}
+	if _, complete := codexUsagePrefixAtParentEnd(usage, usage, time.Now().Add(-time.Second)); complete {
+		t.Fatal("expired lineage match reported complete")
 	}
 }
 
