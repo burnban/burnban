@@ -38,7 +38,7 @@ jobs:
           languages: go
           build-mode: autobuild
       - name: Autobuild
-        uses: github/codeql-action/autobuild@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.3
+        uses: github/codeql-action/autobuild@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
       - name: Analyze
         uses: github/codeql-action/analyze@9e907b5e64f6b83e7804b09294d44122997950d6 # v4.32.3
         with:
