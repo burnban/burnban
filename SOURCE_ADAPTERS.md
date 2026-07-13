@@ -116,6 +116,36 @@ The built-in manifests and Gemini CLI, GitHub Copilot CLI, Cursor, and OpenCode
 compatibility fixtures exercise the same public v1 contract used by new
 adapters.
 
+## Codex compatibility
+
+Codex rollout files expose cumulative `token_count` totals rather than a stable
+request ledger. Burnban advances a per-file baseline for every valid counter
+record and emits only the delta, including when an older record falls before the
+selected report window.
+
+Forked rollout files can also begin by replaying the parent's conversation and
+cumulative token history. Burnban reads lineage from the first `session_meta`.
+A non-empty `forked_from_id` is authoritative regardless of source label;
+subagents without that field did not inherit a rollout and remain independent
+usage. Burnban resolves an older parent by its standard session-ID-bearing
+filename when necessary, ignores parent counters created at or after the fork,
+and matches the fork's longest token-counter prefix against the end of that
+retained pre-fork projection.
+Inherited counters establish the child's baseline but are not emitted again;
+records after the matching prefix remain separate child usage. This works
+recursively when a grandchild replays a child's already inherited history,
+tolerates child replays that omit leading parent counters, and does not depend
+on inter-agent trigger records that may themselves be copied.
+
+The lineage projection retains only bounded session IDs, model labels,
+timestamps, and token counters; the normal file, byte, record, and duration
+limits also cover lineage matching and cap its memory and CPU use. Invalid
+first-session metadata, a missing or incomplete parent, conflicting duplicate
+session IDs, lineage cycles, or non-matching non-empty history cause the
+affected rollout to fail closed with a partial-scan warning instead of
+presenting potentially copied traffic as exact usage. Historical independent
+rollouts without `session_meta` remain compatible.
+
 ## Gemini CLI compatibility
 
 Gemini CLI support was checked on 2026-07-12 against upstream commit

@@ -196,74 +196,445 @@ type codexTotals struct {
 // in-window event would swallow the whole pre-window session), and a total
 // that shrinks means the counter reset on restart, so the new total becomes
 // the delta. The model comes from the most recent turn_context.
+//
+// Codex forks begin with a replay of their parent's history. Those replayed
+// token_count records retain the parent's cumulative counter and must advance
+// the child's baseline, but must not be emitted again. Burnban matches each
+// fork against the pre-fork suffix of the canonical rollout named by its
+// lineage metadata and emits only records after the inherited usage prefix.
 func ScanCodex(dir string, since time.Time, emit func(Event)) (int, error) {
 	result, err := scanCodex(dir, since, DefaultScanLimits(), emit)
 	return result.Sessions, err
 }
 
+type codexUsageRecord struct {
+	Time  time.Time
+	Model string
+	Total codexTotals
+}
+
+type codexRollout struct {
+	SessionID     string
+	ParentID      string
+	StartedAt     time.Time
+	Fork          bool
+	MetadataValid bool
+	Complete      bool
+	Usage         []codexUsageRecord
+}
+
+func readCodexRollout(scanner *fileScanner, path string) (codexRollout, error) {
+	// Historical ordinary rollouts can omit session_meta entirely. They remain
+	// valid independent usage; a present-but-malformed first metadata record is
+	// different because it could conceal fork lineage and must fail closed.
+	rollout := codexRollout{MetadataValid: true}
+	model := "unknown"
+	sessionMetaSeen := false
+	firstPhysicalLine := true
+	legacyCandidate := false
+	err := scanner.eachLine(path, func(line []byte) {
+		isFirst := firstPhysicalLine
+		firstPhysicalLine = false
+		relevant := isFirst || bytes.Contains(line, []byte(`"session_meta"`)) ||
+			bytes.Contains(line, []byte(`"turn_context"`)) || bytes.Contains(line, []byte(`"token_count"`))
+		if !relevant {
+			// A torn line can end before its type marker. Validate every physical
+			// JSONL record so an incomplete parent projection never looks exact.
+			if !json.Valid(line) {
+				rollout.MetadataValid = false
+			}
+			return
+		}
+		var v codexLine
+		if json.Unmarshal(line, &v) != nil {
+			// Malformed relevant metadata cannot safely establish lineage or a
+			// cumulative baseline. A bad leading session_meta must also prevent a
+			// copied parent record later in the replay becoming this file's identity.
+			rollout.MetadataValid = false
+			if !sessionMetaSeen && (isFirst || bytes.Contains(line, []byte(`"session_meta"`))) {
+				sessionMetaSeen = true
+			}
+			return
+		}
+		if isFirst && v.Type != "session_meta" {
+			legacyCandidate = true
+		}
+		switch v.Type {
+		case "session_meta":
+			// A fork replay can contain its parent's session_meta. Only the first
+			// record identifies the rollout stored in this file.
+			if sessionMetaSeen {
+				return
+			}
+			sessionMetaSeen = true
+			rollout.MetadataValid = false
+			if legacyCandidate {
+				// A legacy rollout is valid only if no later record tries to
+				// retroactively assign it a session identity.
+				return
+			}
+			var meta struct {
+				ID           string          `json:"id"`
+				ForkedFromID json.RawMessage `json:"forked_from_id"`
+			}
+			if json.Unmarshal(v.Payload, &meta) != nil || meta.ID == "" {
+				return
+			}
+			startedAt, timeErr := time.Parse(time.RFC3339, v.Timestamp)
+			if timeErr != nil {
+				return
+			}
+			var forkedFromID string
+			if len(meta.ForkedFromID) > 0 && string(meta.ForkedFromID) != "null" {
+				if json.Unmarshal(meta.ForkedFromID, &forkedFromID) != nil {
+					return
+				}
+			}
+			rollout.SessionID = meta.ID
+			rollout.StartedAt = startedAt
+			rollout.MetadataValid = true
+			if forkedFromID != "" {
+				rollout.Fork = true
+				rollout.ParentID = forkedFromID
+			}
+		case "turn_context":
+			var tc struct {
+				Model string `json:"model"`
+			}
+			if json.Unmarshal(v.Payload, &tc) == nil && tc.Model != "" {
+				model = tc.Model
+			}
+		case "event_msg":
+			var ev struct {
+				Type string `json:"type"`
+				Info *struct {
+					Total codexTotals `json:"total_token_usage"`
+				} `json:"info"`
+			}
+			if json.Unmarshal(v.Payload, &ev) != nil {
+				rollout.MetadataValid = false
+				return
+			}
+			if ev.Type != "token_count" || ev.Info == nil {
+				return
+			}
+			ts, timeErr := time.Parse(time.RFC3339, v.Timestamp)
+			if timeErr != nil {
+				rollout.MetadataValid = false
+				return
+			}
+			record := codexUsageRecord{Time: ts, Model: model, Total: ev.Info.Total}
+			// Codex can serialize the same cumulative counter more than once.
+			// These records carry no usage, and keeping an asymmetric duplicate in
+			// only one side of a fork would make an inherited suffix look live.
+			if len(rollout.Usage) == 0 || rollout.Usage[len(rollout.Usage)-1].Total != record.Total {
+				rollout.Usage = append(rollout.Usage, record)
+			}
+		}
+	})
+	rollout.Complete = err == nil
+	return rollout, err
+}
+
+func codexUsagePrefixAtParentEnd(child, parent []codexUsageRecord, deadline time.Time) (int, bool) {
+	if len(child) == 0 || len(parent) == 0 {
+		return 0, !time.Now().After(deadline)
+	}
+	// A compacted child can omit leading parent counters. KMP finds the longest
+	// prefix of the child that is also a suffix of the parent's pre-fork usage in
+	// O(child+parent) time and O(child) bounded metadata. Requiring the match to
+	// reach the parent's fork-time end prevents a truncated middle match from
+	// making copied counters look live.
+	if time.Now().After(deadline) {
+		return 0, false
+	}
+	fallback := make([]int, len(child))
+	for i, matched := 1, 0; i < len(child); i++ {
+		if i&1023 == 0 && time.Now().After(deadline) {
+			return 0, false
+		}
+		for matched > 0 && child[i].Total != child[matched].Total {
+			matched = fallback[matched-1]
+		}
+		if child[i].Total == child[matched].Total {
+			matched++
+		}
+		fallback[i] = matched
+	}
+	matched := 0
+	for i := range parent {
+		if i&1023 == 0 && time.Now().After(deadline) {
+			return 0, false
+		}
+		for matched > 0 && parent[i].Total != child[matched].Total {
+			matched = fallback[matched-1]
+		}
+		if parent[i].Total == child[matched].Total {
+			matched++
+			if matched == len(child) {
+				if i == len(parent)-1 {
+					return matched, true
+				}
+				matched = fallback[matched-1]
+			}
+		}
+	}
+	return matched, true
+}
+
+func canonicalCodexRollouts(rollouts []codexRollout) map[string]*codexRollout {
+	canonical := make(map[string]*codexRollout, len(rollouts))
+	for i := range rollouts {
+		candidate := &rollouts[i]
+		if candidate.SessionID == "" || !candidate.MetadataValid {
+			continue
+		}
+		current := canonical[candidate.SessionID]
+		if current == nil || (!current.Complete && candidate.Complete) ||
+			(current.Complete == candidate.Complete && len(candidate.Usage) > len(current.Usage)) {
+			canonical[candidate.SessionID] = candidate
+		}
+	}
+	return canonical
+}
+
+func codexUsageStartsWith(usage, prefix []codexUsageRecord) bool {
+	if len(prefix) > len(usage) {
+		return false
+	}
+	for i := range prefix {
+		if usage[i].Total != prefix[i].Total || usage[i].Model != prefix[i].Model ||
+			!usage[i].Time.Equal(prefix[i].Time) {
+			return false
+		}
+	}
+	return true
+}
+
+func ambiguousCodexSessionIDs(rollouts []codexRollout, canonical map[string]*codexRollout) map[string]struct{} {
+	ambiguous := make(map[string]struct{})
+	for i := range rollouts {
+		candidate := &rollouts[i]
+		selected := canonical[candidate.SessionID]
+		if candidate.SessionID == "" || candidate == selected || !candidate.MetadataValid || !candidate.Complete ||
+			selected == nil || !selected.MetadataValid || !selected.Complete {
+			continue
+		}
+		if candidate.Fork != selected.Fork || candidate.ParentID != selected.ParentID ||
+			!candidate.StartedAt.Equal(selected.StartedAt) ||
+			!codexUsageStartsWith(selected.Usage, candidate.Usage) {
+			ambiguous[candidate.SessionID] = struct{}{}
+		}
+	}
+	return ambiguous
+}
+
+func invalidCodexLineageIDs(canonical map[string]*codexRollout) map[string]struct{} {
+	state := make(map[string]uint8, len(canonical))
+	invalid := make(map[string]struct{})
+	var visit func(string) bool
+	visit = func(sessionID string) bool {
+		switch state[sessionID] {
+		case 1:
+			invalid[sessionID] = struct{}{}
+			return true
+		case 2:
+			_, bad := invalid[sessionID]
+			return bad
+		}
+		state[sessionID] = 1
+		rollout := canonical[sessionID]
+		bad := false
+		if rollout != nil && rollout.Fork {
+			if _, parentPresent := canonical[rollout.ParentID]; parentPresent {
+				bad = visit(rollout.ParentID)
+			}
+		}
+		state[sessionID] = 2
+		if bad {
+			invalid[sessionID] = struct{}{}
+		}
+		return bad
+	}
+	for sessionID := range canonical {
+		visit(sessionID)
+	}
+	return invalid
+}
+
+func missingCodexParentIDs(rollouts []codexRollout) map[string]struct{} {
+	canonical := canonicalCodexRollouts(rollouts)
+	missing := make(map[string]struct{})
+	for i := range rollouts {
+		rollout := &rollouts[i]
+		if rollout.Fork && rollout.ParentID != "" && canonical[rollout.ParentID] == nil {
+			missing[rollout.ParentID] = struct{}{}
+		}
+	}
+	return missing
+}
+
+func codexRolloutFilenameMatches(path string, sessionIDs map[string]struct{}, deadline time.Time) bool {
+	name := strings.TrimSuffix(filepath.Base(path), ".jsonl")
+	checked := 0
+	for sessionID := range sessionIDs {
+		if checked&255 == 0 && time.Now().After(deadline) {
+			return false
+		}
+		checked++
+		// Codex's rollout filename ends in "-<session UUID>". Enforcing that
+		// boundary avoids broad substring matches from untrusted lineage data.
+		start := len(name) - len(sessionID)
+		if sessionID != "" && start >= 0 && strings.HasSuffix(name, sessionID) &&
+			(start == 0 || name[start-1] == '-') {
+			return true
+		}
+	}
+	return false
+}
+
 func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
-	sessions := 0
 	scanner := newFileScanner(limits)
-	err := scanner.walkJSONL(dir, since, func(path string) error {
-		model := "unknown"
+	// File, byte, record, and duration limits enforced by fileScanner also bound
+	// this metadata-only in-memory projection. No conversation content is kept.
+	rollouts := make([]codexRollout, 0)
+	seenPaths := make(map[string]struct{})
+	readRollout := func(path string) error {
+		if _, seen := seenPaths[path]; seen {
+			return nil
+		}
+		seenPaths[path] = struct{}{}
+		rollout, readErr := readCodexRollout(scanner, path)
+		rollouts = append(rollouts, rollout)
+		return readErr
+	}
+	err := scanner.walkJSONL(dir, since, readRollout)
+
+	// A fork modified inside the report window can point to a parent rollout
+	// whose file was last modified before it. Resolve only those exact session
+	// IDs through Codex's standard UUID-bearing filenames, recursively for
+	// nested forks, while sharing the same resource limits and deadline.
+	for err == nil {
+		missing := missingCodexParentIDs(rollouts)
+		if len(missing) == 0 {
+			break
+		}
+		before := len(rollouts)
+		resolveErr := scanner.walkJSONLMatching(dir, time.Time{}, func(path string) bool {
+			if _, seen := seenPaths[path]; seen {
+				return false
+			}
+			return codexRolloutFilenameMatches(path, missing, scanner.deadline)
+		}, readRollout)
+		if resolveErr != nil {
+			err = resolveErr
+			break
+		}
+		if len(rollouts) == before {
+			break
+		}
+	}
+
+	canonical := canonicalCodexRollouts(rollouts)
+	ambiguous := ambiguousCodexSessionIDs(rollouts, canonical)
+	invalidLineage := invalidCodexLineageIDs(canonical)
+	sessions := 0
+rolloutLoop:
+	for i := range rollouts {
+		if time.Now().After(scanner.deadline) {
+			scanner.stats.Warn("scan time limit reached")
+			break
+		}
+		rollout := &rollouts[i]
+		if len(rollout.Usage) > 0 && !rollout.MetadataValid {
+			scanner.stats.Warn("one or more Codex rollout metadata records were invalid; rollout usage was not counted")
+			continue
+		}
+		if _, bad := ambiguous[rollout.SessionID]; bad {
+			scanner.stats.Warn("one or more duplicate Codex rollout IDs had conflicting histories; rollout usage was not counted")
+			continue
+		}
+		if _, bad := invalidLineage[rollout.SessionID]; bad {
+			scanner.stats.Warn("one or more Codex fork lineages contained a cycle; fork usage was not counted")
+			continue
+		}
+		if rollout.SessionID != "" && canonical[rollout.SessionID] != rollout {
+			// Resumed/duplicated files for one session are represented by the
+			// single longest complete canonical projection.
+			continue
+		}
+		skip := 0
+		if rollout.Fork {
+			parent := canonical[rollout.ParentID]
+			_, parentAmbiguous := ambiguous[rollout.ParentID]
+			_, parentLineageInvalid := invalidLineage[rollout.ParentID]
+			if rollout.ParentID == "" || parent == nil || !parent.MetadataValid || !parent.Complete ||
+				parentAmbiguous || parentLineageInvalid {
+				scanner.stats.Warn("one or more Codex fork parents were unavailable; fork usage was not counted")
+				continue
+			}
+			if rollout.StartedAt.IsZero() {
+				scanner.stats.Warn("one or more Codex fork histories did not match their parent; fork usage was not counted")
+				continue
+			}
+			parentUsage := parent.Usage
+			for recordIndex, record := range parentUsage {
+				if recordIndex&1023 == 0 && time.Now().After(scanner.deadline) {
+					scanner.stats.Warn("scan time limit reached")
+					break rolloutLoop
+				}
+				if record.Time.IsZero() || !record.Time.Before(rollout.StartedAt) {
+					parentUsage = parentUsage[:recordIndex]
+					break
+				}
+			}
+			if len(rollout.Usage) > 0 && len(parent.Usage) == 0 {
+				scanner.stats.Warn("one or more Codex fork histories did not match their parent; fork usage was not counted")
+				continue
+			}
+			var matched bool
+			skip, matched = codexUsagePrefixAtParentEnd(rollout.Usage, parentUsage, scanner.deadline)
+			if !matched {
+				scanner.stats.Warn("scan time limit reached")
+				break
+			}
+			if len(rollout.Usage) > 0 && len(parentUsage) > 0 && skip == 0 {
+				scanner.stats.Warn("one or more Codex fork histories did not match their parent; fork usage was not counted")
+				continue
+			}
+		}
+
 		var prev codexTotals
 		contributed := false
-		ferr := scanner.eachLine(path, func(line []byte) {
-			if !bytes.Contains(line, []byte(`"turn_context"`)) && !bytes.Contains(line, []byte(`"token_count"`)) {
-				return
+		for recordIndex, record := range rollout.Usage {
+			if recordIndex&1023 == 0 && time.Now().After(scanner.deadline) {
+				scanner.stats.Warn("scan time limit reached")
+				break rolloutLoop
 			}
-			var v codexLine
-			if json.Unmarshal(line, &v) != nil {
-				return
+			cur := record.Total
+			d := codexTotals{cur.Input - prev.Input, cur.Cached - prev.Cached, cur.Output - prev.Output}
+			if d.Input < 0 || d.Cached < 0 || d.Output < 0 {
+				d = cur // counter reset (process restart): fresh baseline
 			}
-			switch v.Type {
-			case "turn_context":
-				var tc struct {
-					Model string `json:"model"`
-				}
-				if json.Unmarshal(v.Payload, &tc) == nil && tc.Model != "" {
-					model = tc.Model
-				}
-			case "event_msg":
-				var ev struct {
-					Type string `json:"type"`
-					Info *struct {
-						Total codexTotals `json:"total_token_usage"`
-					} `json:"info"`
-				}
-				if json.Unmarshal(v.Payload, &ev) != nil || ev.Type != "token_count" || ev.Info == nil {
-					return
-				}
-				cur := ev.Info.Total
-				d := codexTotals{cur.Input - prev.Input, cur.Cached - prev.Cached, cur.Output - prev.Output}
-				if d.Input < 0 || d.Cached < 0 || d.Output < 0 {
-					d = cur // counter reset (process restart): fresh baseline
-				}
-				prev = cur
-				if d.Input+d.Output == 0 {
-					return
-				}
-				ts, terr := time.Parse(time.RFC3339, v.Timestamp)
-				if terr != nil || ts.Before(since) {
-					return
-				}
-				in := d.Input - d.Cached // OpenAI input counts include the cached subset
-				if in < 0 {
-					in = 0
-				}
-				contributed = true
-				emit(Event{
-					Provider: "codex", Model: model, Time: ts, Calls: 1,
-					In: in, Out: d.Output, CacheRead: d.Cached,
-					Confidence: sourceadapter.ConfidenceExact,
-				})
+			prev = cur
+			if recordIndex < skip || d.Input+d.Output == 0 || record.Time.IsZero() || record.Time.Before(since) {
+				continue
 			}
-		})
+			in := d.Input - d.Cached // OpenAI input counts include the cached subset
+			if in < 0 {
+				in = 0
+			}
+			contributed = true
+			emit(Event{
+				Provider: "codex", Model: record.Model, Time: record.Time, Calls: 1,
+				In: in, Out: d.Output, CacheRead: d.Cached,
+				Confidence: sourceadapter.ConfidenceExact,
+			})
+		}
 		if contributed {
 			sessions++
 		}
-		return ferr
-	})
+	}
 	return ScanResult{Sessions: sessions, Stats: scanner.stats}, err
 }
 

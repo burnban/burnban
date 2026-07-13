@@ -30,9 +30,19 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
         run: |
           set -euo pipefail
+          [[ "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-rc\.(0|[1-9][0-9]*))?$ ]]
           tag_ref="refs/tags/$GITHUB_REF_NAME"
           test "$(git cat-file -t "$tag_ref")" = tag
           test "$(git rev-parse "$tag_ref^{commit}")" = "$(git rev-parse HEAD)"
+          expected_fingerprint=D5FE09FFAB4DC62CBD1409AE4270AC427A84CCC1
+          actual_fingerprint=$(gpg --batch --with-colons --show-keys \
+            .github/release-signing-key.asc | awk -F: '$1=="fpr" {print toupper($10); exit}')
+          test "$actual_fingerprint" = "$expected_fingerprint"
+          export GNUPGHOME="$RUNNER_TEMP/release-tag-gnupg"
+          install -d -m 700 "$GNUPGHOME"
+          trap 'rm -rf "$GNUPGHOME"' EXIT
+          gpg --batch --import .github/release-signing-key.asc
+          git verify-tag "$tag_ref"
           default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
           git show-ref --verify --quiet "$default_ref"
           git merge-base --is-ancestor HEAD "$default_ref"
