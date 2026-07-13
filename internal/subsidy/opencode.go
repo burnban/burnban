@@ -18,8 +18,6 @@ import (
 // 8168f0f0f6645a0ca741fe02e90ff532bce04148 on 2026-07-12. Released builds
 // keep opencode.db in the XDG data directory. Both the legacy message table and
 // the current session_message projection store assistant usage in JSON metadata.
-const openCodeCheckedRevision = "8168f0f0f6645a0ca741fe02e90ff532bce04148"
-
 const openCodeMalformedWarning = "one or more OpenCode usage records were malformed"
 const openCodeRecordSizeWarning = "one or more OpenCode records exceeded the record size limit"
 
