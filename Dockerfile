@@ -7,6 +7,7 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY *.go ./
 COPY internal ./internal
+COPY sourceadapter ./sourceadapter
 COPY LICENSE THIRD_PARTY_NOTICES.md ./
 COPY scripts/collect_licenses.sh ./scripts/collect_licenses.sh
 RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}" -o /burnban .
