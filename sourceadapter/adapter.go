@@ -5,13 +5,31 @@ package sourceadapter
 
 import (
 	"fmt"
+	"math"
 	"regexp"
+	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // APIVersion changes only when an adapter must be updated to keep compiling or
 // when the meaning of an Event field changes.
 const APIVersion = "burnban.source/v1"
+
+// Event bounds keep a corrupt or hostile local store from overflowing report
+// aggregation or turning nonsensical metadata into authoritative usage. They
+// are intentionally far above plausible usage for one call or session while
+// remaining useful to first- and third-party adapters for preflight checks.
+const (
+	MaxEventCalls          int64   = 1_000_000_000
+	MaxEventTokens         int64   = 1_000_000_000_000_000
+	MaxEventToolRequests   int64   = 1_000_000_000
+	MaxEventCostUSD        float64 = 1_000_000_000_000
+	MaxEventIDBytes                = 1_024
+	MaxEventModelBytes             = 512
+	MaxEventDimensionBytes         = 256
+)
 
 var adapterIDPattern = regexp.MustCompile(`^[a-z0-9][a-z0-9-]*$`)
 
@@ -97,6 +115,98 @@ type Event struct {
 type ServerToolUsage struct {
 	WebSearchRequests int64 `json:"web_search_requests,omitempty"`
 	WebFetchRequests  int64 `json:"web_fetch_requests,omitempty"`
+}
+
+// Validate checks one normalized event before it enters pricing or report
+// aggregation. It deliberately returns field-only diagnostics: source labels
+// can originate in private local stores and must not be copied into errors.
+func (e Event) Validate() error {
+	if e.Time.IsZero() {
+		return fmt.Errorf("event time is required")
+	}
+	if err := validateTextField("event ID", e.ID, MaxEventIDBytes, false); err != nil {
+		return err
+	}
+	if err := validateTextField("event provider", e.Provider, MaxEventDimensionBytes, false); err != nil {
+		return err
+	}
+	if err := validateTextField("event model", e.Model, MaxEventModelBytes, true); err != nil {
+		return err
+	}
+	for name, value := range map[string]string{
+		"event billing provider": e.BillingProvider,
+		"event service tier":     e.ServiceTier,
+		"event inference geo":    e.InferenceGeo,
+	} {
+		if err := validateTextField(name, value, MaxEventDimensionBytes, false); err != nil {
+			return err
+		}
+	}
+	if e.Calls <= 0 || e.Calls > MaxEventCalls {
+		return fmt.Errorf("event calls are outside the accepted range")
+	}
+
+	tokenCounters := []struct {
+		name  string
+		value int64
+	}{
+		{"input tokens", e.In},
+		{"output tokens", e.Out},
+		{"cache-read tokens", e.CacheRead},
+		{"5-minute cache-write tokens", e.CacheWrite5m},
+		{"1-hour cache-write tokens", e.CacheWrite1h},
+	}
+	var tokenTotal int64
+	for _, counter := range tokenCounters {
+		if counter.value < 0 || counter.value > MaxEventTokens {
+			return fmt.Errorf("event %s are outside the accepted range", counter.name)
+		}
+		if tokenTotal > MaxEventTokens-counter.value {
+			return fmt.Errorf("event token total is outside the accepted range")
+		}
+		tokenTotal += counter.value
+	}
+	for name, value := range map[string]int64{
+		"web-search requests": e.ServerToolUse.WebSearchRequests,
+		"web-fetch requests":  e.ServerToolUse.WebFetchRequests,
+	} {
+		if value < 0 || value > MaxEventToolRequests {
+			return fmt.Errorf("event %s are outside the accepted range", name)
+		}
+	}
+	if math.IsNaN(e.CostUSD) || math.IsInf(e.CostUSD, 0) || e.CostUSD < 0 || e.CostUSD > MaxEventCostUSD {
+		return fmt.Errorf("event cost is outside the accepted range")
+	}
+	if !e.CostKnown && e.CostUSD != 0 {
+		return fmt.Errorf("event cost is present without cost-known metadata")
+	}
+	if e.CostKnown && e.CostUSD == 0 && tokenTotal > 0 {
+		return fmt.Errorf("event cost is marked known zero for nonzero usage")
+	}
+	switch e.Confidence {
+	case ConfidenceExact, ConfidenceEstimated, ConfidencePartial:
+	default:
+		return fmt.Errorf("event confidence is required and must be exact, estimated, or partial")
+	}
+	return nil
+}
+
+func validateTextField(name, value string, maxBytes int, required bool) error {
+	if required && value == "" {
+		return fmt.Errorf("%s is required", name)
+	}
+	if len(value) > maxBytes {
+		return fmt.Errorf("%s exceeds its size limit", name)
+	}
+	if !utf8.ValidString(value) {
+		return fmt.Errorf("%s is not valid UTF-8", name)
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Zl, unicode.Zp)
+	}) >= 0 {
+		return fmt.Errorf("%s contains control characters", name)
+	}
+	return nil
 }
 
 // ScanLimits bound filesystem, record, and wall-clock work independently for

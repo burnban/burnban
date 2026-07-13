@@ -75,7 +75,7 @@ func TestFuseCommandConfiguresResetsAndRemovesRules(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	for _, key := range []string{budget.KeyFuseHourlyUSD, budget.KeyFuseBurst, budget.KeyFuseCooldown, budget.KeyFuseTrip} {
+	for _, key := range []string{budget.KeyFuseHourlyUSD, budget.KeyFuseBurst, budget.KeyFuseFanout, budget.KeyFuseBaseline, budget.KeyFuseCooldown, budget.KeyFuseTrip} {
 		if got, _ := s.GetSetting(key); got != "" {
 			t.Errorf("%s survived --off: %q", key, got)
 		}
@@ -91,12 +91,55 @@ func TestFuseCommandRejectsUnsafeConfiguration(t *testing.T) {
 		{"--burst", "2h:4", "--db", db},
 		{"--cooldown", "30s", "--db", db},
 		{"--cooldown", "25h", "--db", db},
+		{"--fanout", "1m:0", "--db", db},
+		{"--fanout", "2h:10", "--db", db},
+		{"--baseline", "1x", "--db", db},
+		{"--baseline", "3x", "--baseline-window", "7m", "--db", db},
+		{"--baseline-days", "14", "--db", db},
 		{"--off", "--hourly", "10", "--db", db},
 		{"--reset", "--burst", "5m:4", "--db", db},
 	} {
 		if err := cmdFuse(args); err == nil {
 			t.Errorf("unsafe fuse args accepted: %v", args)
 		}
+	}
+}
+
+func TestFuseCommandConfiguresFanoutAndBaseline(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "fuse.db")
+	if err := cmdFuse([]string{
+		"--fanout", "1m:120", "--baseline", "3x-baseline", "--baseline-window", "1h",
+		"--baseline-days", "21", "--baseline-minimum", "0.75", "--db", db,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	s, err := store.Open(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if got, _ := s.GetSetting(budget.KeyFuseFanout); got != "1m:120" {
+		t.Fatalf("fanout=%q", got)
+	}
+	raw, err := s.GetSetting(budget.KeyFuseBaseline)
+	if err != nil {
+		t.Fatal(err)
+	}
+	policy, err := budget.ParseFuseBaseline(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if policy == nil || policy.Window != time.Hour || policy.Multiplier != 3 || policy.LookbackDays != 21 || policy.MinimumUSD != 0.75 {
+		t.Fatalf("baseline=%+v", policy)
+	}
+	if err := cmdFuse([]string{"--fanout", "off", "--baseline", "off", "--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ := s.GetSetting(budget.KeyFuseFanout); got != "" {
+		t.Fatalf("fanout not removed: %q", got)
+	}
+	if got, _ := s.GetSetting(budget.KeyFuseBaseline); got != "" {
+		t.Fatalf("baseline not removed: %q", got)
 	}
 }
 

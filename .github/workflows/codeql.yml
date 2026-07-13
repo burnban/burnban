@@ -19,6 +19,10 @@ concurrency:
 jobs:
   analyze:
     name: analyze Go
+    # Code scanning is enabled on the public canonical repository. Private
+    # development mirrors do not have the feature enabled and GitHub rejects
+    # uploads there with "Resource not accessible by integration".
+    if: github.repository == 'burnban/burnban'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:

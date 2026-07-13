@@ -65,6 +65,14 @@ func (r *ReadSnapshot) SpentSinceMulti(since []time.Time) ([]float64, error) {
 	return r.store.SpentSinceMulti(since)
 }
 
+func (r *ReadSnapshot) BudgetUsageSinceMulti(since []time.Time) ([]BudgetUsage, error) {
+	return r.store.BudgetUsageSinceMulti(since)
+}
+
+func (r *ReadSnapshot) BudgetUsageWindows(starts []time.Time, window time.Duration) ([]BudgetUsage, error) {
+	return r.store.BudgetUsageWindows(starts, window)
+}
+
 func (r *ReadSnapshot) SettingsWithPrefix(prefix string) (map[string]string, error) {
 	return r.store.SettingsWithPrefix(prefix)
 }

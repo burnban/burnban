@@ -45,13 +45,15 @@ func TestPublicAdapterContractIntegratesWithReport(t *testing.T) {
 		Until:              time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC),
 		AdditionalAdapters: []sourceadapter.Adapter{contractFixtureAdapter{}},
 		SourcePaths: map[string]string{
-			"claude-code": filepath.Join(home, "missing-claude"),
-			"codex":       filepath.Join(home, "missing-codex"),
-			"gemini-cli":  filepath.Join(home, "missing-gemini"),
-			"opencode":    filepath.Join(home, "missing-opencode"),
-			"hermes":      filepath.Join(home, "missing-hermes"),
-			"openclaw":    filepath.Join(home, "missing-openclaw"),
-			"goose":       filepath.Join(home, "missing-goose"),
+			"claude-code":        filepath.Join(home, "missing-claude"),
+			"codex":              filepath.Join(home, "missing-codex"),
+			"gemini-cli":         filepath.Join(home, "missing-gemini"),
+			"github-copilot-cli": filepath.Join(home, "missing-copilot"),
+			"cursor":             filepath.Join(home, "missing-cursor"),
+			"opencode":           filepath.Join(home, "missing-opencode"),
+			"hermes":             filepath.Join(home, "missing-hermes"),
+			"openclaw":           filepath.Join(home, "missing-openclaw"),
+			"goose":              filepath.Join(home, "missing-goose"),
 		},
 	})
 	if err != nil {

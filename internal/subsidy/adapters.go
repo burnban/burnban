@@ -51,6 +51,16 @@ func BuiltinAdapters() []sourceadapter.Adapter {
 			scan:        scanGemini,
 		},
 		builtinAdapter{
+			manifest:    manifest("github-copilot-cli", "GitHub Copilot CLI", "per-session JSONL event logs"),
+			defaultPath: DefaultCopilotDir,
+			scan:        scanGitHubCopilotCLI,
+		},
+		builtinAdapter{
+			manifest:    manifest("cursor", "Cursor", "read-only global composer metadata database"),
+			defaultPath: DefaultCursorDB,
+			scan:        scanCursor,
+		},
+		builtinAdapter{
 			manifest:    manifest("opencode", "OpenCode", "read-only SQLite message metadata"),
 			defaultPath: DefaultOpenCodeDB,
 			scan:        scanOpenCode,
@@ -81,6 +91,17 @@ func DefaultGeminiDir(home string) string {
 		home = configured
 	}
 	return filepath.Join(home, ".gemini", "tmp")
+}
+
+// DefaultCopilotDir returns the managed session-state directory. COPILOT_HOME
+// replaces the complete ~/.copilot configuration root, matching Copilot CLI's
+// documented configuration-directory precedence.
+func DefaultCopilotDir(home string) string {
+	root := os.Getenv("COPILOT_HOME")
+	if root == "" {
+		root = filepath.Join(home, ".copilot")
+	}
+	return filepath.Join(root, "session-state")
 }
 
 func DefaultHermesDB(home string) string {

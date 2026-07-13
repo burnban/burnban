@@ -16,6 +16,11 @@ func cmdFuse(args []string) error {
 	fs := flag.NewFlagSet("fuse", flag.ExitOnError)
 	hourly := fs.Float64("hourly", 0, "maximum spend in any rolling hour in USD (0 removes)")
 	burst := fs.String("burst", "", "short rolling limit as DURATION:USD, for example 5m:4 (off removes)")
+	fanout := fs.String("fanout", "", "request breaker as DURATION:REQUESTS, for example 1m:120 (off removes)")
+	baseline := fs.String("baseline", "", "same-time UTC spend deviation multiplier, for example 3x or 3x-baseline (off removes)")
+	baselineWindow := fs.Duration("baseline-window", time.Hour, "fixed UTC comparison slot (must evenly divide 24h)")
+	baselineDays := fs.Int("baseline-days", 14, "previous same-time slots used for the median (7-89)")
+	baselineMinimum := fs.Float64("baseline-minimum", 0.25, "minimum USD threshold even when historical median is zero")
 	cooldown := fs.Duration("cooldown", 0, "automatic pause after a trip (default 15m; min 1m, max 24h)")
 	reset := fs.Bool("reset", false, "clear the current cooldown; retrips if velocity is still high")
 	off := fs.Bool("off", false, "remove all velocity-fuse rules and the current cooldown")
@@ -27,7 +32,11 @@ func cmdFuse(args []string) error {
 
 	passed := map[string]bool{}
 	fs.Visit(func(f *flag.Flag) { passed[f.Name] = true })
-	configChange := passed["hourly"] || passed["burst"] || passed["cooldown"]
+	baselineOptions := passed["baseline-window"] || passed["baseline-days"] || passed["baseline-minimum"]
+	if baselineOptions && !passed["baseline"] {
+		return fmt.Errorf("baseline tuning flags require --baseline MULTIPLIER")
+	}
+	configChange := passed["hourly"] || passed["burst"] || passed["fanout"] || passed["baseline"] || passed["cooldown"]
 	if *off && (*reset || configChange) {
 		return fmt.Errorf("--off cannot be combined with --reset or fuse rule flags")
 	}
@@ -62,6 +71,44 @@ func cmdFuse(args []string) error {
 			}
 		}
 	}
+	var fanoutWindow time.Duration
+	var fanoutRequests int64
+	removeFanout := false
+	if passed["fanout"] {
+		switch strings.ToLower(strings.TrimSpace(*fanout)) {
+		case "off", "0":
+			removeFanout = true
+		default:
+			var err error
+			fanoutWindow, fanoutRequests, err = budget.ParseFuseFanout(*fanout)
+			if err != nil {
+				return err
+			}
+		}
+	}
+	removeBaseline := false
+	baselineRaw := ""
+	if passed["baseline"] {
+		value := strings.ToLower(strings.TrimSpace(*baseline))
+		switch value {
+		case "off", "0":
+			removeBaseline = true
+		default:
+			value = strings.TrimSuffix(value, "-baseline")
+			value = strings.TrimSuffix(value, "x")
+			multiplier, err := strconv.ParseFloat(value, 64)
+			if err != nil {
+				return fmt.Errorf("--baseline must be a multiplier such as 3x or off")
+			}
+			baselineRaw, err = budget.EncodeFuseBaseline(budget.FuseBaselinePolicy{
+				Version: 1, Window: *baselineWindow, Multiplier: multiplier,
+				LookbackDays: *baselineDays, MinimumUSD: *baselineMinimum,
+			})
+			if err != nil {
+				return err
+			}
+		}
+	}
 
 	s, err := store.Open(*dbPath)
 	if err != nil {
@@ -70,7 +117,7 @@ func cmdFuse(args []string) error {
 	defer s.Close()
 
 	if *off {
-		for _, key := range []string{budget.KeyFuseHourlyUSD, budget.KeyFuseBurst, budget.KeyFuseCooldown, budget.KeyFuseTrip} {
+		for _, key := range []string{budget.KeyFuseHourlyUSD, budget.KeyFuseBurst, budget.KeyFuseFanout, budget.KeyFuseBaseline, budget.KeyFuseCooldown, budget.KeyFuseTrip} {
 			if err := s.DeleteSetting(key); err != nil {
 				return err
 			}
@@ -115,6 +162,33 @@ func cmdFuse(args []string) error {
 			fmt.Printf("rolling %s burst fuse set: $%.2f\n", budget.FormatFuseDuration(burstWindow), burstUSD)
 		}
 	}
+	if passed["fanout"] {
+		if removeFanout {
+			if err := s.DeleteSetting(budget.KeyFuseFanout); err != nil {
+				return err
+			}
+			fmt.Println("request fan-out fuse removed")
+		} else {
+			if err := s.SetSetting(budget.KeyFuseFanout, budget.FormatFuseFanout(fanoutWindow, fanoutRequests)); err != nil {
+				return err
+			}
+			fmt.Printf("rolling %s fan-out fuse set: %d requests\n", budget.FormatFuseDuration(fanoutWindow), fanoutRequests)
+		}
+	}
+	if passed["baseline"] {
+		if removeBaseline {
+			if err := s.DeleteSetting(budget.KeyFuseBaseline); err != nil {
+				return err
+			}
+			fmt.Println("same-time baseline fuse removed")
+		} else {
+			if err := s.SetSetting(budget.KeyFuseBaseline, baselineRaw); err != nil {
+				return err
+			}
+			fmt.Printf("same-time baseline fuse set: %s slot, %d-day lookback, minimum $%.2f\n",
+				budget.FormatFuseDuration(*baselineWindow), *baselineDays, *baselineMinimum)
+		}
+	}
 	if passed["cooldown"] {
 		if err := s.SetSetting(budget.KeyFuseCooldown, budget.FormatFuseDuration(*cooldown)); err != nil {
 			return err
@@ -129,7 +203,7 @@ func cmdFuse(args []string) error {
 		if snapshot.Tripped {
 			fmt.Printf("fuse remains tripped until %s — use `burnban fuse --reset` to recover early\n",
 				snapshot.TrippedUntil.In(time.Now().Location()).Format(time.RFC3339))
-		} else if len(snapshot.Rules) == 0 {
+		} else if len(snapshot.Rules) == 0 && snapshot.Fanout == nil {
 			fmt.Println("no active velocity-fuse rules remain")
 		} else {
 			fmt.Printf("fuse armed — a trip pauses new spend for %s\n", budget.FormatFuseDuration(snapshot.Cooldown))
@@ -145,19 +219,31 @@ func printFuseStatus(s *store.Store) error {
 	if err != nil {
 		return err
 	}
-	if len(snapshot.Rules) == 0 {
-		fmt.Println("no spend-velocity fuse set. Arm one: burnban fuse --hourly 20 --burst 5m:4")
+	if len(snapshot.Rules) == 0 && snapshot.Fanout == nil {
+		fmt.Println("no velocity fuse set. Arm one: burnban fuse --hourly 20 --burst 5m:4 --fanout 1m:120")
 	} else {
 		for _, rule := range snapshot.Rules {
 			fmt.Printf("%-8s $%.4f of $%.2f in rolling %s (%.0f%%, $%.4f remaining)\n",
 				rule.Name, rule.SpentUSD, rule.CapUSD, budget.FormatFuseDuration(rule.Window), rule.Pct(), rule.Remaining)
+			if rule.Name == "baseline" {
+				fmt.Printf("         median $%.4f × %.2f, with configured minimum floor\n",
+					rule.BaselineMedianUSD, rule.BaselineMultiplier)
+			}
+			if rule.ProjectedTimeToLimit > 0 {
+				fmt.Printf("         current rate projects limit in %s\n", budget.FormatFuseDuration(rule.ProjectedTimeToLimit))
+			}
+		}
+		if snapshot.Fanout != nil {
+			fmt.Printf("fanout   %d of %d requests in rolling %s (%d remaining)\n",
+				snapshot.Fanout.Requests, snapshot.Fanout.LimitRequests,
+				budget.FormatFuseDuration(snapshot.Fanout.Window), snapshot.Fanout.RemainingRequests)
 		}
 		fmt.Printf("action   temporary ban for %s\n", budget.FormatFuseDuration(snapshot.Cooldown))
 	}
 	if snapshot.Tripped {
 		fmt.Printf("state    TRIPPED until %s\n", snapshot.TrippedUntil.In(now.Location()).Format(time.RFC3339))
 		fmt.Printf("reason   %s\n", terminalText(snapshot.DenialMessage, 500))
-	} else if len(snapshot.Rules) > 0 {
+	} else if len(snapshot.Rules) > 0 || snapshot.Fanout != nil {
 		fmt.Println("state    armed")
 	}
 	return nil

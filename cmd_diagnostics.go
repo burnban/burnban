@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/burnban/burnban/internal/identity"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 )
@@ -31,6 +32,9 @@ type doctorResult struct {
 	LastRequestAt    string              `json:"last_request_at,omitempty"`
 	RoutingRecent    bool                `json:"routing_recent"`
 	ProviderRoutesOK bool                `json:"provider_routes_ok"`
+	IdentityState    string              `json:"identity_state"`
+	IdentityKind     string              `json:"identity_kind,omitempty"`
+	IdentityValidTo  string              `json:"identity_valid_until,omitempty"`
 	ConfiguredEnvs   map[string]string   `json:"configured_envs"`
 	Issues           []string            `json:"issues"`
 }
@@ -71,7 +75,7 @@ func cmdDoctor(args []string) error {
 
 	result := doctorResult{
 		Version: version, Database: *dbPath, ProviderRoutesOK: true,
-		ConfiguredEnvs: map[string]string{}, Issues: []string{},
+		IdentityState: "not_configured", ConfiguredEnvs: map[string]string{}, Issues: []string{},
 	}
 	prices, err := pricing.Load()
 	if err != nil {
@@ -100,6 +104,21 @@ func cmdDoctor(args []string) error {
 			result.Issues = append(result.Issues, "database write probe: "+err.Error())
 		} else {
 			result.DatabaseOK = true
+		}
+		identitySettings, err := s.GetSettings(identity.KeyTrustGrant, identity.KeyTrustSource, identity.KeyPolicySource)
+		if err != nil {
+			result.IdentityState = "untrusted"
+			result.Issues = append(result.Issues, "identity trust: "+err.Error())
+		} else if identitySettings[identity.KeyTrustGrant] != "" || identitySettings[identity.KeyTrustSource] != "" {
+			result.IdentityState = "untrusted"
+			grant, err := identity.LoadTrustGrant(s, time.Now().UTC())
+			if err != nil {
+				result.Issues = append(result.Issues, "identity trust: "+err.Error())
+			} else {
+				result.IdentityState = "trusted"
+				result.IdentityKind = grant.TenantKind
+				result.IdentityValidTo = grant.ValidUntil
+			}
 		}
 		if sum, err := s.LifetimeMetrics(); err == nil && !sum.LastRequestAt.IsZero() {
 			result.LastRequestAt = sum.LastRequestAt.Format(time.RFC3339)
@@ -171,7 +190,7 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
-	result.OK = result.DatabaseOK && result.PricingOK && result.ServerOK && result.RoutingRecent && result.ProviderRoutesOK
+	result.OK = result.DatabaseOK && result.PricingOK && result.ServerOK && result.RoutingRecent && result.ProviderRoutesOK && result.IdentityState != "untrusted"
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -316,6 +335,11 @@ func printDoctor(r doctorResult) {
 		fmt.Printf("routing   %s\n", state(false))
 	}
 	fmt.Printf("routes    %s · %d provider base URL(s) configured\n", state(r.ProviderRoutesOK), len(r.ConfiguredEnvs))
+	if r.IdentityState == "trusted" {
+		fmt.Printf("identity  trusted · %s enrollment · valid until %s\n", terminalText(r.IdentityKind, 40), terminalText(r.IdentityValidTo, 40))
+	} else {
+		fmt.Printf("identity  %s\n", terminalText(r.IdentityState, 40))
+	}
 	if len(r.ConfiguredEnvs) > 0 {
 		keys := make([]string, 0, len(r.ConfiguredEnvs))
 		for key := range r.ConfiguredEnvs {
@@ -469,6 +493,6 @@ func cmdPrune(args []string) error {
 		return fmt.Errorf("release exclusive maintenance lease: %w", err)
 	}
 	released = true
-	fmt.Printf("deleted %d ledger row(s) before %s; caps/settings were preserved (logical retention does not necessarily shrink the database file)\n", deleted, cutoff.Format(time.RFC3339))
+	fmt.Printf("deleted %d request/policy-decision record(s) before %s; policy documents, caps, and settings were preserved (logical retention does not necessarily shrink the database file)\n", deleted, cutoff.Format(time.RFC3339))
 	return nil
 }

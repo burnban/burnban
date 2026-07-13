@@ -52,6 +52,14 @@ var exportCSVHeader = []string{
 	"cost_usd", "latency_ms", "status", "streamed", "usage_state", "pricing_state",
 	"incomplete", "enforcement_unsafe", "route", "service_tier", "inference_geo",
 	"server_tool_calls", "fee_unpriced",
+	"cost_source", "cost_source_ref", "cost_effective_from", "cost_valid_through", "cost_confidence",
+	"identity_tenant", "identity_device", "principal", "service_account", "project", "cost_center", "identity_confidence",
+	"requested_provider", "requested_model", "requested_route", "downshift_action", "downshift_rule",
+	"downshift_trigger", "downshift_reason", "downshift_config_digest", "downshift_features_json",
+	"downshift_source_estimated_usd", "downshift_target_estimated_usd",
+	"policy_decision_id", "policy_digest", "policy_revision", "policy_name",
+	"policy_namespace", "policy_mode", "policy_outcome", "policy_admitted", "policy_confidence", "policy_context_json",
+	"policy_explanation_json",
 }
 
 func writeCSVExport(out io.Writer, s *store.Store, from time.Time) error {
@@ -60,7 +68,7 @@ func writeCSVExport(out io.Writer, s *store.Store, from time.Time) error {
 		return err
 	}
 	streamErr := s.StreamExport(from, func(r store.Request) error {
-		return w.Write([]string{
+		row := []string{
 			r.Ts.UTC().Format(time.RFC3339), spreadsheetText(r.Provider), spreadsheetText(r.Model), spreadsheetText(r.Agent), spreadsheetText(r.Session),
 			strconv.FormatInt(r.InTokens, 10), strconv.FormatInt(r.OutTokens, 10),
 			strconv.FormatInt(r.CacheReadTokens, 10), strconv.FormatInt(r.CacheWriteTokens, 10),
@@ -71,7 +79,33 @@ func writeCSVExport(out io.Writer, s *store.Store, from time.Time) error {
 			strconv.FormatBool(r.EnforcementUnsafe), spreadsheetText(r.Route),
 			spreadsheetText(r.ServiceTier), spreadsheetText(r.InferenceGeo),
 			strconv.FormatInt(r.ServerToolCalls, 10), strconv.FormatBool(r.FeeUnpriced),
-		})
+			spreadsheetText(string(r.CostSource)), spreadsheetText(r.CostSourceRef),
+			spreadsheetText(r.CostEffectiveFrom), spreadsheetText(r.CostValidThrough),
+			spreadsheetText(string(r.CostConfidence)),
+			spreadsheetText(r.IdentityTenant), spreadsheetText(r.IdentityDevice), spreadsheetText(r.Principal),
+			spreadsheetText(r.ServiceAccount), spreadsheetText(r.Project), spreadsheetText(r.CostCenter),
+			spreadsheetText(r.IdentityConfidence),
+			spreadsheetText(r.RequestedProvider), spreadsheetText(r.RequestedModel), spreadsheetText(r.RequestedRoute),
+			spreadsheetText(r.DownshiftAction), spreadsheetText(r.DownshiftRule), spreadsheetText(r.DownshiftTrigger),
+			spreadsheetText(r.DownshiftReason), spreadsheetText(r.DownshiftDigest), spreadsheetText(r.DownshiftFeatures),
+			strconv.FormatFloat(r.DownshiftSourceUSD, 'f', -1, 64), strconv.FormatFloat(r.DownshiftTargetUSD, 'f', -1, 64),
+			"0", "", "0", "", "", "", "", "false", "", "", "",
+		}
+		if r.Policy != nil {
+			start := len(row) - 11
+			row[start] = strconv.FormatInt(r.Policy.DecisionID, 10)
+			row[start+1] = spreadsheetText(r.Policy.Digest)
+			row[start+2] = strconv.FormatInt(r.Policy.Revision, 10)
+			row[start+3] = spreadsheetText(r.Policy.Name)
+			row[start+4] = spreadsheetText(r.Policy.Namespace)
+			row[start+5] = spreadsheetText(r.Policy.Mode)
+			row[start+6] = spreadsheetText(r.Policy.Outcome)
+			row[start+7] = strconv.FormatBool(r.Policy.Admitted)
+			row[start+8] = spreadsheetText(r.Policy.Confidence)
+			row[start+9] = spreadsheetText(r.Policy.ContextJSON)
+			row[start+10] = spreadsheetText(r.Policy.ExplanationJSON)
+		}
+		return w.Write(row)
 	})
 	w.Flush()
 	return errors.Join(streamErr, w.Error())

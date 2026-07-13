@@ -51,3 +51,28 @@ func TestTokenTotalsFromRowsUsesSameSnapshotAsRepricing(t *testing.T) {
 		t.Fatalf("totals = %+v", totals)
 	}
 }
+
+func TestWhatifQualityConstraintRequiresCompleteExternalEvidenceSelector(t *testing.T) {
+	if constraint, err := parseWhatifQualityConstraint(false, "", "", "", "", 10, .8); err != nil || constraint != nil {
+		t.Fatalf("disabled constraint = %+v, %v", constraint, err)
+	}
+	if _, err := parseWhatifQualityConstraint(true, "source", "metric", "", ".8", 10, .8); err == nil {
+		t.Fatal("partial quality selector accepted")
+	}
+	if _, err := parseWhatifQualityConstraint(true, "source", "metric", "cohort", ".8", 10, .49); err == nil {
+		t.Fatal("insufficient default evidence coverage accepted")
+	}
+}
+
+func TestFilterWhatifQualityExcludesUnknownLowScoreAndLowCoverage(t *testing.T) {
+	rows := []whatifRow{{model: "good"}, {model: "low-score"}, {model: "sparse"}, {model: "unknown"}}
+	summaries := map[string]store.QualitySummary{
+		"good":      {Model: "good", Samples: 10, CohortCases: 10, Coverage: 1, AverageScorePPM: 900_000},
+		"low-score": {Model: "low-score", Samples: 10, CohortCases: 10, Coverage: 1, AverageScorePPM: 700_000},
+		"sparse":    {Model: "sparse", Samples: 7, CohortCases: 10, Coverage: .7, AverageScorePPM: 950_000},
+	}
+	filtered, excluded := filterWhatifQuality(rows, summaries, whatifQualityConstraint{minimumPPM: 800_000, minSamples: 5, minCoverage: .8})
+	if len(filtered) != 1 || filtered[0].model != "good" || filtered[0].quality == nil || excluded != 3 {
+		t.Fatalf("filtered=%+v excluded=%d", filtered, excluded)
+	}
+}

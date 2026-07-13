@@ -27,8 +27,12 @@ import (
 	"unicode/utf8"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/downshift"
+	"github.com/burnban/burnban/internal/identity"
 	"github.com/burnban/burnban/internal/meter"
+	"github.com/burnban/burnban/internal/policy"
 	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/internal/reconcile"
 	"github.com/burnban/burnban/internal/store"
 )
 
@@ -51,6 +55,11 @@ const (
 	// a deterministic hash suffix so distinct raw values remain distinguishable.
 	maxPersistedLabelRunes = 128
 	maxPersistedLabelBytes = 256
+
+	// Policy matching needs the complete security-relevant value, not the
+	// truncated display label written to SQLite. A separate bound keeps JSON
+	// explanations and wildcard matching predictable under hostile input.
+	maxPolicyAdmissionLabelBytes = 4096
 )
 
 // Upstream is one forwarding target. Shape names the usage dialect its
@@ -69,10 +78,12 @@ type parsedUpstream struct {
 }
 
 type Proxy struct {
-	Store  *store.Store
-	Prices *pricing.Table
-	Guard  *budget.Guard
-	Logf   func(format string, v ...any)
+	Store     *store.Store
+	Prices    *pricing.Table
+	Guard     *budget.Guard
+	Policy    *policy.Engine
+	Downshift *downshift.Runtime
+	Logf      func(format string, v ...any)
 
 	upstreams map[string]parsedUpstream
 	client    *http.Client
@@ -119,12 +130,18 @@ func validShape(s string) bool {
 func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Proxy, error) {
 	us := make(map[string]parsedUpstream, len(upstreams))
 	for name, up := range upstreams {
+		if !validUpstreamRouteName(name) {
+			return nil, fmt.Errorf("upstream name %q must be 1-64 ASCII letters, digits, dots, underscores, or hyphens and start with a letter or digit", name)
+		}
 		u, err := url.Parse(up.URL)
 		if err != nil {
 			return nil, fmt.Errorf("upstream %s: %w", name, err)
 		}
 		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return nil, fmt.Errorf("upstream %s: URL must use http or https and include a host", name)
+		}
+		if u.User != nil {
+			return nil, fmt.Errorf("upstream %s: URL userinfo is forbidden; pass credentials in provider headers", name)
 		}
 		shape := up.Shape
 		if shape == "" {
@@ -148,6 +165,8 @@ func New(s *store.Store, t *pricing.Table, upstreams map[string]Upstream) (*Prox
 		Store:          s,
 		Prices:         t,
 		Guard:          &budget.Guard{S: s},
+		Policy:         policy.NewEngine(s),
+		Downshift:      downshift.NewRuntime(s),
 		Logf:           log.Printf,
 		upstreams:      us,
 		fingerprintKey: fingerprintKey,
@@ -329,19 +348,35 @@ func (p *Proxy) ensurePersistence() error {
 }
 
 func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string) {
-	start := time.Now()
-	agent, session, err := requestAttribution(r)
+	// Burnban is an inference-request gateway. Only POST has provider usage
+	// semantics that the meter can conservatively admit and settle. Forwarding
+	// arbitrary PUT/PATCH/DELETE (or a method-override header) would create a
+	// custom-upstream escape hatch around every cap and fuse.
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "burnban provider routes accept POST inference requests only", http.StatusMethodNotAllowed)
+		return
+	}
+	for _, header := range []string{"X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"} {
+		if len(r.Header.Values(header)) != 0 {
+			http.Error(w, "HTTP method override headers are not allowed on burnban provider routes", http.StatusBadRequest)
+			return
+		}
+	}
+	route, err := canonicalRequestRoute(r.URL)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	shape := p.upstreams[provider].shape
-
-	if r.Method == http.MethodPost {
-		if err := p.ensurePersistence(); err != nil {
-			http.Error(w, err.Error(), http.StatusServiceUnavailable)
-			return
-		}
+	start := time.Now()
+	agent, session, modelClass, err := requestAttribution(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	if err := p.ensurePersistence(); err != nil {
+		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		return
 	}
 
 	var reqBody []byte
@@ -360,36 +395,148 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		}
 		reqBody = b
 	}
+	if err := validateAdmissionJSON(reqBody, r.Header.Get("Content-Type")); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-	requestInfo := p.estimateRequest(r.URL.Path, reqBody)
-	var reservation *budget.Reservation
-	if r.Method == http.MethodPost {
-		var denial *budget.Denial
-		var err error
-		reservation, denial, err = p.Guard.Admit(start, agent, requestInfo.admission)
-		if err != nil {
-			// Distinguish an invalid cap/configuration value from an unavailable
-			// ledger. A failed durable probe latches health and turns the proxy
-			// explicitly fail-closed before any upstream request is sent.
+	requestInfo := p.estimateRequestAt(r.URL.Path, reqBody, provider, start)
+	if requestInfo.parseErr != nil {
+		http.Error(w, "request contains malformed model, output-bound, tier, geo, or tool admission metadata", http.StatusBadRequest)
+		return
+	}
+	if err := validatePolicyAdmissionMetadata(provider, route, requestInfo); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	attribution, identityStatus, err := p.requestPolicyAttribution(r, provider, route, reqBody, start)
+	if err != nil {
+		http.Error(w, err.Error(), identityStatus)
+		return
+	}
+	policyReservation, policyDecision, err := p.Policy.Prepare(start,
+		policyContextForRequest(attribution, agent, session, modelClass, provider, route, requestInfo))
+	if err != nil {
+		if probeErr := p.Store.Probe(); probeErr != nil {
+			p.markPersistenceFailure(probeErr)
+		}
+		http.Error(w, "policy admission unavailable; proxy is fail-closed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if policyDecision.Denied() {
+		writePolicyDenial(w, policyDecision)
+		return
+	}
+	plan, err := p.prepareDownshift(start, provider, route, r.URL.Path, reqBody, requestInfo, attribution)
+	if err != nil {
+		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
+			p.markPersistenceFailure(cancelErr)
+		}
+		http.Error(w, "downshift routing unavailable; proxy is fail-closed: "+err.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	if plan.decision.Action != downshift.ActionNone {
+		if boundaryErr := validateCrossRouteBoundary(r, plan); boundaryErr != nil {
+			cancelSelectedDownshift(plan, boundaryErr.Error())
+		}
+	}
+	if plan.decision.Action == downshift.ActionDownshift {
+		targetReservation, targetDecision, targetErr := p.prepareTargetPolicy(start, policyReservation, plan, attribution,
+			agent, session, modelClass)
+		if targetErr != nil {
 			if probeErr := p.Store.Probe(); probeErr != nil {
 				p.markPersistenceFailure(probeErr)
-				http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
-				return
 			}
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error(), http.StatusServiceUnavailable)
 			return
 		}
-		if denial != nil {
-			p.alertCapReached(denial)
-			writeDenial(w, denial)
+		policyReservation, policyDecision = targetReservation, targetDecision
+		if policyDecision != nil && policyDecision.Denied() {
+			cancelSelectedDownshift(plan, "compatible target was not forwarded because target policy denied the rewritten request")
+			setDownshiftHeaders(w.Header(), plan)
+			writePolicyDenial(w, policyDecision)
 			return
 		}
-		defer reservation.Release()
 	}
+
+	var reservation *budget.Reservation
+	var denial *budget.Denial
+	reservation, denial, err = p.Guard.Admit(start, agent, plan.requestInfo.admission)
+	if err == nil && denial != nil && plan.decision.Action != downshift.ActionDownshift && eligibleDownshiftDenial(denial) {
+		if retryErr := p.retryDownshiftAfterDenial(plan, attribution); retryErr == nil {
+			if boundaryErr := validateCrossRouteBoundary(r, plan); boundaryErr != nil {
+				cancelSelectedDownshift(plan, boundaryErr.Error())
+			} else {
+				targetReservation, targetDecision, targetErr := p.prepareTargetPolicy(start, policyReservation, plan, attribution,
+					agent, session, modelClass)
+				if targetErr != nil {
+					if probeErr := p.Store.Probe(); probeErr != nil {
+						p.markPersistenceFailure(probeErr)
+					}
+					http.Error(w, "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error(), http.StatusServiceUnavailable)
+					return
+				}
+				policyReservation, policyDecision = targetReservation, targetDecision
+				if policyDecision != nil && policyDecision.Denied() {
+					cancelSelectedDownshift(plan, "compatible target was not forwarded because target policy denied the rewritten request")
+					setDownshiftHeaders(w.Header(), plan)
+					writePolicyDenial(w, policyDecision)
+					return
+				}
+				reservation, denial, err = p.Guard.Admit(start, agent, plan.requestInfo.admission)
+			}
+		}
+	}
+	if err != nil {
+		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
+			p.markPersistenceFailure(cancelErr)
+			http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			return
+		}
+		// Distinguish an invalid cap/configuration value from an unavailable
+		// ledger. A failed durable probe latches health and turns the proxy
+		// explicitly fail-closed before any upstream request is sent.
+		if probeErr := p.Store.Probe(); probeErr != nil {
+			p.markPersistenceFailure(probeErr)
+			http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			return
+		}
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if denial != nil {
+		cancelUnforwardedDownshift(plan, denial)
+		setDownshiftHeaders(w.Header(), plan)
+		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
+			p.markPersistenceFailure(cancelErr)
+			http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			return
+		}
+		p.alertCapReached(denial)
+		writeDenial(w, denial)
+		return
+	}
+	defer reservation.Release()
+	if err := policyReservation.Commit(); err != nil {
+		p.markPersistenceFailure(err)
+		http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+		return
+	}
+	defer policyReservation.Release()
+	if policyDecision != nil {
+		w.Header().Set("X-Burnban-Policy-Decision", policyDecision.Outcome)
+		if hasPolicyWarnings(policyDecision) {
+			w.Header().Set("X-Burnban-Policy-Warn", "true")
+		}
+	}
+	setDownshiftHeaders(w.Header(), plan)
+	provider, route, reqBody, requestInfo = plan.provider, plan.route, plan.body, plan.requestInfo
+	shape := plan.shape
 
 	up := p.upstreams[provider].url
 	outURL := *up
-	outURL.Path = strings.TrimRight(up.Path, "/") + r.URL.Path
+	outURL.Path = strings.TrimRight(up.Path, "/") + plan.path
+	outURL.RawPath = ""
 	switch {
 	case up.RawQuery == "":
 		outURL.RawQuery = r.URL.RawQuery
@@ -405,13 +552,30 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		return
 	}
 	copyHeaders(out.Header, r.Header)
+	stripUpstreamDownshiftHeaders(out.Header)
+	if plan.provider != plan.requestedProvider {
+		retainCrossRouteHeaders(out.Header)
+	}
 	rec := store.Request{
-		Ts: start, Provider: persistedLabel(provider), Agent: persistedLabel(agent),
-		Session: persistedLabel(session), Route: persistedLabel(r.URL.EscapedPath()),
+		Ts: start, Provider: persistedLabel(provider), Model: persistedLabel(requestInfo.model), Agent: persistedLabel(agent),
+		Session: persistedLabel(session), Route: persistedLabel(route),
+		IdentityTenant: attribution.Tenant, IdentityDevice: attribution.Device,
+		Principal: attribution.Principal, ServiceAccount: attribution.ServiceAccount,
+		Project: attribution.Project, CostCenter: attribution.CostCenter,
+		IdentityConfidence: attribution.Confidence,
+		RequestedProvider:  persistedLabel(plan.requestedProvider), RequestedModel: persistedLabel(plan.requestedModel),
+		RequestedRoute: persistedLabel(plan.requestedRoute), DownshiftAction: string(plan.decision.Action),
+		DownshiftRule: persistedLabel(plan.decision.RuleID), DownshiftTrigger: string(plan.decision.Trigger),
+		DownshiftReason: persistedLabel(plan.decision.Reason), DownshiftDigest: plan.decision.ConfigDigest,
+		DownshiftFeatures: downshift.FeatureJSON(plan.features), DownshiftSourceUSD: plan.requestedInfo.admission.USD,
 	}
-	if r.Method == http.MethodPost {
-		rec.BodyHash = p.fingerprint(provider, r.Method, r.URL.EscapedPath(), r.URL.Query().Encode(), agent, session, start, reqBody)
+	if plan.decision.Action == downshift.ActionDownshift {
+		rec.DownshiftTargetUSD = plan.requestInfo.admission.USD
 	}
+	if policyDecision != nil {
+		rec.PolicyDecisionID = policyDecision.ID
+	}
+	rec.BodyHash = p.fingerprint(plan.requestedProvider, r.Method, plan.requestedRoute, r.URL.Query().Encode(), agent, session, start, plan.requestedBody)
 
 	resp, err := p.client.Do(out)
 	if err != nil {
@@ -419,30 +583,31 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		// an accounting ambiguity: the provider might have completed and billed
 		// work even though no response usage reached Burnban. Persist that gap so
 		// an active dollar guardrail fails closed instead of silently undercounting it.
-		if r.Method == http.MethodPost {
-			rec.LatencyMs = time.Since(start).Milliseconds()
-			rec.UsageState = store.UsageMissing
-			rec.PricingState = store.PricingUnmetered
-			rec.Incomplete = true
-			rec.EnforcementUnsafe = reservation != nil && reservation.CapActive()
-			if insertErr := reservation.Settle(rec); insertErr != nil {
-				p.markPersistenceFailure(insertErr)
-				p.Logf("burnban: store after upstream transport failure: %v", insertErr)
-				http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
-				return
-			}
+		rec.LatencyMs = time.Since(start).Milliseconds()
+		rec.UsageState = store.UsageMissing
+		rec.PricingState = store.PricingUnmetered
+		rec.Incomplete = true
+		rec.EnforcementUnsafe = reservation != nil && reservation.CapActive()
+		if insertErr := reservation.Settle(rec); insertErr != nil {
+			p.markPersistenceFailure(insertErr)
+			p.Logf("burnban: store after upstream transport failure: %v", insertErr)
+			http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			return
 		}
-		http.Error(w, "upstream: "+err.Error(), http.StatusBadGateway)
+		p.Logf("burnban: upstream %s://%s transport failed: %s", up.Scheme, up.Host, transportErrorDetail(err))
+		http.Error(w, "upstream request failed", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
 	rec.Status = resp.StatusCode
+	providerFinalUSD, providerFinalPresent := providerFinalCost(resp.Header)
 
 	isSSE := strings.HasPrefix(resp.Header.Get("Content-Type"), "text/event-stream")
 
 	responseHeaders := resp.Header.Clone()
 	stripHopHeaders(responseHeaders)
+	stripUpstreamDownshiftHeaders(responseHeaders)
 	responseHeaders.Del("Content-Length")
 	if resp.Uncompressed {
 		responseHeaders.Del("Content-Encoding")
@@ -544,15 +709,44 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		rec.Incomplete = usage.Incomplete
 		// Pricing always sees the full provider model ID. Only the display value
 		// persisted to SQLite is bounded, so long/versioned IDs remain billable.
-		if price, ok := p.Prices.Lookup(fullModel); ok {
-			rec.CostUSD = costUsage(price, usage)
+		resolved, ok := p.Prices.Resolve(provider, fullModel, usage.InferenceGeo, usage.ServiceTier, start, providerFinalUSD, providerFinalPresent)
+		if ok {
+			if resolved.HasFinalCost {
+				rec.CostUSD = resolved.FinalCostUSD
+			} else {
+				rec.CostUSD = costResolvedUsage(resolved, usage)
+			}
 			rec.PricingState = store.PricingPriced
+			if resolved.Source == pricing.SourceProviderFinal {
+				rec.FeeUnpriced = false
+			} else if resolved.Source == pricing.SourceContract {
+				rec.FeeUnpriced = usage.ServerToolCalls > 0 ||
+					(serviceTierFeeUnpriced(usage.ServiceTier) && !resolved.CoversTier) ||
+					(!geoKnown && !resolved.CoversRegion)
+			}
+			applyCostResolution(&rec, resolved)
 		} else {
 			rec.PricingState = store.PricingUnknown
+			rec.CostSource = store.CostUnknown
+			rec.CostConfidence = store.ConfidenceUnknown
 		}
 	} else {
 		rec.UsageState = store.UsageMissing
-		rec.PricingState = store.PricingUnmetered
+		resolved, ok := p.Prices.Resolve(provider, requestInfo.model, requestInfo.inferenceGeo, requestInfo.serviceTier, start, providerFinalUSD, providerFinalPresent)
+		if ok && resolved.HasFinalCost {
+			rec.Model = persistedLabel(requestInfo.model)
+			rec.CostUSD = resolved.FinalCostUSD
+			rec.PricingState = store.PricingPriced
+			applyCostResolution(&rec, resolved)
+		} else if providerFinalPresent {
+			rec.PricingState = store.PricingUnknown
+			rec.CostSource = store.CostUnknown
+			rec.CostConfidence = store.ConfidenceUnknown
+		} else {
+			rec.PricingState = store.PricingUnmetered
+			rec.CostSource = store.CostUnmetered
+			rec.CostConfidence = store.ConfidenceUnknown
+		}
 	}
 	// Failed provider responses usually carry no billable usage. When a failed
 	// response does include usage, however, treat it as billing evidence and
@@ -566,14 +760,12 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 			rec.PricingState != store.PricingPriced || rec.FeeUnpriced
 	}
 	rec.EnforcementUnsafe = reservation != nil && reservation.CapActive() && unsafeAccounting
-	if r.Method == http.MethodPost {
-		if err := reservation.Settle(rec); err != nil {
-			p.markPersistenceFailure(err)
-			p.Logf("burnban: store: %v", err)
-			return
-		}
-		p.scheduleWarn(time.Now())
+	if err := reservation.Settle(rec); err != nil {
+		p.markPersistenceFailure(err)
+		p.Logf("burnban: store: %v", err)
+		return
 	}
+	p.scheduleWarn(time.Now())
 }
 
 func costUsage(price pricing.Price, usage meter.Usage) float64 {
@@ -591,6 +783,55 @@ func costUsage(price pricing.Price, usage meter.Usage) float64 {
 	}
 	geoMultiplier, _ := inferenceGeoPriceMultiplier(usage.InferenceGeo)
 	return max(0, cost) * geoMultiplier
+}
+
+func costResolvedUsage(resolved pricing.Resolution, usage meter.Usage) float64 {
+	if !resolved.CoversRegion {
+		return costUsage(resolved.Price, usage)
+	}
+	// A region-scoped negotiated rate is already the effective rate for that
+	// region and must not receive the public list's geo multiplier again.
+	withoutPublicGeo := usage
+	withoutPublicGeo.InferenceGeo = ""
+	return costUsage(resolved.Price, withoutPublicGeo)
+}
+
+func applyCostResolution(rec *store.Request, resolved pricing.Resolution) {
+	rec.CostSource = store.CostSource(resolved.Source)
+	rec.CostSourceRef = persistedLabel(resolved.SourceRef)
+	rec.CostEffectiveFrom = resolved.EffectiveFrom
+	rec.CostValidThrough = resolved.ValidThrough
+	switch {
+	case resolved.Source == pricing.SourceProviderFinal:
+		rec.CostConfidence = store.ConfidenceProviderFinal
+	case rec.UsageState == store.UsagePartial || rec.FeeUnpriced:
+		rec.CostConfidence = store.ConfidencePartial
+	case rec.UsageState == store.UsageEstimated:
+		rec.CostConfidence = store.ConfidenceEstimated
+	case resolved.Source == pricing.SourceContract:
+		rec.CostConfidence = store.ConfidenceContract
+	default:
+		rec.CostConfidence = store.ConfidenceListEstimate
+	}
+}
+
+// A configured provider or accounting gateway can report a final inclusive
+// charge using this normalized response header. Multiple values, malformed
+// decimals, and implausible amounts are treated as present-but-invalid so the
+// resolver fails closed instead of falling back to a cheaper estimate.
+func providerFinalCost(header http.Header) (float64, bool) {
+	values := header.Values("X-Burnban-Provider-Final-Cost-USD")
+	if len(values) == 0 {
+		return 0, false
+	}
+	if len(values) != 1 {
+		return -1, true
+	}
+	micros, err := reconcile.ParseMoneyMicros(values[0])
+	if err != nil || micros < 0 {
+		return -1, true
+	}
+	return float64(micros) / 1_000_000, true
 }
 
 func serviceTierFeeUnpriced(tier string) bool {
@@ -616,14 +857,22 @@ func inferenceGeoPriceMultiplier(geo string) (multiplier float64, known bool) {
 }
 
 type requestEstimate struct {
-	model         string
-	inputEstimate int64
-	serviceTier   string
-	inferenceGeo  string
-	admission     budget.AdmissionEstimate
+	model              string
+	inputEstimate      int64
+	inputUpper         int64
+	outputBound        int64
+	outputBoundPresent bool
+	serviceTier        string
+	inferenceGeo       string
+	admission          budget.AdmissionEstimate
+	parseErr           error
 }
 
 func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
+	return p.estimateRequestAt(path, body, "", time.Now())
+}
+
+func (p *Proxy) estimateRequestAt(path string, body []byte, provider string, at time.Time) requestEstimate {
 	var request struct {
 		Model               string `json:"model"`
 		MaxTokens           int64  `json:"max_tokens"`
@@ -636,7 +885,11 @@ func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
 		} `json:"generationConfig"`
 		Tools []json.RawMessage `json:"tools"`
 	}
-	_ = json.Unmarshal(body, &request)
+	trimmedBody := bytes.TrimSpace(body)
+	parseErr := error(nil)
+	if len(trimmedBody) != 0 && trimmedBody[0] == '{' {
+		parseErr = json.Unmarshal(body, &request)
+	}
 	model := request.Model
 	if model == "" {
 		model = modelFromPath(path)
@@ -645,11 +898,15 @@ func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
 	inputEstimate := int64((len(body) + 3) / 4)
 	info := requestEstimate{
 		model: model, inputEstimate: inputEstimate,
+		inputUpper: int64(len(body)), outputBound: maxOutput, outputBoundPresent: maxOutput > 0,
 		serviceTier: request.ServiceTier, inferenceGeo: request.InferenceGeo,
+		parseErr: parseErr,
 	}
+	resolved, priceKnown := p.Prices.Resolve(provider, model, request.InferenceGeo, request.ServiceTier, at, 0, false)
 	_, geoKnown := inferenceGeoPriceMultiplier(request.InferenceGeo)
 	providerFeesUnbounded := hasUnboundedProviderTools(request.Tools) ||
-		serviceTierFeeUnpriced(request.ServiceTier) || !geoKnown
+		(serviceTierFeeUnpriced(request.ServiceTier) && !(priceKnown && resolved.CoversTier)) ||
+		(!geoKnown && !(priceKnown && resolved.CoversRegion))
 	info.admission = budget.AdmissionEstimate{
 		Bounded:     maxOutput > 0 && !providerFeesUnbounded,
 		Description: "request model",
@@ -657,24 +914,78 @@ func (p *Proxy) estimateRequest(path string, body []byte) requestEstimate {
 	if model != "" {
 		info.admission.Description = fmt.Sprintf("model %q", persistedLabel(model))
 	}
-	price, ok := p.Prices.Lookup(model)
-	if !ok {
+	if !priceKnown {
 		return info
 	}
 	// One token per request byte is a conservative input upper bound for
 	// byte-backed tokenizers. Cache-write pricing can exceed ordinary input,
 	// so reserve the more expensive interpretation.
 	inputUpper := int64(len(body))
-	normal := costUsage(price, meter.Usage{
+	normal := costResolvedUsage(resolved, meter.Usage{
 		In: inputUpper, Out: maxOutput, InferenceGeo: request.InferenceGeo,
 	})
-	cacheWrite := costUsage(price, meter.Usage{
+	cacheWrite := costResolvedUsage(resolved, meter.Usage{
 		Out: maxOutput, CacheWrite: inputUpper, CacheWrite1h: inputUpper,
 		InferenceGeo: request.InferenceGeo,
 	})
 	info.admission.USD = max(normal, cacheWrite)
 	info.admission.Priced = true
 	return info
+}
+
+func validUpstreamRouteName(value string) bool {
+	if len(value) == 0 || len(value) > 64 {
+		return false
+	}
+	if c := value[0]; !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')) {
+		return false
+	}
+	for i := 0; i < len(value); i++ {
+		c := value[i]
+		if c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9' ||
+			c == '.' || c == '_' || c == '-' {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validatePolicyAdmissionMetadata(provider, route string, info requestEstimate) error {
+	for name, value := range map[string]string{
+		"provider": provider, "route": route, "model": info.model,
+		"service tier": info.serviceTier, "inference geo": info.inferenceGeo,
+	} {
+		if len(value) > maxPolicyAdmissionLabelBytes || !utf8.ValidString(value) {
+			return fmt.Errorf("request %s must be valid UTF-8 of at most %d bytes", name, maxPolicyAdmissionLabelBytes)
+		}
+	}
+	return nil
+}
+
+// policyAdmissionLabel preserves the entire bounded value so allow/deny
+// suffixes cannot disappear behind the ledger's display truncation. Unsafe
+// formatting code points are replaced and the original hash is retained;
+// policy documents cannot contain those code points themselves.
+func policyAdmissionLabel(value string) string {
+	if value == "" {
+		return ""
+	}
+	var out strings.Builder
+	out.Grow(len(value))
+	changed := false
+	for _, r := range value {
+		if unsafeLabelRune(r) {
+			r = '�'
+			changed = true
+		}
+		out.WriteRune(r)
+	}
+	if !changed {
+		return out.String()
+	}
+	digest := sha256.Sum256([]byte(value))
+	return out.String() + "#" + hex.EncodeToString(digest[:8])
 }
 
 // hasUnboundedProviderTools recognizes provider-hosted tools whose request,
@@ -836,7 +1147,15 @@ var hopHeaders = []string{
 	"Te", "Trailer", "Trailers", "Transfer-Encoding", "Upgrade", "Accept-Encoding",
 	// Burnban control and attribution metadata is consumed locally. Forwarding
 	// any of it would disclose the gateway token and internal agent names.
-	"X-Burnban-Token", "X-Burnban-Agent", "X-Burnban-Session",
+	"X-Burnban-Token", "X-Burnban-Agent", "X-Burnban-Session", "X-Burnban-Model-Class",
+	"X-Burnban-Team", "X-Burnban-User", "X-Burnban-Project",
+	"X-Burnban-Identity", "X-Burnban-Service-Account", "X-Burnban-Cost-Center",
+	"X-Burnban-Organization", "X-Burnban-Tenant", "X-Burnban-Meter", "X-Burnban-Device",
+	"X-Burnban-Principal", "X-Burnban-Environment",
+	// This is trusted only as response metadata from an operator-configured
+	// accounting gateway. A caller must not be able to send it upstream and
+	// rely on an echoing intermediary to forge provider-final billing evidence.
+	"X-Burnban-Provider-Final-Cost-USD",
 }
 
 func copyHeaders(dst, src http.Header) {
@@ -864,19 +1183,186 @@ func stripHopHeaders(header http.Header) {
 	}
 }
 
-func requestAttribution(r *http.Request) (agent, session string, err error) {
-	for _, header := range []string{"X-Burnban-Agent", "X-Burnban-Session"} {
+func requestAttribution(r *http.Request) (agent, session, modelClass string, err error) {
+	for _, header := range []string{"X-Burnban-Agent", "X-Burnban-Session", "X-Burnban-Model-Class"} {
 		values := r.Header.Values(header)
 		if len(values) > 1 {
-			return "", "", fmt.Errorf("%s must not appear more than once", strings.ToLower(header))
+			return "", "", "", fmt.Errorf("%s must not appear more than once", strings.ToLower(header))
 		}
 		for _, value := range values {
 			if err := validateExplicitIdentity(value); err != nil {
-				return "", "", fmt.Errorf("%s %w", strings.ToLower(header), err)
+				return "", "", "", fmt.Errorf("%s %w", strings.ToLower(header), err)
 			}
 		}
 	}
-	return agentFrom(r), r.Header.Get("X-Burnban-Session"), nil
+	return agentFrom(r), r.Header.Get("X-Burnban-Session"), r.Header.Get("X-Burnban-Model-Class"), nil
+}
+
+type requestIdentityAttribution struct {
+	Organization             string
+	Tenant                   string
+	Meter                    string
+	Device                   string
+	Principal                string
+	ServiceAccount           string
+	Project                  string
+	CostCenter               string
+	Environment              string
+	Confidence               string
+	OrganizationConfidence   string
+	TenantConfidence         string
+	MeterConfidence          string
+	DeviceConfidence         string
+	TeamConfidence           string
+	CostCenterConfidence     string
+	PrincipalConfidence      string
+	ServiceAccountConfidence string
+	UserConfidence           string
+	ProjectConfidence        string
+	EnvironmentConfidence    string
+}
+
+func (a requestIdentityAttribution) policyUser() string {
+	if a.Principal != "" {
+		return a.Principal
+	}
+	return a.ServiceAccount
+}
+
+func (p *Proxy) requestPolicyAttribution(r *http.Request, provider, route string, body []byte, now time.Time) (requestIdentityAttribution, int, error) {
+	claimValues := r.Header.Values("X-Burnban-Identity")
+	if len(claimValues) > 1 {
+		return requestIdentityAttribution{}, http.StatusBadRequest, fmt.Errorf("x-burnban-identity must not appear more than once")
+	}
+	if len(claimValues) == 1 {
+		for _, header := range []string{
+			"X-Burnban-Team", "X-Burnban-User", "X-Burnban-Project", "X-Burnban-Service-Account",
+			"X-Burnban-Cost-Center", "X-Burnban-Organization", "X-Burnban-Tenant", "X-Burnban-Meter",
+			"X-Burnban-Device", "X-Burnban-Principal", "X-Burnban-Environment",
+		} {
+			if len(r.Header.Values(header)) != 0 {
+				return requestIdentityAttribution{}, http.StatusBadRequest,
+					fmt.Errorf("%s cannot override a signed Burnban identity claim", strings.ToLower(header))
+			}
+		}
+		token := claimValues[0]
+		if token == "" || len(token) > 8192 {
+			return requestIdentityAttribution{}, http.StatusBadRequest, fmt.Errorf("x-burnban-identity has an invalid size")
+		}
+		grant, err := identity.LoadTrustGrant(p.Store, now)
+		if err != nil {
+			return requestIdentityAttribution{}, http.StatusUnauthorized, fmt.Errorf("signed Burnban identity is not trusted")
+		}
+		var persistenceErr error
+		verified, err := identity.Verify(token, grant, identity.RequestBinding{
+			Audience: identity.AudienceProxy, Method: r.Method, Route: "/" + provider + route,
+			QuerySHA256: identity.BodyDigest([]byte(r.URL.RawQuery)), BodySHA256: identity.BodyDigest(body),
+		}, now, func(kid, jti string, expires time.Time) error {
+			accepted, err := p.Store.ConsumeIdentityNonce(kid, jti, expires, now)
+			if err != nil {
+				persistenceErr = err
+				return err
+			}
+			if !accepted {
+				return identity.ErrReplay
+			}
+			return nil
+		})
+		if persistenceErr != nil {
+			p.markPersistenceFailure(persistenceErr)
+			return requestIdentityAttribution{}, http.StatusServiceUnavailable,
+				fmt.Errorf("identity replay protection is unavailable; proxy is fail-closed")
+		}
+		if err != nil {
+			return requestIdentityAttribution{}, http.StatusUnauthorized, fmt.Errorf("signed Burnban identity is invalid, expired, or already used")
+		}
+		claims := verified.Claims
+		identityTypeTrusted := verified.PrincipalTrusted || verified.ServiceAccountTrusted
+		return requestIdentityAttribution{
+			Organization: claims.TenantID, Tenant: claims.TenantKind + ":" + claims.TenantID,
+			Meter: claims.DeviceID, Device: claims.DeviceID,
+			Principal: claims.Principal, ServiceAccount: claims.ServiceAccount,
+			Project: claims.Project, CostCenter: claims.CostCenter, Environment: claims.Environment,
+			Confidence: "authenticated", OrganizationConfidence: "authenticated",
+			TenantConfidence: "authenticated", MeterConfidence: "authenticated", DeviceConfidence: "authenticated",
+			TeamConfidence:           identityFieldConfidence(claims.CostCenter, verified.CostCenterTrusted),
+			CostCenterConfidence:     identityFieldConfidence(claims.CostCenter, verified.CostCenterTrusted),
+			PrincipalConfidence:      identityFieldConfidence(claims.Principal, identityTypeTrusted),
+			ServiceAccountConfidence: identityFieldConfidence(claims.ServiceAccount, identityTypeTrusted),
+			UserConfidence: identityFieldConfidence(claims.Principal+claims.ServiceAccount,
+				identityTypeTrusted),
+			ProjectConfidence:     identityFieldConfidence(claims.Project, verified.ProjectTrusted),
+			EnvironmentConfidence: identityFieldConfidence(claims.Environment, verified.EnvironmentTrusted),
+		}, http.StatusOK, nil
+	}
+	for _, header := range []string{
+		"X-Burnban-Service-Account", "X-Burnban-Cost-Center", "X-Burnban-Organization", "X-Burnban-Tenant",
+		"X-Burnban-Meter", "X-Burnban-Device", "X-Burnban-Principal", "X-Burnban-Environment",
+	} {
+		if len(r.Header.Values(header)) != 0 {
+			return requestIdentityAttribution{}, http.StatusBadRequest,
+				fmt.Errorf("%s requires a signed Burnban identity claim", strings.ToLower(header))
+		}
+	}
+	for _, header := range []string{"X-Burnban-Team", "X-Burnban-User", "X-Burnban-Project"} {
+		values := r.Header.Values(header)
+		if len(values) > 1 {
+			return requestIdentityAttribution{}, http.StatusBadRequest, fmt.Errorf("%s must not appear more than once", strings.ToLower(header))
+		}
+		for _, value := range values {
+			if err := validateExplicitIdentity(value); err != nil {
+				return requestIdentityAttribution{}, http.StatusBadRequest, fmt.Errorf("%s %w", strings.ToLower(header), err)
+			}
+		}
+	}
+	confidence := "unverified"
+	if r.Header.Get("X-Burnban-Team") != "" || r.Header.Get("X-Burnban-User") != "" || r.Header.Get("X-Burnban-Project") != "" {
+		confidence = "self_reported"
+	}
+	return requestIdentityAttribution{
+		Principal: r.Header.Get("X-Burnban-User"), Project: r.Header.Get("X-Burnban-Project"),
+		CostCenter: r.Header.Get("X-Burnban-Team"), Confidence: confidence,
+		TeamConfidence:       identityFieldConfidence(r.Header.Get("X-Burnban-Team"), false),
+		CostCenterConfidence: identityFieldConfidence(r.Header.Get("X-Burnban-Team"), false),
+		PrincipalConfidence:  identityFieldConfidence(r.Header.Get("X-Burnban-User"), false),
+		UserConfidence:       identityFieldConfidence(r.Header.Get("X-Burnban-User"), false),
+		ProjectConfidence:    identityFieldConfidence(r.Header.Get("X-Burnban-Project"), false),
+	}, http.StatusOK, nil
+}
+
+func identityFieldConfidence(value string, trusted bool) string {
+	if trusted {
+		return "authenticated"
+	}
+	if value != "" {
+		return "self_reported"
+	}
+	return "unverified"
+}
+
+func hasPolicyWarnings(decision *policy.Decision) bool {
+	for _, rule := range decision.Rules {
+		if rule.Mode == policy.ModeWarn && len(rule.Violations) != 0 {
+			return true
+		}
+	}
+	return false
+}
+
+func writePolicyDenial(w http.ResponseWriter, decision *policy.Decision) {
+	status := decision.HTTPStatus
+	if status == 0 {
+		status = http.StatusForbidden
+	}
+	if status == http.StatusTooManyRequests {
+		w.Header().Set("Retry-After", "1")
+	}
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("X-Burnban-Policy-Decision", "deny")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"error": "burnban policy denied this request", "decision_id": decision.ID, "decision": decision,
+	})
 }
 
 func validateExplicitIdentity(value string) error {
@@ -1039,14 +1525,22 @@ func (p *Proxy) maybeWarn(now time.Time) {
 }
 
 func (p *Proxy) queueWebhook(mark, urlStr, message string) {
-	if delivered, err := p.Store.GetSetting(mark); err != nil {
-		p.Logf("burnban: webhook delivery state: %v", err)
-		return
-	} else if delivered == "1" {
-		return
-	}
 	p.alertMu.Lock()
 	if p.alertsInFlight[mark] {
+		p.alertMu.Unlock()
+		return
+	}
+	// Check the durable mark while holding the same lock that protects the
+	// in-flight claim. Otherwise a caller can read the old mark, pause while the
+	// first delivery records success and drops its claim, then enqueue a second
+	// delivery from that stale read.
+	delivered, err := p.Store.GetSetting(mark)
+	if err != nil {
+		p.alertMu.Unlock()
+		p.Logf("burnban: webhook delivery state: %v", err)
+		return
+	}
+	if delivered == "1" {
 		p.alertMu.Unlock()
 		return
 	}

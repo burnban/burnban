@@ -43,24 +43,38 @@ type lifecycleHealth struct {
 }
 
 type controlStatusPayload struct {
-	OK        bool            `json:"ok"`
-	PID       int             `json:"pid"`
-	Version   string          `json:"version"`
-	StartedAt time.Time       `json:"started_at"`
-	Health    lifecycleHealth `json:"health"`
+	OK        bool                `json:"ok"`
+	PID       int                 `json:"pid"`
+	Version   string              `json:"version"`
+	StartedAt time.Time           `json:"started_at"`
+	Health    lifecycleHealth     `json:"health"`
+	Telemetry *lifecycleTelemetry `json:"telemetry,omitempty"`
+}
+
+type lifecycleTelemetry struct {
+	Enabled        bool       `json:"enabled"`
+	State          string     `json:"state"`
+	AckedThrough   int64      `json:"acked_through"`
+	DroppedThrough int64      `json:"dropped_through"`
+	DroppedRows    int64      `json:"dropped_rows"`
+	PendingRows    int64      `json:"pending_rows"`
+	LastSuccess    *time.Time `json:"last_success,omitempty"`
+	LastFailure    *time.Time `json:"last_failure,omitempty"`
+	LastError      string     `json:"last_error,omitempty"`
 }
 
 type statusResult struct {
-	OK        bool             `json:"ok"`
-	Active    bool             `json:"active"`
-	Healthy   bool             `json:"healthy"`
-	Version   string           `json:"version,omitempty"`
-	PID       int              `json:"pid,omitempty"`
-	StartedAt string           `json:"started_at,omitempty"`
-	URL       string           `json:"url,omitempty"`
-	Database  string           `json:"database,omitempty"`
-	Health    *lifecycleHealth `json:"health,omitempty"`
-	Issue     string           `json:"issue,omitempty"`
+	OK        bool                `json:"ok"`
+	Active    bool                `json:"active"`
+	Healthy   bool                `json:"healthy"`
+	Version   string              `json:"version,omitempty"`
+	PID       int                 `json:"pid,omitempty"`
+	StartedAt string              `json:"started_at,omitempty"`
+	URL       string              `json:"url,omitempty"`
+	Database  string              `json:"database,omitempty"`
+	Health    *lifecycleHealth    `json:"health,omitempty"`
+	Telemetry *lifecycleTelemetry `json:"telemetry,omitempty"`
+	Issue     string              `json:"issue,omitempty"`
 }
 
 func serverStatePath(dbPath string) string {
@@ -253,6 +267,7 @@ func cmdStatusTo(args []string, out io.Writer) error {
 	}
 	result.Active = true
 	result.Health = &status.Health
+	result.Telemetry = status.Telemetry
 	result.Healthy = status.Health.OK && status.Health.PersistenceOK
 	result.OK = result.Active && result.Healthy
 	health := terminalText(status.Health.State, 80)
@@ -271,6 +286,10 @@ func cmdStatusTo(args []string, out io.Writer) error {
 		}
 	} else {
 		fmt.Fprintf(out, "burnban %s is running\npid      %d\nstarted  %s\nurl      %s\ndb       %s\nhealth   %s · %d in flight · $%.4f reserved\n", terminalText(state.Version, 80), state.PID, state.StartedAt.Local().Format(time.RFC3339), terminalText(state.URL, 200), terminalText(state.DBPath, 200), health, status.Health.InFlight, status.Health.ReservedUSD)
+		if status.Telemetry != nil {
+			fmt.Fprintf(out, "otlp     %s · %d pending · %d dropped\n",
+				terminalText(status.Telemetry.State, 80), status.Telemetry.PendingRows, status.Telemetry.DroppedRows)
+		}
 	}
 	if !result.Healthy {
 		return fmt.Errorf("burnban is running but unhealthy: %s", health)

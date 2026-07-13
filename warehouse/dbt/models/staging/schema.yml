@@ -1,0 +1,28 @@
+version: 2
+
+models:
+  - name: stg_burnban_requests
+    description: Content-free Burnban request cost, usage, identity-trust, and policy metadata.
+    columns:
+      - name: schema_version
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['burnban.telemetry.v1']
+      - name: request_id
+        tests: [not_null]
+      - name: observed_at
+        tests: [not_null]
+      - name: provider
+        tests: [not_null]
+      - name: identity_confidence
+        tests:
+          - not_null
+          - accepted_values:
+              values: ['authenticated', 'self_reported', 'unverified']
+      - name: input_tokens
+        tests: [not_null]
+      - name: output_tokens
+        tests: [not_null]
+      - name: cost_usd
+        tests: [not_null]

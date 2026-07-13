@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"math"
 	"net/http"
@@ -16,6 +17,7 @@ import (
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/policy"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/proxy"
 	"github.com/burnban/burnban/internal/store"
@@ -83,6 +85,249 @@ func TestPassthroughAndMetering(t *testing.T) {
 	}
 	if want := 0.0185; math.Abs(sum.Cost-want) > 1e-9 {
 		t.Fatalf("cost = %v, want %v", sum.Cost, want)
+	}
+}
+
+func TestProviderRoutesRejectUnmeteredMethodsAndOverridesBeforeForwarding(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	for _, method := range []string{
+		http.MethodGet, http.MethodHead, http.MethodPut, http.MethodPatch,
+		http.MethodDelete, http.MethodOptions, http.MethodTrace, "CUSTOM",
+	} {
+		t.Run(method, func(t *testing.T) {
+			req, err := http.NewRequest(method, srv.URL+"/anthropic/v1/messages", strings.NewReader(`{"model":"claude-opus-4-7"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusMethodNotAllowed || resp.Header.Get("Allow") != http.MethodPost {
+				t.Fatalf("status=%d allow=%q", resp.StatusCode, resp.Header.Get("Allow"))
+			}
+		})
+	}
+	for _, header := range []string{"X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"} {
+		t.Run(header, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+"/anthropic/v1/messages", strings.NewReader(`{"model":"claude-opus-4-7"}`))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set(header, http.MethodPut)
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			io.Copy(io.Discard, resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d", resp.StatusCode)
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("rejected methods reached upstream: hits=%d", hits.Load())
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("rejected methods entered ledger: rows=%d", len(rows))
+	}
+}
+
+func TestAmbiguousPathsAndDuplicateJSONAreRejectedBeforeAdmission(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	tests := []struct {
+		name string
+		path string
+		body string
+	}{
+		{"encoded slash", "/anthropic/v1%2Fmessages", `{"model":"claude-opus-4-7"}`},
+		{"duplicate model", "/anthropic/v1/messages", `{"model":"claude-opus-4-7","model":"other"}`},
+		{"case ambiguous model", "/anthropic/v1/messages", `{"model":"claude-opus-4-7","Model":"other"}`},
+		{"noncanonical model", "/anthropic/v1/messages", `{"Model":"claude-opus-4-7"}`},
+		{"duplicate output bound", "/anthropic/v1/messages", `{"model":"claude-opus-4-7","max_tokens":1,"max_tokens":1000000}`},
+		{"nested duplicate tool type", "/anthropic/v1/messages", `{"model":"claude-opus-4-7","tools":[{"type":"function","type":"web_search"}]}`},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPost, srv.URL+tc.path, strings.NewReader(tc.body))
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Content-Type", "application/json")
+			resp, err := http.DefaultClient.Do(req)
+			if err != nil {
+				t.Fatal(err)
+			}
+			body, _ := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if resp.StatusCode != http.StatusBadRequest {
+				t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+			}
+		})
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("ambiguous requests reached upstream: %d", hits.Load())
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("ambiguous requests entered ledger: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestPolicyDenyPrecedesBudgetFuseAndPersistsDecision(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		io.WriteString(w, anthropicJSON)
+	}))
+	applyPolicy(t, s, policy.Document{
+		APIVersion: policy.APIVersion, Kind: policy.Kind,
+		Metadata: policy.Metadata{Name: "proxy-deny", Namespace: "proxy-deny", Revision: 1}, Mode: policy.ModeEnforce,
+		Rules: []policy.Rule{{ID: "provider-boundary", Match: policy.Match{
+			Provider: policy.AccessList{Deny: []string{"anthropic"}},
+		}}},
+	})
+	if err := s.SetSetting(budget.KeyFuseBurst, "1m:0.01"); err != nil {
+		t.Fatal(err)
+	}
+	resp, body := post(t, srv.URL)
+	if resp.StatusCode != http.StatusForbidden || !strings.Contains(body, `"decision_id":`) {
+		t.Fatalf("status=%d body=%s", resp.StatusCode, body)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("policy-denied request reached upstream: %d", hits.Load())
+	}
+	if trip, err := s.GetSetting(budget.KeyFuseTrip); err != nil || trip != "" {
+		t.Fatalf("policy-denied request tripped budget fuse: trip=%q err=%v", trip, err)
+	}
+	summary, err := s.PolicyDecisionsSince(time.Unix(0, 0))
+	if err != nil || summary.Denied != 1 || summary.Allowed != 0 {
+		t.Fatalf("decisions=%+v err=%v", summary, err)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil || len(rows) != 0 {
+		t.Fatalf("denied request entered request ledger: rows=%+v err=%v", rows, err)
+	}
+}
+
+func TestPolicyWarnIsLinkedToPromptFreeRequestExport(t *testing.T) {
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	applyPolicy(t, s, policy.Document{
+		APIVersion: policy.APIVersion, Kind: policy.Kind,
+		Metadata: policy.Metadata{Name: "proxy-warn", Namespace: "proxy-warn", Revision: 1}, Mode: policy.ModeWarn,
+		Rules: []policy.Rule{{ID: "provider-warning", Match: policy.Match{
+			Provider: policy.AccessList{Deny: []string{"anthropic"}},
+		}}},
+	})
+	resp, _ := post(t, srv.URL)
+	if resp.StatusCode != http.StatusOK || resp.Header.Get("X-Burnban-Policy-Warn") != "true" {
+		t.Fatalf("status=%d headers=%v", resp.StatusCode, resp.Header)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil || len(rows) != 1 || rows[0].Policy == nil {
+		t.Fatalf("rows=%+v err=%v", rows, err)
+	}
+	metadata := rows[0].Policy
+	if metadata.DecisionID == 0 || metadata.Outcome != "allow" || metadata.Mode != "warn" {
+		t.Fatalf("policy metadata=%+v", metadata)
+	}
+	joined := metadata.ContextJSON + metadata.ExplanationJSON
+	if strings.Contains(joined, `"decision_id"`) || strings.Contains(joined, `"messages"`) || strings.Contains(joined, "hi") {
+		t.Fatalf("policy metadata leaked prompt or stale ID: %s", joined)
+	}
+}
+
+func TestBudgetDeniedAttemptDoesNotConsumePolicyRequestWindow(t *testing.T) {
+	var hits atomic.Int64
+	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, anthropicJSON)
+	}))
+	applyPolicy(t, s, policy.Document{
+		APIVersion: policy.APIVersion, Kind: policy.Kind,
+		Metadata: policy.Metadata{Name: "budget-order", Namespace: "budget-order", Revision: 1}, Mode: policy.ModeEnforce,
+		Rules: []policy.Rule{{ID: "one", Limits: policy.Limits{Requests: []policy.WindowLimit{
+			{ID: "once", Max: 1, Window: "1h", WindowType: "rolling"},
+		}}}},
+	})
+	if err := s.SetSetting(budget.KeyBanActive, "1"); err != nil {
+		t.Fatal(err)
+	}
+	if resp, _ := post(t, srv.URL); resp.StatusCode != http.StatusPaymentRequired {
+		t.Fatalf("budget-denied status=%d", resp.StatusCode)
+	}
+	if err := s.DeleteSetting(budget.KeyBanActive); err != nil {
+		t.Fatal(err)
+	}
+	if resp, body := post(t, srv.URL); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first admitted status=%d body=%s", resp.StatusCode, body)
+	}
+	if resp, body := post(t, srv.URL); resp.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("policy limit status=%d body=%s", resp.StatusCode, body)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("upstream hits=%d, want 1", hits.Load())
+	}
+	usage, err := s.PolicyRuleUsageSince("budget-order", "one", time.Now().Add(-time.Hour))
+	if err != nil || usage.Requests != 1 {
+		t.Fatalf("policy usage=%+v err=%v", usage, err)
+	}
+}
+
+func TestUpstreamSecretsAreRejectedOrRedactedFromFailures(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "upstream-secrets.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	prices := &pricing.Table{Models: map[string]pricing.Price{"known": {InputPerMTok: 1, OutputPerMTok: 1}}}
+	if _, err := proxy.New(s, prices, map[string]proxy.Upstream{
+		"custom": {URL: "http://user:canary-password@example.test", Shape: "openai"},
+	}); err == nil || !strings.Contains(err.Error(), "userinfo is forbidden") {
+		t.Fatalf("userinfo upstream error=%v", err)
+	}
+	const secret = "canary-secret-query"
+	p, err := proxy.New(s, prices, map[string]proxy.Upstream{
+		"custom": {URL: "http://127.0.0.1:1/canary-secret-path?api_key=" + secret, Shape: "openai"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var logs strings.Builder
+	p.Logf = func(format string, values ...any) { fmt.Fprintf(&logs, format, values...) }
+	srv := httptest.NewServer(p.Handler())
+	defer srv.Close()
+	resp, err := http.Post(srv.URL+"/custom/v1/chat/completions", "application/json",
+		strings.NewReader(`{"model":"known","max_tokens":1}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, _ := io.ReadAll(resp.Body)
+	resp.Body.Close()
+	combined := string(body) + logs.String()
+	if resp.StatusCode != http.StatusBadGateway || strings.Contains(combined, secret) || strings.Contains(combined, "canary-secret-path") {
+		t.Fatalf("status=%d body/log=%s", resp.StatusCode, combined)
 	}
 }
 
@@ -168,9 +413,56 @@ func TestAnthropicCacheTierAndToolFeesArePreservedAndFailClosedUnderCap(t *testi
 	}
 }
 
+func TestOverflowingProviderUsageBecomesPartialAndFailsClosed(t *testing.T) {
+	prices := &pricing.Table{Models: map[string]pricing.Price{
+		"gemini-test": {InputPerMTok: 1, OutputPerMTok: 1},
+	}}
+	providerBody := `{"modelVersion":"gemini-test","usageMetadata":{"promptTokenCount":1,` +
+		`"candidatesTokenCount":9223372036854775807,"thoughtsTokenCount":9223372036854775807}}`
+	var hits atomic.Int64
+	srv, s := newProxyFor(t, "gemini", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		io.WriteString(w, providerBody)
+	}), prices)
+	if err := s.SetSetting(budget.KeyDailyCapUSD, "100000000000"); err != nil {
+		t.Fatal(err)
+	}
+	call := func() (*http.Response, string) {
+		resp, err := http.Post(srv.URL+"/gemini/v1beta/models/gemini-test:generateContent", "application/json",
+			strings.NewReader(`{"generationConfig":{"maxOutputTokens":1},"contents":[]}`))
+		if err != nil {
+			t.Fatal(err)
+		}
+		body, _ := io.ReadAll(resp.Body)
+		resp.Body.Close()
+		return resp, string(body)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusOK {
+		t.Fatalf("first status=%d body=%s", resp.StatusCode, body)
+	}
+	rows, err := s.Export(time.Unix(0, 0))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 || rows[0].UsageState != store.UsagePartial || !rows[0].EnforcementUnsafe ||
+		rows[0].OutTokens < 0 || rows[0].OutTokens > 1_000_000_000_000_000 {
+		t.Fatalf("overflow row remained safe/exact: %+v", rows)
+	}
+	if resp, body := call(); resp.StatusCode != http.StatusPaymentRequired || !strings.Contains(body, "burnban_metering_gap") {
+		t.Fatalf("second status=%d body=%s", resp.StatusCode, body)
+	}
+	if hits.Load() != 1 {
+		t.Fatalf("fail-closed request reached upstream: hits=%d", hits.Load())
+	}
+}
+
 func TestBurnbanHeadersStayLocal(t *testing.T) {
 	srv, s := newProxy(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		for _, name := range []string{"x-burnban-token", "x-burnban-agent", "x-burnban-session"} {
+		for _, name := range []string{
+			"x-burnban-token", "x-burnban-agent", "x-burnban-session",
+			"x-burnban-provider-final-cost-usd",
+		} {
 			if got := r.Header.Get(name); got != "" {
 				t.Errorf("upstream received %s=%q", name, got)
 			}
@@ -188,6 +480,7 @@ func TestBurnbanHeadersStayLocal(t *testing.T) {
 	req.Header.Set("x-burnban-token", "gateway-secret")
 	req.Header.Set("x-burnban-agent", "payments-agent")
 	req.Header.Set("x-burnban-session", "private-session")
+	req.Header.Set("x-burnban-provider-final-cost-usd", "0.000001")
 	req.Header.Set("Connection", "keep-alive, X-Private-Hop")
 	req.Header.Set("X-Private-Hop", "local-secret")
 	resp, err := http.DefaultClient.Do(req)
@@ -505,6 +798,26 @@ func newProxyFor(t *testing.T, name string, upstream http.Handler, prices *prici
 	srv := httptest.NewServer(p.Handler())
 	t.Cleanup(srv.Close)
 	return srv, s
+}
+
+func applyPolicy(t *testing.T, s *store.Store, document policy.Document) {
+	t.Helper()
+	raw, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compiled, err := policy.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.ApplyPolicyDocument(store.PolicyDocumentRecord{
+		AppliedAt: time.Now().UTC(), APIVersion: compiled.Document.APIVersion,
+		Name: compiled.Document.Metadata.Name, Namespace: compiled.Document.Metadata.Namespace,
+		Revision: compiled.Document.Metadata.Revision,
+		Digest:   compiled.Digest, DocumentJSON: string(compiled.Canonical),
+	}); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func TestGeminiMetering(t *testing.T) {

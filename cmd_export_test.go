@@ -25,6 +25,9 @@ func TestStreamingExportProducesSafeCSVAndJSON(t *testing.T) {
 		Ts: time.Now(), Provider: "=FORMULA", Model: "\x1b[31mmodel", Agent: "+agent", Session: "@session",
 		Route: "-route", ServiceTier: "=tier", InferenceGeo: "+geo", BodyHash: "private-fingerprint",
 		UsageState: store.UsageState("=usage"), PricingState: store.PricingState("+pricing"),
+		Principal: "=principal", ServiceAccount: "+service", Project: "-project", CostCenter: "@cost",
+		RequestedProvider: "=requested-provider", RequestedModel: "+requested-model", RequestedRoute: "@requested-route",
+		DownshiftAction: "warn", DownshiftRule: "=rule", DownshiftTrigger: "+trigger", DownshiftReason: "@reason",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -44,7 +47,7 @@ func TestStreamingExportProducesSafeCSVAndJSON(t *testing.T) {
 	for i, name := range records[0] {
 		fields[name] = records[1][i]
 	}
-	for _, name := range []string{"provider", "agent", "session", "route", "service_tier", "inference_geo", "usage_state", "pricing_state"} {
+	for _, name := range []string{"provider", "agent", "session", "route", "service_tier", "inference_geo", "usage_state", "pricing_state", "principal", "service_account", "project", "cost_center", "requested_provider", "requested_model", "requested_route", "downshift_rule", "downshift_trigger", "downshift_reason"} {
 		if !strings.HasPrefix(fields[name], "'") {
 			t.Errorf("CSV field %s was not formula-neutralized: %q", name, fields[name])
 		}

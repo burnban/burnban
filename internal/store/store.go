@@ -47,7 +47,30 @@ CREATE TABLE IF NOT EXISTS requests (
 	service_tier TEXT NOT NULL DEFAULT '',
 	inference_geo TEXT NOT NULL DEFAULT '',
 	server_tool_calls INTEGER NOT NULL DEFAULT 0,
-	fee_unpriced INTEGER NOT NULL DEFAULT 0
+	fee_unpriced INTEGER NOT NULL DEFAULT 0,
+	cost_source TEXT NOT NULL DEFAULT 'unknown',
+	cost_source_ref TEXT NOT NULL DEFAULT '',
+	cost_effective_from TEXT NOT NULL DEFAULT '',
+	cost_valid_through TEXT NOT NULL DEFAULT '',
+	cost_confidence TEXT NOT NULL DEFAULT 'unknown',
+	identity_tenant TEXT NOT NULL DEFAULT '',
+	identity_device TEXT NOT NULL DEFAULT '',
+	principal TEXT NOT NULL DEFAULT '',
+	service_account TEXT NOT NULL DEFAULT '',
+	project TEXT NOT NULL DEFAULT '',
+	cost_center TEXT NOT NULL DEFAULT '',
+	identity_confidence TEXT NOT NULL DEFAULT 'unverified',
+	requested_provider TEXT NOT NULL DEFAULT '',
+	requested_model TEXT NOT NULL DEFAULT '',
+	requested_route TEXT NOT NULL DEFAULT '',
+	downshift_action TEXT NOT NULL DEFAULT 'none',
+	downshift_rule TEXT NOT NULL DEFAULT '',
+	downshift_trigger TEXT NOT NULL DEFAULT '',
+	downshift_reason TEXT NOT NULL DEFAULT '',
+	downshift_config_digest TEXT NOT NULL DEFAULT '',
+	downshift_features TEXT NOT NULL DEFAULT '',
+	downshift_source_estimated_usd REAL NOT NULL DEFAULT 0,
+	downshift_target_estimated_usd REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_requests_ts ON requests(ts);
 -- Covering indexes: budget checks SUM cost over time (and agent) ranges on
@@ -63,12 +86,20 @@ CREATE TABLE IF NOT EXISTS runtime_leases (
 	owner TEXT NOT NULL,
 	expires_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS identity_nonces (
+	key_id TEXT NOT NULL,
+	jti TEXT NOT NULL,
+	expires_at INTEGER NOT NULL,
+	PRIMARY KEY (key_id,jti)
+);
+CREATE INDEX IF NOT EXISTS idx_identity_nonces_expiry ON identity_nonces(expires_at);
 `
 
 type Store struct {
 	db                *sql.DB
 	snapshotReader    readQueryer
 	requestMutationMu sync.Mutex
+	reconciliationMu  sync.Mutex
 	requestRevision   atomic.Uint64
 }
 
@@ -115,6 +146,26 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	if _, err := db.Exec(schema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(policySchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if err := migratePolicySchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(reconciliationSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(optimizationSchema); err != nil {
+		db.Close()
+		return nil, err
+	}
+	if _, err := db.Exec(downshiftSchema); err != nil {
 		db.Close()
 		return nil, err
 	}
@@ -213,6 +264,30 @@ func migrateRequests(db *sql.DB) error {
 		{"inference_geo", `ALTER TABLE requests ADD COLUMN inference_geo TEXT NOT NULL DEFAULT ''`},
 		{"server_tool_calls", `ALTER TABLE requests ADD COLUMN server_tool_calls INTEGER NOT NULL DEFAULT 0`},
 		{"fee_unpriced", `ALTER TABLE requests ADD COLUMN fee_unpriced INTEGER NOT NULL DEFAULT 0`},
+		{"policy_decision_id", `ALTER TABLE requests ADD COLUMN policy_decision_id INTEGER NOT NULL DEFAULT 0`},
+		{"cost_source", `ALTER TABLE requests ADD COLUMN cost_source TEXT NOT NULL DEFAULT 'legacy_unknown'`},
+		{"cost_source_ref", `ALTER TABLE requests ADD COLUMN cost_source_ref TEXT NOT NULL DEFAULT ''`},
+		{"cost_effective_from", `ALTER TABLE requests ADD COLUMN cost_effective_from TEXT NOT NULL DEFAULT ''`},
+		{"cost_valid_through", `ALTER TABLE requests ADD COLUMN cost_valid_through TEXT NOT NULL DEFAULT ''`},
+		{"cost_confidence", `ALTER TABLE requests ADD COLUMN cost_confidence TEXT NOT NULL DEFAULT 'legacy'`},
+		{"identity_tenant", `ALTER TABLE requests ADD COLUMN identity_tenant TEXT NOT NULL DEFAULT ''`},
+		{"identity_device", `ALTER TABLE requests ADD COLUMN identity_device TEXT NOT NULL DEFAULT ''`},
+		{"principal", `ALTER TABLE requests ADD COLUMN principal TEXT NOT NULL DEFAULT ''`},
+		{"service_account", `ALTER TABLE requests ADD COLUMN service_account TEXT NOT NULL DEFAULT ''`},
+		{"project", `ALTER TABLE requests ADD COLUMN project TEXT NOT NULL DEFAULT ''`},
+		{"cost_center", `ALTER TABLE requests ADD COLUMN cost_center TEXT NOT NULL DEFAULT ''`},
+		{"identity_confidence", `ALTER TABLE requests ADD COLUMN identity_confidence TEXT NOT NULL DEFAULT 'unverified'`},
+		{"requested_provider", `ALTER TABLE requests ADD COLUMN requested_provider TEXT NOT NULL DEFAULT ''`},
+		{"requested_model", `ALTER TABLE requests ADD COLUMN requested_model TEXT NOT NULL DEFAULT ''`},
+		{"requested_route", `ALTER TABLE requests ADD COLUMN requested_route TEXT NOT NULL DEFAULT ''`},
+		{"downshift_action", `ALTER TABLE requests ADD COLUMN downshift_action TEXT NOT NULL DEFAULT 'none'`},
+		{"downshift_rule", `ALTER TABLE requests ADD COLUMN downshift_rule TEXT NOT NULL DEFAULT ''`},
+		{"downshift_trigger", `ALTER TABLE requests ADD COLUMN downshift_trigger TEXT NOT NULL DEFAULT ''`},
+		{"downshift_reason", `ALTER TABLE requests ADD COLUMN downshift_reason TEXT NOT NULL DEFAULT ''`},
+		{"downshift_config_digest", `ALTER TABLE requests ADD COLUMN downshift_config_digest TEXT NOT NULL DEFAULT ''`},
+		{"downshift_features", `ALTER TABLE requests ADD COLUMN downshift_features TEXT NOT NULL DEFAULT ''`},
+		{"downshift_source_estimated_usd", `ALTER TABLE requests ADD COLUMN downshift_source_estimated_usd REAL NOT NULL DEFAULT 0`},
+		{"downshift_target_estimated_usd", `ALTER TABLE requests ADD COLUMN downshift_target_estimated_usd REAL NOT NULL DEFAULT 0`},
 	}
 	for _, addition := range additions {
 		if columns[addition.name] {
@@ -235,6 +310,19 @@ func migrateRequests(db *sql.DB) error {
 		WHEN priced = 1 THEN 'priced'
 		WHEN usage_state != 'missing' THEN 'unknown'
 		ELSE 'unmetered' END WHERE pricing_state = 'legacy'`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE requests SET cost_source = CASE
+		WHEN pricing_state='priced' THEN 'legacy_unknown'
+		WHEN pricing_state='unknown' THEN 'unknown'
+		ELSE 'unmetered' END WHERE cost_source='' OR cost_source='legacy'`); err != nil {
+		return err
+	}
+	if _, err := db.Exec(`UPDATE requests SET cost_confidence = CASE
+		WHEN usage_state='partial' THEN 'partial'
+		WHEN usage_state='estimated' THEN 'estimated'
+		WHEN pricing_state='priced' THEN 'legacy'
+		ELSE 'unknown' END WHERE cost_confidence='' OR cost_confidence='legacy'`); err != nil {
 		return err
 	}
 	_, err = db.Exec(`
@@ -295,32 +383,57 @@ func (s *Store) Close() error { return s.db.Close() }
 // fields hold discounted reads and premium writes, already normalized by
 // the meter so pricing can treat all providers the same way.
 type Request struct {
-	Ts                 time.Time    `json:"ts"`
-	Provider           string       `json:"provider"`
-	Model              string       `json:"model"`
-	Agent              string       `json:"agent"`
-	Session            string       `json:"session"`
-	InTokens           int64        `json:"in_tokens"`
-	OutTokens          int64        `json:"out_tokens"`
-	CacheReadTokens    int64        `json:"cache_read_tokens"`
-	CacheWriteTokens   int64        `json:"cache_write_tokens"`
-	CacheWrite1hTokens int64        `json:"cache_write_1h_tokens"`
-	CostUSD            float64      `json:"cost_usd"`
-	LatencyMs          int64        `json:"latency_ms"`
-	Status             int          `json:"status"`
-	Streamed           bool         `json:"streamed"`
-	Estimated          bool         `json:"estimated"`
-	Priced             bool         `json:"priced"`
-	BodyHash           string       `json:"-"`
-	UsageState         UsageState   `json:"usage_state"`
-	PricingState       PricingState `json:"pricing_state"`
-	Incomplete         bool         `json:"incomplete"`
-	EnforcementUnsafe  bool         `json:"enforcement_unsafe"`
-	Route              string       `json:"route"`
-	ServiceTier        string       `json:"service_tier"`
-	InferenceGeo       string       `json:"inference_geo"`
-	ServerToolCalls    int64        `json:"server_tool_calls"`
-	FeeUnpriced        bool         `json:"fee_unpriced"`
+	Ts                 time.Time       `json:"ts"`
+	Provider           string          `json:"provider"`
+	Model              string          `json:"model"`
+	Agent              string          `json:"agent"`
+	Session            string          `json:"session"`
+	InTokens           int64           `json:"in_tokens"`
+	OutTokens          int64           `json:"out_tokens"`
+	CacheReadTokens    int64           `json:"cache_read_tokens"`
+	CacheWriteTokens   int64           `json:"cache_write_tokens"`
+	CacheWrite1hTokens int64           `json:"cache_write_1h_tokens"`
+	CostUSD            float64         `json:"cost_usd"`
+	LatencyMs          int64           `json:"latency_ms"`
+	Status             int             `json:"status"`
+	Streamed           bool            `json:"streamed"`
+	Estimated          bool            `json:"estimated"`
+	Priced             bool            `json:"priced"`
+	BodyHash           string          `json:"-"`
+	UsageState         UsageState      `json:"usage_state"`
+	PricingState       PricingState    `json:"pricing_state"`
+	Incomplete         bool            `json:"incomplete"`
+	EnforcementUnsafe  bool            `json:"enforcement_unsafe"`
+	Route              string          `json:"route"`
+	ServiceTier        string          `json:"service_tier"`
+	InferenceGeo       string          `json:"inference_geo"`
+	ServerToolCalls    int64           `json:"server_tool_calls"`
+	FeeUnpriced        bool            `json:"fee_unpriced"`
+	CostSource         CostSource      `json:"cost_source"`
+	CostSourceRef      string          `json:"cost_source_ref,omitempty"`
+	CostEffectiveFrom  string          `json:"cost_effective_from,omitempty"`
+	CostValidThrough   string          `json:"cost_valid_through,omitempty"`
+	CostConfidence     CostConfidence  `json:"cost_confidence"`
+	PolicyDecisionID   int64           `json:"-"`
+	IdentityTenant     string          `json:"identity_tenant,omitempty"`
+	IdentityDevice     string          `json:"identity_device,omitempty"`
+	Principal          string          `json:"principal,omitempty"`
+	ServiceAccount     string          `json:"service_account,omitempty"`
+	Project            string          `json:"project,omitempty"`
+	CostCenter         string          `json:"cost_center,omitempty"`
+	IdentityConfidence string          `json:"identity_confidence"`
+	RequestedProvider  string          `json:"requested_provider,omitempty"`
+	RequestedModel     string          `json:"requested_model,omitempty"`
+	RequestedRoute     string          `json:"requested_route,omitempty"`
+	DownshiftAction    string          `json:"downshift_action,omitempty"`
+	DownshiftRule      string          `json:"downshift_rule,omitempty"`
+	DownshiftTrigger   string          `json:"downshift_trigger,omitempty"`
+	DownshiftReason    string          `json:"downshift_reason,omitempty"`
+	DownshiftDigest    string          `json:"downshift_config_digest,omitempty"`
+	DownshiftFeatures  string          `json:"downshift_features,omitempty"`
+	DownshiftSourceUSD float64         `json:"downshift_source_estimated_usd,omitempty"`
+	DownshiftTargetUSD float64         `json:"downshift_target_estimated_usd,omitempty"`
+	Policy             *PolicyMetadata `json:"policy,omitempty"`
 }
 
 // UsageState distinguishes exact provider accounting from estimates and
@@ -342,6 +455,32 @@ const (
 	PricingPriced    PricingState = "priced"
 	PricingUnknown   PricingState = "unknown"
 	PricingUnmetered PricingState = "unmetered"
+)
+
+// CostSource records which price layer won when the request was observed.
+// Legacy rows remain explicitly uncertain rather than being retroactively
+// relabeled from whatever pricing configuration exists today.
+type CostSource string
+
+const (
+	CostProviderFinal CostSource = "provider_final"
+	CostContract      CostSource = "contract"
+	CostPublicList    CostSource = "public_list"
+	CostUnknown       CostSource = "unknown"
+	CostUnmetered     CostSource = "unmetered"
+	CostLegacyUnknown CostSource = "legacy_unknown"
+)
+
+type CostConfidence string
+
+const (
+	ConfidenceProviderFinal CostConfidence = "provider_final"
+	ConfidenceContract      CostConfidence = "contract"
+	ConfidenceListEstimate  CostConfidence = "list_estimate"
+	ConfidenceEstimated     CostConfidence = "estimated"
+	ConfidencePartial       CostConfidence = "partial"
+	ConfidenceUnknown       CostConfidence = "unknown"
+	ConfidenceLegacy        CostConfidence = "legacy"
 )
 
 func normalizeRequest(r *Request) {
@@ -370,26 +509,102 @@ func normalizeRequest(r *Request) {
 	if r.UsageState == UsagePartial {
 		r.Incomplete = true
 	}
+	if r.CostSource == "" {
+		switch r.PricingState {
+		case PricingPriced:
+			r.CostSource = CostLegacyUnknown
+		case PricingUnknown:
+			r.CostSource = CostUnknown
+		default:
+			r.CostSource = CostUnmetered
+		}
+	}
+	if r.CostConfidence == "" {
+		switch {
+		case r.UsageState == UsagePartial:
+			r.CostConfidence = ConfidencePartial
+		case r.UsageState == UsageEstimated:
+			r.CostConfidence = ConfidenceEstimated
+		case r.PricingState != PricingPriced:
+			r.CostConfidence = ConfidenceUnknown
+		default:
+			r.CostConfidence = ConfidenceLegacy
+		}
+	}
+	if r.IdentityConfidence == "" {
+		r.IdentityConfidence = "unverified"
+	}
+	if r.RequestedProvider == "" {
+		r.RequestedProvider = r.Provider
+	}
+	if r.RequestedModel == "" {
+		r.RequestedModel = r.Model
+	}
+	if r.RequestedRoute == "" {
+		r.RequestedRoute = r.Route
+	}
+	if r.DownshiftAction == "" {
+		r.DownshiftAction = "none"
+	}
 }
 
 func (s *Store) Insert(r Request) error {
 	normalizeRequest(&r)
+	if err := validateDownshiftReceipt(r); err != nil {
+		return err
+	}
 	return s.mutateRequests(func() error {
-		_, err := s.db.Exec(`INSERT INTO requests
+		query := `INSERT INTO requests
 		(ts, provider, model, agent, session, in_tokens, out_tokens,
 		 cache_read_tokens, cache_write_tokens, cache_write_1h_tokens, cost_usd, latency_ms,
 		 status, streamed, estimated, priced, body_hash, usage_state,
-		 pricing_state, incomplete, enforcement_unsafe, route, service_tier,
-		 inference_geo, server_tool_calls, fee_unpriced)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			 pricing_state, incomplete, enforcement_unsafe, route, service_tier,
+			 inference_geo, server_tool_calls, fee_unpriced, cost_source, cost_source_ref,
+			 cost_effective_from, cost_valid_through, cost_confidence, policy_decision_id,
+			 identity_tenant, identity_device, principal, service_account, project, cost_center, identity_confidence,
+			 requested_provider, requested_model, requested_route, downshift_action, downshift_rule,
+			 downshift_trigger, downshift_reason, downshift_config_digest, downshift_features,
+			 downshift_source_estimated_usd, downshift_target_estimated_usd)
+		VALUES (` + strings.TrimSuffix(strings.Repeat("?,", 50), ",") + `)`
+		_, err := s.db.Exec(query,
 			r.Ts.UTC().Format(time.RFC3339), r.Provider, r.Model, r.Agent, r.Session,
 			r.InTokens, r.OutTokens, r.CacheReadTokens, r.CacheWriteTokens, r.CacheWrite1hTokens,
 			r.CostUSD, r.LatencyMs, r.Status, b2i(r.Streamed), b2i(r.Estimated),
 			b2i(r.Priced), r.BodyHash, string(r.UsageState), string(r.PricingState),
 			b2i(r.Incomplete), b2i(r.EnforcementUnsafe), r.Route, r.ServiceTier,
-			r.InferenceGeo, r.ServerToolCalls, b2i(r.FeeUnpriced))
+			r.InferenceGeo, r.ServerToolCalls, b2i(r.FeeUnpriced), string(r.CostSource), r.CostSourceRef,
+			r.CostEffectiveFrom, r.CostValidThrough, string(r.CostConfidence), r.PolicyDecisionID,
+			r.IdentityTenant, r.IdentityDevice, r.Principal, r.ServiceAccount, r.Project, r.CostCenter, r.IdentityConfidence,
+			r.RequestedProvider, r.RequestedModel, r.RequestedRoute, r.DownshiftAction, r.DownshiftRule,
+			r.DownshiftTrigger, r.DownshiftReason, r.DownshiftDigest, r.DownshiftFeatures,
+			r.DownshiftSourceUSD, r.DownshiftTargetUSD)
 		return err
 	})
+}
+
+func validateDownshiftReceipt(r Request) error {
+	if invalidMoney(r.DownshiftSourceUSD) || invalidMoney(r.DownshiftTargetUSD) {
+		return fmt.Errorf("downshift cost estimates must be finite and non-negative")
+	}
+	if len(r.DownshiftReason) > 1024 || len(r.DownshiftFeatures) > 4096 || len(r.DownshiftRule) > 64 {
+		return fmt.Errorf("downshift receipt exceeds its bounded ledger fields")
+	}
+	switch r.DownshiftAction {
+	case "none", "warn":
+	case "downshift":
+		if r.DownshiftRule == "" || r.DownshiftReason == "" || !validDigest(r.DownshiftDigest) {
+			return fmt.Errorf("downshift receipt is missing rule, reason, or config digest")
+		}
+		if r.RequestedProvider == r.Provider && r.RequestedModel == r.Model && r.RequestedRoute == r.Route {
+			return fmt.Errorf("downshift receipt did not change route or model")
+		}
+	default:
+		return fmt.Errorf("invalid downshift action %q", r.DownshiftAction)
+	}
+	if r.DownshiftDigest != "" && !validDigest(r.DownshiftDigest) {
+		return fmt.Errorf("invalid downshift config digest")
+	}
+	return nil
 }
 
 // RequestRevision is an even/odd sequence lock for request mutations. Even
@@ -437,6 +652,7 @@ func (s *Store) SpentSinceMulti(ts []time.Time) ([]float64, error) {
 type BudgetUsage struct {
 	SpentUSD        float64
 	EnforcementGaps int64
+	Requests        int64
 }
 
 // BudgetUsageSinceMulti returns spend and enforcement gaps for several
@@ -451,22 +667,25 @@ func (s *Store) BudgetUsageSinceMulti(ts []time.Time) ([]BudgetUsage, error) {
 			min = t
 		}
 	}
-	cols := make([]string, 0, len(ts)*2)
-	args := make([]any, 0, len(ts)+1)
+	cols := make([]string, 0, len(ts)*3)
+	args := make([]any, 0, len(ts)*3+1)
 	for _, t := range ts {
 		cols = append(cols,
 			"COALESCE(SUM(CASE WHEN ts >= ? THEN cost_usd ELSE 0 END),0)",
-			"COALESCE(SUM(CASE WHEN ts >= ? THEN enforcement_unsafe ELSE 0 END),0)")
-		// Both conditional aggregates use the same cutoff.
+			"COALESCE(SUM(CASE WHEN ts >= ? THEN enforcement_unsafe ELSE 0 END),0)",
+			"COALESCE(SUM(CASE WHEN ts >= ? THEN 1 ELSE 0 END),0)")
+		// All conditional aggregates use the same cutoff.
+		args = append(args, t.UTC().Format(time.RFC3339))
 		args = append(args, t.UTC().Format(time.RFC3339))
 		args = append(args, t.UTC().Format(time.RFC3339))
 	}
 	args = append(args, min.UTC().Format(time.RFC3339))
-	dests := make([]any, len(ts)*2)
+	dests := make([]any, len(ts)*3)
 	out := make([]BudgetUsage, len(ts))
 	for i := range out {
-		dests[i*2] = &out[i].SpentUSD
-		dests[i*2+1] = &out[i].EnforcementGaps
+		dests[i*3] = &out[i].SpentUSD
+		dests[i*3+1] = &out[i].EnforcementGaps
+		dests[i*3+2] = &out[i].Requests
 	}
 	err := s.readQueryer().QueryRow(`SELECT `+strings.Join(cols, ", ")+
 		` FROM requests WHERE ts >= ?`, args...).Scan(dests...)
@@ -994,12 +1213,22 @@ func (s *Store) StreamExport(since time.Time, visit func(Request) error) error {
 	if visit == nil {
 		return fmt.Errorf("export visitor must not be nil")
 	}
-	rows, err := s.db.Query(`SELECT ts, provider, model, agent, session,
+	rows, err := s.db.Query(`SELECT r.ts, r.provider, r.model, r.agent, r.session,
 		in_tokens, out_tokens, cache_read_tokens, cache_write_tokens,
 		cache_write_1h_tokens, cost_usd, latency_ms, status, streamed, estimated, priced, body_hash,
 		usage_state, pricing_state, incomplete, enforcement_unsafe, route,
-		service_tier, inference_geo, server_tool_calls, fee_unpriced
-		FROM requests WHERE ts >= ? ORDER BY ts, id`,
+		service_tier, inference_geo, server_tool_calls, fee_unpriced,
+		cost_source,cost_source_ref,cost_effective_from,cost_valid_through,cost_confidence,
+		r.policy_decision_id, r.identity_tenant, r.identity_device, r.principal,
+		r.service_account, r.project, r.cost_center, r.identity_confidence,
+		r.requested_provider, r.requested_model, r.requested_route, r.downshift_action,
+		r.downshift_rule, r.downshift_trigger, r.downshift_reason, r.downshift_config_digest,
+		r.downshift_features, r.downshift_source_estimated_usd, r.downshift_target_estimated_usd,
+		COALESCE(d.policy_digest,''), COALESCE(d.policy_revision,0), COALESCE(d.policy_name,''),
+		COALESCE(d.policy_namespace,''), COALESCE(d.mode,''), COALESCE(d.outcome,''), COALESCE(d.admitted,0), COALESCE(d.confidence,''),
+		COALESCE(d.context_json,''), COALESCE(d.explanation_json,'')
+		FROM requests r LEFT JOIN policy_decisions d ON d.id = r.policy_decision_id
+		WHERE r.ts >= ? ORDER BY r.ts, r.id`,
 		since.UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
@@ -1009,17 +1238,37 @@ func (s *Store) StreamExport(since time.Time, visit func(Request) error) error {
 		var r Request
 		var ts string
 		var streamed, estimated, priced, incomplete, enforcementUnsafe, feeUnpriced int
+		var policyDigest, policyName, policyNamespace, policyMode, policyOutcome, policyConfidence, policyContext, policyExplanation string
+		var policyAdmitted int
+		var policyRevision int64
 		if err := rows.Scan(&ts, &r.Provider, &r.Model, &r.Agent, &r.Session,
 			&r.InTokens, &r.OutTokens, &r.CacheReadTokens, &r.CacheWriteTokens, &r.CacheWrite1hTokens,
 			&r.CostUSD, &r.LatencyMs, &r.Status, &streamed, &estimated, &priced,
 			&r.BodyHash, &r.UsageState, &r.PricingState, &incomplete, &enforcementUnsafe,
-			&r.Route, &r.ServiceTier, &r.InferenceGeo, &r.ServerToolCalls, &feeUnpriced); err != nil {
+			&r.Route, &r.ServiceTier, &r.InferenceGeo, &r.ServerToolCalls, &feeUnpriced,
+			&r.CostSource, &r.CostSourceRef, &r.CostEffectiveFrom, &r.CostValidThrough, &r.CostConfidence,
+			&r.PolicyDecisionID, &r.IdentityTenant, &r.IdentityDevice, &r.Principal, &r.ServiceAccount,
+			&r.Project, &r.CostCenter, &r.IdentityConfidence,
+			&r.RequestedProvider, &r.RequestedModel, &r.RequestedRoute, &r.DownshiftAction,
+			&r.DownshiftRule, &r.DownshiftTrigger, &r.DownshiftReason, &r.DownshiftDigest,
+			&r.DownshiftFeatures, &r.DownshiftSourceUSD, &r.DownshiftTargetUSD,
+			&policyDigest, &policyRevision, &policyName, &policyNamespace, &policyMode,
+			&policyOutcome, &policyAdmitted, &policyConfidence, &policyContext, &policyExplanation); err != nil {
 			return err
 		}
 		r.Ts, _ = time.Parse(time.RFC3339, ts)
 		r.Streamed, r.Estimated, r.Priced = streamed == 1, estimated == 1, priced == 1
 		r.Incomplete, r.EnforcementUnsafe = incomplete == 1, enforcementUnsafe == 1
 		r.FeeUnpriced = feeUnpriced == 1
+		if r.PolicyDecisionID != 0 {
+			r.Policy = &PolicyMetadata{
+				DecisionID: r.PolicyDecisionID, Digest: policyDigest, Revision: policyRevision,
+				Name: policyName, Namespace: policyNamespace, Mode: policyMode, Outcome: policyOutcome,
+				Admitted:   policyAdmitted != 0,
+				Confidence: policyConfidence, ContextJSON: policyContext,
+				ExplanationJSON: policyExplanation,
+			}
+		}
 		if err := visit(r); err != nil {
 			return err
 		}
@@ -1066,6 +1315,36 @@ func (s *Store) GetSetting(key string) (string, error) {
 		return "", nil
 	}
 	return v, err
+}
+
+// ConsumeIdentityNonce atomically records a signed request's one-time nonce.
+// False means the same key+nonce was already accepted. Expired rows are
+// removed in the same short transaction so the replay table remains bounded.
+func (s *Store) ConsumeIdentityNonce(keyID, jti string, expiresAt, now time.Time) (bool, error) {
+	if keyID == "" || jti == "" || len(keyID) > 128 || len(jti) > 128 || !expiresAt.After(now) || expiresAt.After(now.Add(10*time.Minute)) {
+		return false, fmt.Errorf("invalid identity nonce envelope")
+	}
+	tx, err := s.db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM identity_nonces WHERE expires_at<=?`, now.UTC().Unix()); err != nil {
+		return false, err
+	}
+	result, err := tx.Exec(`INSERT INTO identity_nonces(key_id,jti,expires_at) VALUES(?,?,?)
+		ON CONFLICT(key_id,jti) DO NOTHING`, keyID, jti, expiresAt.UTC().Unix())
+	if err != nil {
+		return false, err
+	}
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	return rows == 1, nil
 }
 
 // GetSettings fetches many keys in one query; absent keys are simply
@@ -1115,9 +1394,9 @@ func (s *Store) Probe() error {
 	return s.SetSetting("_runtime_probe", time.Now().UTC().Format(time.RFC3339Nano))
 }
 
-// Prune removes ledger rows strictly older than before and returns the number
-// deleted. Callers can choose their own retention policy; Burnban never prunes
-// implicitly.
+// Prune removes request rows and prompt-free policy decision records strictly
+// older than before. Active/history policy documents and settings are kept.
+// Callers choose retention explicitly; Burnban never prunes implicitly.
 func (s *Store) Prune(before time.Time) (int64, error) {
 	var total int64
 	for {
@@ -1132,7 +1411,9 @@ func (s *Store) Prune(before time.Time) (int64, error) {
 	}
 }
 
-// PruneBatch deletes at most limit rows. Bounded transactions prevent a large
+// PruneBatch deletes at most limit top-level ledger records (requests followed
+// by policy decisions). Child rule-counter rows are removed with their decision
+// and do not count against the limit. Bounded transactions prevent a large
 // retention job from holding SQLite's writer lock for the entire ledger.
 func (s *Store) PruneBatch(before time.Time, limit int) (int64, error) {
 	if limit <= 0 || limit > 100_000 {
@@ -1140,14 +1421,45 @@ func (s *Store) PruneBatch(before time.Time, limit int) (int64, error) {
 	}
 	var deleted int64
 	err := s.mutateRequests(func() error {
-		res, err := s.db.Exec(`DELETE FROM requests WHERE id IN (
+		tx, err := s.db.Begin()
+		if err != nil {
+			return err
+		}
+		defer tx.Rollback()
+		res, err := tx.Exec(`DELETE FROM requests WHERE id IN (
 			SELECT id FROM requests WHERE ts < ? ORDER BY id LIMIT ?
 		)`, before.UTC().Format(time.RFC3339), limit)
 		if err != nil {
 			return err
 		}
-		deleted, err = res.RowsAffected()
-		return err
+		requestRows, err := res.RowsAffected()
+		if err != nil {
+			return err
+		}
+		remaining := int64(limit) - requestRows
+		var decisionRows int64
+		if remaining > 0 {
+			cutoff := before.UTC().Format(policyTimeFormat)
+			// Delete children first because policy_decision_rules intentionally
+			// remains queryable without relying on connection-specific FK pragmas.
+			if _, err := tx.Exec(`DELETE FROM policy_decision_rules WHERE decision_id IN (
+				SELECT id FROM policy_decisions WHERE ts < ? ORDER BY id LIMIT ?
+			)`, cutoff, remaining); err != nil {
+				return err
+			}
+			res, err = tx.Exec(`DELETE FROM policy_decisions WHERE id IN (
+				SELECT id FROM policy_decisions WHERE ts < ? ORDER BY id LIMIT ?
+			)`, cutoff, remaining)
+			if err != nil {
+				return err
+			}
+			decisionRows, err = res.RowsAffected()
+			if err != nil {
+				return err
+			}
+		}
+		deleted = requestRows + decisionRows
+		return tx.Commit()
 	})
 	return deleted, err
 }

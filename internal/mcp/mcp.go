@@ -9,6 +9,7 @@ package mcp
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -17,8 +18,12 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
+	"github.com/burnban/burnban/internal/approvalclient"
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/policy"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
 )
@@ -26,12 +31,14 @@ import (
 const protocolVersion = "2025-06-18"
 
 type Server struct {
-	S                *store.Store
-	Prices           *pricing.Table
-	Version          string
-	In               io.Reader
-	Out              io.Writer
-	AllowBudgetAdmin bool
+	S                   *store.Store
+	Prices              *pricing.Table
+	Version             string
+	In                  io.Reader
+	Out                 io.Writer
+	AllowBudgetAdmin    bool
+	AllowBudgetRequests bool
+	ApprovalRequester   approvalclient.Requester
 }
 
 type request struct {
@@ -86,7 +93,7 @@ func (s *Server) handle(req *request) *response {
 	case "ping":
 		resp.Result = map[string]any{}
 	case "tools/list":
-		resp.Result = map[string]any{"tools": toolDefs(s.AllowBudgetAdmin)}
+		resp.Result = map[string]any{"tools": toolDefs(s.AllowBudgetAdmin, s.AllowBudgetRequests)}
 	case "tools/call":
 		var p struct {
 			Name      string          `json:"name"`
@@ -121,7 +128,7 @@ func result(text string, isErr bool) map[string]any {
 	}
 }
 
-func toolDefs(allowBudgetAdmin bool) []map[string]any {
+func toolDefs(allowBudgetAdmin, allowBudgetRequests bool) []map[string]any {
 	obj := func(props map[string]any, required ...string) map[string]any {
 		schema := map[string]any{"type": "object", "properties": props, "additionalProperties": false}
 		if len(required) > 0 {
@@ -141,7 +148,7 @@ func toolDefs(allowBudgetAdmin bool) []map[string]any {
 			"name":        "burn_status",
 			"description": "Current global, per-agent, and rolling velocity-fuse state, including spent, cap, remaining, overrides, cooldowns, and burn bans.",
 			"inputSchema": obj(map[string]any{
-				"agent": map[string]any{"type": "string", "minLength": 1, "description": "optional: return status for one reported agent name"},
+				"agent": map[string]any{"type": "string", "minLength": 1, "maxLength": 128, "description": "optional: return status for one reported agent name"},
 			}),
 		},
 		{
@@ -149,6 +156,24 @@ func toolDefs(allowBudgetAdmin bool) []map[string]any {
 			"description": "Pricing-table version, verification date, provenance, overrides, and any entries past their verified validity window.",
 			"inputSchema": obj(map[string]any{}),
 		},
+		{
+			"name":        "policy_status",
+			"description": "Read-only summary of the active local v2 admission policy: revision, digest, mode, rule count, and apply time.",
+			"inputSchema": obj(map[string]any{}),
+		},
+	}
+	if allowBudgetRequests {
+		tools = append(tools, map[string]any{
+			"name":        "request_budget_exception",
+			"description": "Request temporary additional runway for this enrolled meter. This creates a pending request only; an authenticated human must approve it.",
+			"inputSchema": obj(map[string]any{
+				"window":          map[string]any{"type": "string", "enum": []string{"daily", "weekly", "monthly"}},
+				"increase_usd":    map[string]any{"type": "number", "minimum": 0.01, "maximum": 1e9},
+				"reason":          map[string]any{"type": "string", "minLength": 1, "maxLength": 1000},
+				"ticket":          map[string]any{"type": "string", "minLength": 1, "maxLength": 200},
+				"expires_minutes": map[string]any{"type": "integer", "minimum": 5, "maximum": 43200},
+			}, "window", "increase_usd", "reason", "ticket", "expires_minutes"),
+		})
 	}
 	if !allowBudgetAdmin {
 		return tools
@@ -160,7 +185,7 @@ func toolDefs(allowBudgetAdmin bool) []map[string]any {
 			"inputSchema": obj(map[string]any{
 				"usd":    map[string]any{"type": "number", "description": "cap in USD; 0 removes it"},
 				"window": map[string]any{"type": "string", "enum": []string{"daily", "weekly", "monthly"}, "description": "budget window (default daily)"},
-				"agent":  map[string]any{"type": "string", "description": "optional: cap a single agent by its reported name (e.g. claude-cli)"},
+				"agent":  map[string]any{"type": "string", "maxLength": 128, "description": "optional: cap a single agent by its reported name (e.g. claude-cli)"},
 			}, "usd"),
 		},
 		map[string]any{
@@ -195,8 +220,10 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if err := decodeObject(args, &a); err != nil {
 			return "", fmt.Errorf("bad arguments: %w", err)
 		}
-		if a.Agent != "" && strings.TrimSpace(a.Agent) == "" {
-			return "", fmt.Errorf("agent must not be blank")
+		if a.Agent != "" {
+			if err := validateAgentSelector(a.Agent); err != nil {
+				return "", err
+			}
 		}
 		return s.burnStatus(a.Agent)
 	case "pricing_diagnostics":
@@ -204,6 +231,55 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 			return "", fmt.Errorf("bad arguments: %w", err)
 		}
 		return s.pricingDiagnostics()
+	case "policy_status":
+		if err := decodeObject(args, &struct{}{}); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
+		}
+		summary, err := policy.LoadActiveSummary(s.S)
+		if err != nil {
+			return "", err
+		}
+		encoded, err := json.MarshalIndent(summary, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
+	case "request_budget_exception":
+		if !s.AllowBudgetRequests || s.ApprovalRequester == nil {
+			return "", fmt.Errorf("budget requests disabled: restart burnban mcp with --allow-budget-requests and enrolled Team meter credentials")
+		}
+		var a struct {
+			Window         string   `json:"window"`
+			IncreaseUSD    *float64 `json:"increase_usd"`
+			Reason         string   `json:"reason"`
+			Ticket         string   `json:"ticket"`
+			ExpiresMinutes *int     `json:"expires_minutes"`
+		}
+		if err := decodeObject(args, &a); err != nil {
+			return "", fmt.Errorf("bad arguments: %w", err)
+		}
+		if a.IncreaseUSD == nil || a.ExpiresMinutes == nil {
+			return "", fmt.Errorf("bad arguments: increase_usd and expires_minutes are required")
+		}
+		if *a.ExpiresMinutes < 5 || *a.ExpiresMinutes > 43200 {
+			return "", fmt.Errorf("bad arguments: expires_minutes must be between 5 and 43200")
+		}
+		receipt, err := s.ApprovalRequester.Request(context.Background(), approvalclient.Request{
+			Window: a.Window, IncreaseUSD: *a.IncreaseUSD, Reason: a.Reason, Ticket: a.Ticket,
+			ExpiresIn: time.Duration(*a.ExpiresMinutes) * time.Minute,
+		})
+		if err != nil {
+			return "", err
+		}
+		encoded, err := json.MarshalIndent(map[string]any{
+			"request_id": receipt.ID, "status": receipt.Status, "scope_type": receipt.ScopeType,
+			"scope_value": receipt.ScopeValue, "window": receipt.Window, "increase_usd": receipt.IncreaseUSD,
+			"valid_until": receipt.ValidUntil, "human_authorization_required": true,
+		}, "", "  ")
+		if err != nil {
+			return "", err
+		}
+		return string(encoded), nil
 	case "set_daily_cap":
 		if err := s.requireBudgetAdmin(); err != nil {
 			return "", err
@@ -235,8 +311,8 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		}
 		key, scope := win.Key, win.Name+" cap"
 		if a.Agent != "" {
-			if strings.TrimSpace(a.Agent) == "" {
-				return "", fmt.Errorf("agent must not be blank")
+			if err := validateAgentSelector(a.Agent); err != nil {
+				return "", err
 			}
 			if win.Name != "daily" {
 				return "", fmt.Errorf("per-agent caps are daily-only for now")
@@ -309,6 +385,19 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 	default:
 		return "", fmt.Errorf("unknown tool %q", name)
 	}
+}
+
+func validateAgentSelector(value string) error {
+	if value == "" || strings.TrimSpace(value) != value || len(value) > 256 ||
+		utf8.RuneCountInString(value) > 128 || !utf8.ValidString(value) {
+		return fmt.Errorf("agent must be trimmed valid UTF-8 within 128 characters and 256 bytes")
+	}
+	for _, r := range value {
+		if unicode.IsControl(r) || unicode.In(r, unicode.Cf, unicode.Co, unicode.Cs) {
+			return fmt.Errorf("agent contains an unsafe character")
+		}
+	}
+	return nil
 }
 
 func decodeObject(raw json.RawMessage, dst any) error {
@@ -504,7 +593,7 @@ func (s *Server) burnStatus(agentFilter string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if len(fuses.Rules) > 0 || fuses.Tripped {
+	if len(fuses.Rules) > 0 || fuses.Fanout != nil || fuses.Tripped {
 		fuseOut := map[string]any{
 			"tripped":          fuses.Tripped,
 			"cooldown":         budget.FormatFuseDuration(fuses.Cooldown),
@@ -512,20 +601,40 @@ func (s *Server) burnStatus(agentFilter string) (string, error) {
 		}
 		rules := map[string]any{}
 		for _, rule := range fuses.Rules {
-			rules[rule.Name] = map[string]any{
+			ruleOut := map[string]any{
 				"window": budget.FormatFuseDuration(rule.Window), "cap_usd": rule.CapUSD,
 				"spent_usd": rule.SpentUSD, "remaining_usd": rule.Remaining,
 			}
+			if rule.ProjectedTimeToLimit > 0 {
+				ruleOut["projected_seconds_to_limit"] = rule.ProjectedTimeToLimit.Seconds()
+			}
+			if rule.Name == "baseline" {
+				ruleOut["baseline_median_usd"] = rule.BaselineMedianUSD
+				ruleOut["baseline_multiplier"] = rule.BaselineMultiplier
+			}
+			rules[rule.Name] = ruleOut
 		}
 		if len(rules) > 0 {
 			fuseOut["rules"] = rules
 			out["has_cap"] = true
 			out["has_velocity_fuse"] = true
 		}
+		if fuses.Fanout != nil {
+			fuseOut["fanout"] = map[string]any{
+				"window":   budget.FormatFuseDuration(fuses.Fanout.Window),
+				"requests": fuses.Fanout.Requests, "limit_requests": fuses.Fanout.LimitRequests,
+				"remaining_requests": fuses.Fanout.RemainingRequests,
+			}
+			out["has_velocity_fuse"] = true
+		}
 		if fuses.Tripped {
 			fuseOut["trip_rule"] = fuses.TripRule
 			fuseOut["projected_usd"] = fuses.TripProjected
 			fuseOut["limit_usd"] = fuses.TripLimitUSD
+			if fuses.TripLimitRequests > 0 {
+				fuseOut["projected_requests"] = fuses.TripProjectedRequests
+				fuseOut["limit_requests"] = fuses.TripLimitRequests
+			}
 			fuseOut["until"] = fuses.TrippedUntil.Format(time.RFC3339)
 			fuseOut["reason"] = fuses.DenialMessage
 		}

@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 // ScanGoose reads Goose's per-call usage_ledger. Current Goose releases keep
@@ -71,6 +73,7 @@ func scanGoose(path string, since time.Time, limits ScanLimits, emit func(Event)
 			Provider: "goose", Model: model, Time: time.Unix(timestamp, 0), Calls: 1,
 			In: in, Out: out, CacheRead: cacheRead, CacheWrite5m: cacheWrite,
 			CostUSD: cost, CostKnown: cost > 0,
+			Confidence: sourceadapter.ConfidenceExact,
 		})
 	}
 	if err := rows.Err(); err != nil {

@@ -127,8 +127,15 @@ func renderTop(s *store.Store, color bool) (string, error) {
 			colorize(bar(frac, 28), budgetBarColor(frac), color), fuse.SpentUSD, fuse.CapUSD, budget.FormatFuseDuration(fuse.Window))
 		any = true
 	}
+	if fuses.Fanout != nil {
+		frac := float64(fuses.Fanout.Requests) / float64(fuses.Fanout.LimitRequests)
+		fmt.Fprintf(&b, "%-9s %s %d / %d req (rolling %s)\n", "fanout*",
+			colorize(bar(frac, 28), budgetBarColor(frac), color), fuses.Fanout.Requests,
+			fuses.Fanout.LimitRequests, budget.FormatFuseDuration(fuses.Fanout.Window))
+		any = true
+	}
 	if any {
-		if len(fuses.Rules) > 0 {
+		if len(fuses.Rules) > 0 || fuses.Fanout != nil {
 			fmt.Fprintf(&b, "%s\n", colorize("* spend-velocity fuse", cDim, color))
 		}
 		b.WriteString("\n")

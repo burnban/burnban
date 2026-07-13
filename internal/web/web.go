@@ -74,6 +74,7 @@ func RegisterWithConfig(mux *http.ServeMux, s *store.Store, cfg Config) {
 	subscriptions := newSubscriptionFeed(cfg.Prices)
 	summaries := newSummaryFeed(s, cfg)
 	metrics := newMetricsFeed(s)
+	registerQualityAPI(mux, s)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		secureHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -400,6 +401,8 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []subsidy.ModelUsage{claude}, Days: []subsidy.DayUsage{}, Totals: claude.Totals},
 		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []subsidy.ModelUsage{codex}, Days: []subsidy.DayUsage{}, Totals: codex.Totals},
 		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "github-copilot-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+		{Provider: "cursor", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "opencode", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "hermes", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
 		{Provider: "openclaw", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
@@ -479,6 +482,8 @@ func writeMetrics(w *strings.Builder, s *store.Store, now time.Time) error {
 type metricsReader interface {
 	LifetimeMetrics() (*store.MetricsSummary, error)
 	SpentSinceMulti(since []time.Time) ([]float64, error)
+	BudgetUsageSinceMulti(since []time.Time) ([]store.BudgetUsage, error)
+	BudgetUsageWindows(starts []time.Time, window time.Duration) ([]store.BudgetUsage, error)
 	GetSettings(keys ...string) (map[string]string, error)
 }
 
@@ -537,11 +542,18 @@ func writeMetricsSnapshot(w *strings.Builder, s metricsReader, now time.Time) er
 		fmt.Fprintf(w, "burnban_fuse_spend_usd{%s} %g\n", labels, fuse.SpentUSD)
 		fmt.Fprintf(w, "burnban_fuse_limit_usd{%s} %g\n", labels, fuse.CapUSD)
 	}
+	fmt.Fprintf(w, "# HELP burnban_fuse_requests Requests in the configured rolling fan-out window.\n# TYPE burnban_fuse_requests gauge\n")
+	fmt.Fprintf(w, "# HELP burnban_fuse_request_limit Configured rolling fan-out request limit.\n# TYPE burnban_fuse_request_limit gauge\n")
+	if fuses.Fanout != nil {
+		labels := fmt.Sprintf("rule=\"fanout\",window=\"%s\"", prometheusLabel(budget.FormatFuseDuration(fuses.Fanout.Window)))
+		fmt.Fprintf(w, "burnban_fuse_requests{%s} %d\n", labels, fuses.Fanout.Requests)
+		fmt.Fprintf(w, "burnban_fuse_request_limit{%s} %d\n", labels, fuses.Fanout.LimitRequests)
+	}
 	fuseTripped := 0
 	if fuses.Tripped {
 		fuseTripped = 1
 	}
-	fmt.Fprintf(w, "# HELP burnban_fuse_tripped Whether the spend-velocity fuse cooldown is active.\n# TYPE burnban_fuse_tripped gauge\nburnban_fuse_tripped %d\n", fuseTripped)
+	fmt.Fprintf(w, "# HELP burnban_fuse_tripped Whether a spend or request safety-fuse cooldown is active.\n# TYPE burnban_fuse_tripped gauge\nburnban_fuse_tripped %d\n", fuseTripped)
 	ban := 0
 	if localBan || externalBan {
 		ban = 1
@@ -630,58 +642,64 @@ type budgetJSON struct {
 }
 
 type summaryJSON struct {
-	Now             string        `json:"now"`
-	Version         string        `json:"version"`
-	Demo            bool          `json:"demo"`
-	Exposure        string        `json:"exposure"`
-	AuthRequired    bool          `json:"auth_required"`
-	LocalUsage      bool          `json:"local_usage_enabled"`
-	Health          *HealthStatus `json:"health,omitempty"`
-	LastRequestAt   string        `json:"last_request_at,omitempty"`
-	TotalCost       float64       `json:"total_cost"`
-	Requests        int64         `json:"requests"`
-	In              int64         `json:"in_tokens"`
-	Out             int64         `json:"out_tokens"`
-	CacheRead       int64         `json:"cache_read_tokens"`
-	CacheWrite      int64         `json:"cache_write_tokens"`
-	CacheWrite1h    int64         `json:"cache_write_1h_tokens"`
-	CacheHitPct     float64       `json:"cache_hit_pct"`
-	HasTraffic      bool          `json:"has_traffic"`
-	LastHourCost    float64       `json:"last_hour_cost"`
-	Estimated       int64         `json:"estimated"`
-	Unpriced        int64         `json:"unpriced"`
-	UnknownPricing  int64         `json:"unknown_pricing"`
-	Unmetered       int64         `json:"unmetered"`
-	Incomplete      int64         `json:"incomplete"`
-	EnforcementGaps int64         `json:"enforcement_gaps"`
-	FeeUnpriced     int64         `json:"fee_unpriced"`
-	CapDailyUSD     float64       `json:"cap_daily_usd"`
-	CapDailyCost    float64       `json:"cap_daily_cost"`
-	HasCap          bool          `json:"has_cap"`
-	CapWeeklyUSD    float64       `json:"cap_weekly_usd"`
-	WeekCost        float64       `json:"week_cost"`
-	CapMonthlyUSD   float64       `json:"cap_monthly_usd"`
-	MonthCost       float64       `json:"month_cost"`
-	BanActive       bool          `json:"ban_active"`
-	ExternalBan     bool          `json:"external_ban"`
-	FuseTripped     bool          `json:"fuse_tripped"`
-	FuseUntil       string        `json:"fuse_until,omitempty"`
-	FuseRule        string        `json:"fuse_rule,omitempty"`
-	FuseProjected   float64       `json:"fuse_projected_usd,omitempty"`
-	FuseLimit       float64       `json:"fuse_limit_usd,omitempty"`
-	OverrideToday   bool          `json:"override_today"`
-	ExternalPolicy  bool          `json:"external_policy"`
-	Models          []modelJSON   `json:"models"`
-	Agents          []agentJSON   `json:"agents"`
-	Budgets         []budgetJSON  `json:"budgets"`
-	DupGroups       int64         `json:"dup_groups"`
-	DupWastedUSD    float64       `json:"dup_wasted_usd"`
+	Now                   string        `json:"now"`
+	Version               string        `json:"version"`
+	Demo                  bool          `json:"demo"`
+	Exposure              string        `json:"exposure"`
+	AuthRequired          bool          `json:"auth_required"`
+	LocalUsage            bool          `json:"local_usage_enabled"`
+	Health                *HealthStatus `json:"health,omitempty"`
+	LastRequestAt         string        `json:"last_request_at,omitempty"`
+	TotalCost             float64       `json:"total_cost"`
+	Requests              int64         `json:"requests"`
+	In                    int64         `json:"in_tokens"`
+	Out                   int64         `json:"out_tokens"`
+	CacheRead             int64         `json:"cache_read_tokens"`
+	CacheWrite            int64         `json:"cache_write_tokens"`
+	CacheWrite1h          int64         `json:"cache_write_1h_tokens"`
+	CacheHitPct           float64       `json:"cache_hit_pct"`
+	HasTraffic            bool          `json:"has_traffic"`
+	LastHourCost          float64       `json:"last_hour_cost"`
+	Estimated             int64         `json:"estimated"`
+	Unpriced              int64         `json:"unpriced"`
+	UnknownPricing        int64         `json:"unknown_pricing"`
+	Unmetered             int64         `json:"unmetered"`
+	Incomplete            int64         `json:"incomplete"`
+	EnforcementGaps       int64         `json:"enforcement_gaps"`
+	FeeUnpriced           int64         `json:"fee_unpriced"`
+	CapDailyUSD           float64       `json:"cap_daily_usd"`
+	CapDailyCost          float64       `json:"cap_daily_cost"`
+	HasCap                bool          `json:"has_cap"`
+	CapWeeklyUSD          float64       `json:"cap_weekly_usd"`
+	WeekCost              float64       `json:"week_cost"`
+	CapMonthlyUSD         float64       `json:"cap_monthly_usd"`
+	MonthCost             float64       `json:"month_cost"`
+	BanActive             bool          `json:"ban_active"`
+	ExternalBan           bool          `json:"external_ban"`
+	FuseTripped           bool          `json:"fuse_tripped"`
+	FuseUntil             string        `json:"fuse_until,omitempty"`
+	FuseRule              string        `json:"fuse_rule,omitempty"`
+	FuseProjected         float64       `json:"fuse_projected_usd,omitempty"`
+	FuseLimit             float64       `json:"fuse_limit_usd,omitempty"`
+	FuseRequests          int64         `json:"fuse_requests,omitempty"`
+	FuseRequestLimit      int64         `json:"fuse_request_limit,omitempty"`
+	FuseRequestWindow     string        `json:"fuse_request_window,omitempty"`
+	FuseProjectedRequests int64         `json:"fuse_projected_requests,omitempty"`
+	OverrideToday         bool          `json:"override_today"`
+	ExternalPolicy        bool          `json:"external_policy"`
+	Models                []modelJSON   `json:"models"`
+	Agents                []agentJSON   `json:"agents"`
+	Budgets               []budgetJSON  `json:"budgets"`
+	DupGroups             int64         `json:"dup_groups"`
+	DupWastedUSD          float64       `json:"dup_wasted_usd"`
 }
 
 type summaryReader interface {
 	Summarize(since time.Time) (*store.Summary, error)
 	SpentSince(since time.Time) (float64, error)
 	SpentSinceMulti(since []time.Time) ([]float64, error)
+	BudgetUsageSinceMulti(since []time.Time) ([]store.BudgetUsage, error)
+	BudgetUsageWindows(starts []time.Time, window time.Duration) ([]store.BudgetUsage, error)
 	SettingsWithPrefix(prefix string) (map[string]string, error)
 	UsageSinceForAgents(since time.Time, agents []string) (map[string]store.AgentRow, error)
 	GetSetting(key string) (string, error)
@@ -869,12 +887,21 @@ func buildSnapshot(s summaryReader, cfg Config, now time.Time) (*summaryJSON, er
 			Source: "local", Reset: "rolling " + budget.FormatFuseDuration(fuse.Window),
 		})
 	}
+	if fuses.Fanout != nil {
+		resp.FuseRequests = fuses.Fanout.Requests
+		resp.FuseRequestLimit = fuses.Fanout.LimitRequests
+		resp.FuseRequestWindow = budget.FormatFuseDuration(fuses.Fanout.Window)
+	}
 	if fuses.Tripped {
 		resp.FuseTripped = true
 		resp.FuseUntil = fuses.TrippedUntil.Format(time.RFC3339)
 		resp.FuseRule = fuses.TripRule
 		resp.FuseProjected = fuses.TripProjected
 		resp.FuseLimit = fuses.TripLimitUSD
+		resp.FuseProjectedRequests = fuses.TripProjectedRequests
+		if fuses.TripLimitRequests > 0 {
+			resp.FuseRequestLimit = fuses.TripLimitRequests
+		}
 	}
 	localBan, externalBan, err := budget.BanStatus(s)
 	if err != nil {

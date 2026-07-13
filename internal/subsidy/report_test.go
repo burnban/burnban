@@ -2,13 +2,16 @@ package subsidy
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/burnban/burnban/internal/pricing"
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {
@@ -29,6 +32,8 @@ func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {
 		Until:     time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: codexDir,
 		GeminiDir:   filepath.Join(root, "missing-gemini"),
+		CopilotDir:  filepath.Join(root, "missing-copilot"),
+		CursorDB:    filepath.Join(root, "missing-cursor.db"),
 		OpenCodeDB:  filepath.Join(root, "missing-opencode.db"),
 		HermesDB:    filepath.Join(root, "missing-hermes.db"),
 		OpenClawDir: filepath.Join(root, "missing-openclaw"),
@@ -40,7 +45,7 @@ func TestBuildReportAutoDetectsAndAggregates(t *testing.T) {
 	if !report.HasUsage || report.Calls != 2 || report.In != 500 || report.Out != 400 || report.CacheRead != 650 || report.CacheWrite != 30 {
 		t.Fatalf("totals = %+v", report.Totals)
 	}
-	if len(report.Providers) != 7 || !report.Providers[0].Detected || !report.Providers[1].Detected {
+	if len(report.Providers) != 9 || !report.Providers[0].Detected || !report.Providers[1].Detected {
 		t.Fatalf("providers = %+v", report.Providers)
 	}
 	// Claude: .001 + .010 + .00005 + .00025 + .0002 = .0115.
@@ -63,7 +68,8 @@ func TestReportTracksAnthropicDimensionsAndUnknownPricing(t *testing.T) {
 	report, err := BuildReport(prices, ReportOptions{
 		Since: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Until: time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: filepath.Join(root, "missing-codex"),
-		GeminiDir:  filepath.Join(root, "missing-gemini"),
+		GeminiDir: filepath.Join(root, "missing-gemini"), CopilotDir: filepath.Join(root, "missing-copilot"),
+		CursorDB:   filepath.Join(root, "missing-cursor.db"),
 		OpenCodeDB: filepath.Join(root, "missing-opencode.db"),
 		HermesDB:   filepath.Join(root, "missing-hermes"), OpenClawDir: filepath.Join(root, "missing-openclaw"),
 		GooseDB: filepath.Join(root, "missing-goose"),
@@ -112,6 +118,8 @@ func TestReportSurfacesScanLimitWithoutPaths(t *testing.T) {
 		Since: time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC), Until: time.Date(2026, 7, 6, 0, 0, 0, 0, time.UTC),
 		ClaudeDir: claudeDir, CodexDir: filepath.Join(root, "missing-codex"), HermesDB: filepath.Join(root, "missing-hermes"),
 		GeminiDir:   filepath.Join(root, "missing-gemini"),
+		CopilotDir:  filepath.Join(root, "missing-copilot"),
+		CursorDB:    filepath.Join(root, "missing-cursor.db"),
 		OpenCodeDB:  filepath.Join(root, "missing-opencode.db"),
 		OpenClawDir: filepath.Join(root, "missing-openclaw"), GooseDB: filepath.Join(root, "missing-goose"),
 		ScanLimits: ScanLimits{MaxFiles: 1, MaxBytes: 1 << 20, MaxLineBytes: 1 << 20, MaxRecords: 100},
@@ -126,4 +134,152 @@ func TestReportSurfacesScanLimitWithoutPaths(t *testing.T) {
 	if strings.Contains(string(b), root) {
 		t.Fatalf("partial diagnostics leaked path: %s", b)
 	}
+}
+
+type reportFixtureAdapter struct {
+	id     string
+	events []sourceadapter.Event
+	count  int64
+}
+
+func (a reportFixtureAdapter) Manifest() sourceadapter.Manifest {
+	return sourceadapter.Manifest{
+		APIVersion: sourceadapter.APIVersion, ID: a.id, DisplayName: "Report Fixture",
+		Store: "synthetic metadata", Privacy: sourceadapter.Privacy{ReadOnly: true},
+	}
+}
+
+func (a reportFixtureAdapter) DefaultPath(home string) string {
+	return filepath.Join(home, ".report-fixture")
+}
+
+func (a reportFixtureAdapter) Scan(_ string, since time.Time, _ sourceadapter.ScanLimits, emit func(sourceadapter.Event)) (sourceadapter.ScanResult, error) {
+	for _, event := range a.events {
+		emit(event)
+	}
+	for i := int64(0); i < a.count; i++ {
+		emit(sourceadapter.Event{
+			ID: fmt.Sprintf("large-%d", i), Model: "large-model", Time: since.Add(time.Minute),
+			Calls: 1, In: sourceadapter.MaxEventTokens, Confidence: sourceadapter.ConfidenceExact,
+		})
+	}
+	return sourceadapter.ScanResult{Sessions: 1}, nil
+}
+
+func missingBuiltinPaths(root string) map[string]string {
+	return map[string]string{
+		"claude-code":        filepath.Join(root, "missing-claude"),
+		"codex":              filepath.Join(root, "missing-codex"),
+		"gemini-cli":         filepath.Join(root, "missing-gemini"),
+		"opencode":           filepath.Join(root, "missing-opencode"),
+		"hermes":             filepath.Join(root, "missing-hermes"),
+		"openclaw":           filepath.Join(root, "missing-openclaw"),
+		"goose":              filepath.Join(root, "missing-goose"),
+		"github-copilot-cli": filepath.Join(root, "missing-copilot"),
+		"cursor":             filepath.Join(root, "missing-cursor"),
+	}
+}
+
+func TestReportSplitsMixedBillingPerEvent(t *testing.T) {
+	root := t.TempDir()
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	adapter := reportFixtureAdapter{id: "mixed-fixture", events: []sourceadapter.Event{
+		{ID: "subscription", Model: "fixture-model", Time: since.Add(time.Hour), Calls: 1, In: 1_000_000, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "metered", Model: "fixture-model", Time: since.Add(2 * time.Hour), Calls: 1, In: 1_000_000, BillingProvider: "openrouter", Confidence: sourceadapter.ConfidenceExact},
+	}}
+	report, err := BuildReport(&pricing.Table{Models: map[string]pricing.Price{
+		"fixture-model": {InputPerMTok: 1},
+	}}, ReportOptions{
+		Since: since, Until: since.Add(24 * time.Hour), AdditionalAdapters: []sourceadapter.Adapter{adapter},
+		SourcePaths: missingBuiltinPaths(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.APIUSD != 2 || report.SubscriptionUSD != 1 || report.MeteredUSD != 1 || report.SubsidyBaseUSD() != 1 {
+		t.Fatalf("mixed report buckets = %+v", report)
+	}
+	for _, provider := range report.Providers {
+		if provider.Provider != "mixed-fixture" {
+			continue
+		}
+		if provider.Metered || !provider.MixedBilling || provider.SubscriptionUSD != 1 || provider.MeteredUSD != 1 ||
+			provider.APIUSD != 2 || provider.BillingProvider != "openrouter" {
+			t.Fatalf("mixed provider classification = %+v", provider)
+		}
+		return
+	}
+	t.Fatal("mixed fixture provider missing")
+}
+
+func TestReportRejectsInvalidEventsAndEnforcesBothWindowBounds(t *testing.T) {
+	root := t.TempDir()
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	until := time.Date(2026, 7, 2, 0, 0, 0, 0, time.UTC)
+	adapter := reportFixtureAdapter{id: "validation-fixture", events: []sourceadapter.Event{
+		{ID: "before", Model: "fixture-model", Time: since.Add(-time.Second), Calls: 1, In: 900, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "after", Model: "fixture-model", Time: until.Add(time.Second), Calls: 1, In: 900, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "valid", Model: "fixture-model", Time: since.Add(time.Hour), In: 100, Out: 20, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "private-event-id", Model: "private\nmodel", Time: since.Add(2 * time.Hour), Calls: 1, In: 50, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "negative", Model: "fixture-model", Time: since.Add(3 * time.Hour), Calls: 1, In: -1, Confidence: sourceadapter.ConfidenceExact},
+		{ID: "missing-confidence", Model: "fixture-model", Time: since.Add(4 * time.Hour), Calls: 1, In: 1},
+		{ID: "nonfinite", Model: "fixture-model", Time: since.Add(5 * time.Hour), Calls: 1, In: 1, CostKnown: true, CostUSD: math.NaN(), Confidence: sourceadapter.ConfidenceExact},
+	}}
+	report, err := BuildReport(&pricing.Table{Models: map[string]pricing.Price{
+		"fixture-model": {InputPerMTok: 1, OutputPerMTok: 2},
+	}}, ReportOptions{
+		Since: since, Until: until, AdditionalAdapters: []sourceadapter.Adapter{adapter},
+		SourcePaths: missingBuiltinPaths(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Partial || report.Calls != 1 || report.In != 100 || report.Out != 20 {
+		t.Fatalf("validated report = %+v", report)
+	}
+	var fixture ProviderUsage
+	for _, provider := range report.Providers {
+		if provider.Provider == "validation-fixture" {
+			fixture = provider
+		}
+	}
+	if !fixture.Partial || len(fixture.Warnings) != 1 || fixture.Warnings[0] != "one or more invalid adapter events were rejected" {
+		t.Fatalf("validation diagnostics = %+v", fixture)
+	}
+	encoded, err := json.Marshal(report)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), "private-event-id") || strings.Contains(string(encoded), "private\\nmodel") {
+		t.Fatalf("invalid event metadata leaked into report: %s", encoded)
+	}
+}
+
+func TestReportRejectsIntegerAggregationOverflow(t *testing.T) {
+	root := t.TempDir()
+	since := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
+	accepted := maxInt64 / sourceadapter.MaxEventTokens
+	adapter := reportFixtureAdapter{id: "overflow-fixture", count: accepted + 1}
+	report, err := BuildReport(&pricing.Table{Models: map[string]pricing.Price{
+		"large-model": {InputPerMTok: 1},
+	}}, ReportOptions{
+		Since: since, Until: since.Add(24 * time.Hour), AdditionalAdapters: []sourceadapter.Adapter{adapter},
+		SourcePaths: missingBuiltinPaths(root),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !report.Partial || report.Calls != accepted || report.In != accepted*sourceadapter.MaxEventTokens || report.In < 0 {
+		t.Fatalf("overflow-safe totals = %+v; accepted=%d", report.Totals, accepted)
+	}
+	for _, provider := range report.Providers {
+		if provider.Provider != "overflow-fixture" {
+			continue
+		}
+		if !provider.Partial || !slices.Contains(provider.Warnings, "one or more adapter events exceeded report aggregation limits") {
+			t.Fatalf("overflow diagnostics = %+v", provider)
+		}
+		return
+	}
+	t.Fatal("overflow fixture provider missing")
 }

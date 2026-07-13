@@ -5,11 +5,16 @@
 package budget
 
 import (
+	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"math"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/burnban/burnban/internal/store"
 )
@@ -31,6 +36,10 @@ const (
 	KeyExternalPolicyVersion = "external_policy_version"
 	KeyExternalPolicySource  = "external_policy_source"
 	KeyExternalPolicyAt      = "external_policy_updated_at"
+	// KeyExternalPolicyExceptions is a bounded, sidecar-written expiry
+	// schedule. The stored external cap includes each active increment; after
+	// its valid_until the MIT meter subtracts it locally even while offline.
+	KeyExternalPolicyExceptions = "external_policy_exceptions_v1"
 	// KeyWarnPct holds the early-warning threshold as a percentage of any
 	// window's cap. Empty means DefaultWarnPct; "0" disables warnings.
 	KeyWarnPct = "warn_pct"
@@ -113,6 +122,11 @@ type Guard struct {
 	activeGlobalKeys  map[usageCacheKey]struct{}
 	agentCacheDay     int64
 	agentCacheEntries int
+
+	baselineCacheRaw      string
+	baselineCacheStart    int64
+	baselineCacheRevision uint64
+	baselineCacheMedian   float64
 }
 
 // AdmissionEstimate is a conservative preflight cost bound derived from the
@@ -205,6 +219,16 @@ func (r *Reservation) Settle(request store.Request) error {
 	} else {
 		g.invalidateUsageCacheLocked(after)
 	}
+	if g.baselineCacheStart != 0 {
+		switch {
+		case before%2 == 0 && g.baselineCacheRevision == before && after == before+2 && request.Ts.UnixNano() >= g.baselineCacheStart:
+			// Current-window settlements cannot alter historical baseline
+			// samples, so advance the cache's sequence lock without rescanning.
+			g.baselineCacheRevision = after
+		default:
+			g.clearBaselineCacheLocked()
+		}
+	}
 	r.releaseLocked()
 	return nil
 }
@@ -215,6 +239,7 @@ func (g *Guard) addSettledUsageLocked(key usageCacheKey, request store.Request) 
 		return
 	}
 	usage.SpentUSD += request.CostUSD
+	usage.Requests++
 	if request.EnforcementUnsafe {
 		usage.EnforcementGaps++
 	}
@@ -308,7 +333,12 @@ func Status(s statusReader, now time.Time) ([]WindowState, error) {
 		keys = append(keys, w.Key, w.ExternalKey)
 		starts = append(starts, w.Start(now), externalStart(w, now))
 	}
+	keys = append(keys, KeyExternalPolicyExceptions)
 	vals, err := s.GetSettings(keys...)
+	if err != nil {
+		return nil, err
+	}
+	expiredIncreases, err := expiredExternalIncreases(vals[KeyExternalPolicyExceptions], now)
 	if err != nil {
 		return nil, err
 	}
@@ -331,11 +361,163 @@ func Status(s statusReader, now time.Time) ([]WindowState, error) {
 		if err != nil {
 			return nil, err
 		}
+		external, externalSet, err = subtractExpiredIncrease(w.Name, external, externalSet, expiredIncreases[w.Name])
+		if err != nil {
+			return nil, err
+		}
 		st.LocalCapUSD, st.ExternalCapUSD = local, external
 		selectEffectiveState(&st, local, localSet, external, externalSet, localStart, externalStartAt)
 		out[i] = st
 	}
 	return out, nil
+}
+
+type externalExceptionEnvelope struct {
+	Version    int                         `json:"version"`
+	Exceptions []externalExceptionSchedule `json:"exceptions"`
+}
+
+type externalExceptionSchedule struct {
+	RequestID  string  `json:"request_id"`
+	Window     string  `json:"window"`
+	AmountUSD  float64 `json:"amount_usd"`
+	ValidUntil string  `json:"valid_until"`
+}
+
+func expiredExternalIncreases(raw string, now time.Time) (map[string]float64, error) {
+	out := map[string]float64{"daily": 0, "weekly": 0, "monthly": 0}
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return out, nil
+	}
+	if len(raw) > 256<<10 {
+		return nil, fmt.Errorf("invalid %s: exceeds 256 KiB", KeyExternalPolicyExceptions)
+	}
+	if err := validateExternalExceptionJSON(raw); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", KeyExternalPolicyExceptions, err)
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.DisallowUnknownFields()
+	var envelope externalExceptionEnvelope
+	if err := dec.Decode(&envelope); err != nil {
+		return nil, fmt.Errorf("invalid %s: %w", KeyExternalPolicyExceptions, err)
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		return nil, fmt.Errorf("invalid %s: trailing JSON", KeyExternalPolicyExceptions)
+	}
+	if envelope.Version != 1 || len(envelope.Exceptions) > 1000 {
+		return nil, fmt.Errorf("invalid %s envelope", KeyExternalPolicyExceptions)
+	}
+	seen := make(map[string]struct{}, len(envelope.Exceptions))
+	for i, item := range envelope.Exceptions {
+		if strings.TrimSpace(item.RequestID) != item.RequestID || item.RequestID == "" || len(item.RequestID) > 100 ||
+			(item.Window != "daily" && item.Window != "weekly" && item.Window != "monthly") ||
+			math.IsNaN(item.AmountUSD) || math.IsInf(item.AmountUSD, 0) || item.AmountUSD <= 0 || item.AmountUSD > 1e9 {
+			return nil, fmt.Errorf("invalid %s item %d", KeyExternalPolicyExceptions, i)
+		}
+		if _, duplicate := seen[item.RequestID]; duplicate {
+			return nil, fmt.Errorf("invalid %s: duplicate request %q", KeyExternalPolicyExceptions, item.RequestID)
+		}
+		seen[item.RequestID] = struct{}{}
+		validUntil, err := time.Parse(time.RFC3339, item.ValidUntil)
+		if err != nil || item.ValidUntil != validUntil.UTC().Format(time.RFC3339) {
+			return nil, fmt.Errorf("invalid %s item %d expiry", KeyExternalPolicyExceptions, i)
+		}
+		if !validUntil.After(now) {
+			next := out[item.Window] + item.AmountUSD
+			if math.IsInf(next, 0) || next > 1e12 {
+				return nil, fmt.Errorf("invalid %s expired total", KeyExternalPolicyExceptions)
+			}
+			out[item.Window] = next
+		}
+	}
+	return out, nil
+}
+
+var canonicalExternalExceptionJSONFields = map[string]struct{}{
+	"version": {}, "exceptions": {}, "request_id": {}, "window": {}, "amount_usd": {}, "valid_until": {},
+}
+
+func validateExternalExceptionJSON(raw string) error {
+	if !utf8.ValidString(raw) {
+		return fmt.Errorf("JSON is not valid UTF-8")
+	}
+	dec := json.NewDecoder(strings.NewReader(raw))
+	dec.UseNumber()
+	if err := scanExternalExceptionJSON(dec, 0); err != nil {
+		return err
+	}
+	if _, err := dec.Token(); !errors.Is(err, io.EOF) {
+		if err != nil {
+			return err
+		}
+		return fmt.Errorf("multiple JSON values")
+	}
+	return nil
+}
+
+func scanExternalExceptionJSON(dec *json.Decoder, depth int) error {
+	if depth > 16 {
+		return fmt.Errorf("JSON nesting exceeds 16 levels")
+	}
+	token, err := dec.Token()
+	if err != nil {
+		return err
+	}
+	delim, composite := token.(json.Delim)
+	if !composite {
+		return nil
+	}
+	switch delim {
+	case '{':
+		seen := make(map[string]struct{})
+		for dec.More() {
+			keyToken, err := dec.Token()
+			if err != nil {
+				return err
+			}
+			key, ok := keyToken.(string)
+			if !ok {
+				return fmt.Errorf("JSON object key is not a string")
+			}
+			if _, canonical := canonicalExternalExceptionJSONFields[key]; !canonical {
+				return fmt.Errorf("unknown or non-canonical JSON field %q", key)
+			}
+			if _, duplicate := seen[key]; duplicate {
+				return fmt.Errorf("duplicate JSON field %q", key)
+			}
+			seen[key] = struct{}{}
+			if err := scanExternalExceptionJSON(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	case '[':
+		for dec.More() {
+			if err := scanExternalExceptionJSON(dec, depth+1); err != nil {
+				return err
+			}
+		}
+		_, err = dec.Token()
+		return err
+	default:
+		return fmt.Errorf("unexpected JSON delimiter %q", delim)
+	}
+}
+
+func subtractExpiredIncrease(window string, external float64, set bool, expired float64) (float64, bool, error) {
+	if expired == 0 {
+		return external, set, nil
+	}
+	if !set || expired > external {
+		return 0, false, fmt.Errorf("invalid %s: expired %s increase exceeds the stored external cap", KeyExternalPolicyExceptions, window)
+	}
+	effective := external - expired
+	if math.IsNaN(effective) || math.IsInf(effective, 0) || effective <= 0 {
+		return 0, false, fmt.Errorf("invalid %s effective %s cap", KeyExternalPolicyExceptions, window)
+	}
+	return effective, true, nil
 }
 
 // Check returns a non-nil Denial when a ban/cooldown is active, a calendar or
@@ -549,6 +731,9 @@ func (g *Guard) cachedUsagesLocked(requests []usageRequest) ([]store.BudgetUsage
 			if err != nil {
 				return nil, err
 			}
+			if err := validateFuseUsages(usages); err != nil {
+				return nil, err
+			}
 			for i, usage := range usages {
 				loaded[missingGlobalKeys[i]] = usage
 			}
@@ -556,6 +741,9 @@ func (g *Guard) cachedUsagesLocked(requests []usageRequest) ([]store.BudgetUsage
 		for _, request := range missingAgents {
 			usage, err := g.S.BudgetUsageSinceForAgent(request.start, request.agent)
 			if err != nil {
+				return nil, err
+			}
+			if err := validateFuseUsages([]store.BudgetUsage{usage}); err != nil {
 				return nil, err
 			}
 			loaded[usageCacheKey{startUnixNano: request.start.UnixNano(), agent: request.agent}] = usage
@@ -614,7 +802,7 @@ func (s admissionState) maxRemaining() float64 {
 
 func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionState, error) {
 	state := admissionState{}
-	keys := []string{KeyBanActive, KeyExternalBanActive, KeyOverrideDay}
+	keys := []string{KeyBanActive, KeyExternalBanActive, KeyOverrideDay, KeyExternalPolicyExceptions}
 	agentKey := ""
 	if agent != "" {
 		agentKey = KeyAgentCapPrefix + agent
@@ -625,6 +813,10 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 	}
 	keys = append(keys, fuseSettingKeys()...)
 	vals, err := g.S.GetSettings(keys...)
+	if err != nil {
+		return nil, state, err
+	}
+	expiredIncreases, err := expiredExternalIncreases(vals[KeyExternalPolicyExceptions], now)
 	if err != nil {
 		return nil, state, err
 	}
@@ -653,6 +845,18 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 	if err != nil {
 		return nil, state, err
 	}
+	baselinePolicy, err := ParseFuseBaseline(vals[KeyFuseBaseline])
+	if err != nil {
+		return nil, state, err
+	}
+	var fanoutWindow time.Duration
+	var fanoutLimit int64
+	if raw := strings.TrimSpace(vals[KeyFuseFanout]); raw != "" {
+		fanoutWindow, fanoutLimit, err = ParseFuseFanout(raw)
+		if err != nil {
+			return nil, state, fmt.Errorf("invalid %s setting %q: %w", KeyFuseFanout, raw, err)
+		}
+	}
 
 	// Local caps use the machine's calendar; external allocations use UTC so
 	// every meter attached to a coordinator evaluates the same window. One scan
@@ -676,6 +880,10 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 		if err != nil {
 			return nil, state, err
 		}
+		external, externalSet, err = subtractExpiredIncrease(w.Name, external, externalSet, expiredIncreases[w.Name])
+		if err != nil {
+			return nil, state, err
+		}
 		if localSet {
 			checks = append(checks, capCheck{window: w, cap: local, start: w.Start(now), source: "local"})
 		}
@@ -690,14 +898,26 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 			return nil, state, err
 		}
 	}
-	usageRequests := make([]usageRequest, 0, len(checks)+len(fuseRules)+1)
+	usageRequests := make([]usageRequest, 0, len(checks)+len(fuseRules)+3)
 	for _, check := range checks {
 		usageRequests = append(usageRequests, usageRequest{start: check.start})
 	}
 	for _, rule := range fuseRules {
 		usageRequests = append(usageRequests, usageRequest{start: rollingStart(now, rule.window)})
 	}
-	globalUsageCount := len(checks) + len(fuseRules)
+	baselineUsageIndex := -1
+	baselineStart := time.Time{}
+	if baselinePolicy != nil {
+		baselineStart = baselineWindowStart(now, baselinePolicy.Window)
+		baselineUsageIndex = len(usageRequests)
+		usageRequests = append(usageRequests, usageRequest{start: baselineStart})
+	}
+	fanoutUsageIndex := -1
+	if fanoutLimit != 0 {
+		fanoutUsageIndex = len(usageRequests)
+		usageRequests = append(usageRequests, usageRequest{start: rollingStart(now, fanoutWindow)})
+	}
+	globalUsageCount := len(usageRequests)
 	if agentCapSet {
 		usageRequests = append(usageRequests, usageRequest{start: DayStart(now), agent: agent})
 	}
@@ -774,6 +994,40 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 		}
 		if position.spent+position.reserved >= position.cap {
 			denial, err := g.tripFuseLocked(now, position, 0)
+			return denial, state, err
+		}
+	}
+	if baselinePolicy != nil {
+		usage := usages[baselineUsageIndex]
+		median, err := g.baselineMedianLocked(vals[KeyFuseBaseline], *baselinePolicy, baselineStart)
+		if err != nil {
+			return nil, state, err
+		}
+		limit := max(baselinePolicy.MinimumUSD, median*baselinePolicy.Multiplier)
+		position := capPosition{
+			name: "same-slot baseline", cap: limit, spent: usage.SpentUSD,
+			reserved: g.reservedUSD, unsafe: usage.EnforcementGaps,
+			fuseName: "baseline", fuseWindow: baselinePolicy.Window, fuseCooldown: fuseCooldown,
+		}
+		state.positions = append(state.positions, position)
+		if position.unsafe > 0 {
+			return &Denial{
+				Type: "burnban_metering_gap",
+				Message: fmt.Sprintf(
+					"the %s baseline spend fuse is paused fail-closed: %d successful request(s) in the current slot had incomplete usage or unknown pricing. Correct pricing/accounting or remove the fuse.",
+					FormatFuseDuration(baselinePolicy.Window), position.unsafe),
+			}, state, nil
+		}
+		if position.spent+position.reserved >= position.cap {
+			denial, err := g.tripFuseLocked(now, position, 0)
+			return denial, state, err
+		}
+	}
+	if fanoutLimit != 0 {
+		usage := usages[fanoutUsageIndex]
+		current := usage.Requests + int64(g.inFlight)
+		if current >= fanoutLimit {
+			denial, err := g.tripFuseRequestsLocked(now, fanoutWindow, fuseCooldown, fanoutLimit, current+1)
 			return denial, state, err
 		}
 	}

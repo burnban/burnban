@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/burnban/burnban/sourceadapter"
 )
 
 type openClawLine struct {
@@ -75,6 +77,7 @@ func scanOpenClaw(dir string, since time.Time, limits ScanLimits, emit func(Even
 				In: usage.Input, Out: usage.Output, CacheRead: usage.CacheRead,
 				CacheWrite5m: usage.CacheWrite,
 				CostUSD:      usage.Cost.Total, CostKnown: usage.Cost.Total > 0,
+				Confidence: sourceadapter.ConfidenceExact,
 			})
 		})
 		if contributed {
