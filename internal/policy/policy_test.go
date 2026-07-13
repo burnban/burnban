@@ -134,6 +134,52 @@ func TestPolicyNamespaceChangeRequiresExplicitLineageReset(t *testing.T) {
 	}
 }
 
+func TestNamespaceResetCannotInheritCollidingReservationKey(t *testing.T) {
+	oldDocument := policy.Document{
+		APIVersion: policy.APIVersion, Kind: policy.Kind,
+		Metadata: policy.Metadata{Name: "old", Namespace: "tenant", Revision: 1}, Mode: policy.ModeEnforce,
+		Rules: []policy.Rule{{ID: "group/rule", Limits: policy.Limits{
+			Requests:    []policy.WindowLimit{{ID: "one", Max: 1, Window: "1h", WindowType: "rolling"}},
+			Concurrency: 1,
+		}}},
+	}
+	s, engine, oldCompiled := newEngine(t, oldDocument)
+	now := time.Now().UTC()
+	oldReservation, oldDecision, err := engine.Prepare(now, policy.Context{Provider: "openai"})
+	if err != nil || oldDecision.Denied() {
+		t.Fatalf("old reservation decision=%+v err=%v", oldDecision, err)
+	}
+	defer oldReservation.Release()
+
+	if err := s.ResetPolicyLineage(store.PolicyLineageReset{
+		Actor: "policy-test", Reason: "exercise an explicitly authorized namespace replacement",
+		ExpectedDigest: oldCompiled.Digest, ExpectedSource: "local", At: now.Add(time.Second),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	newDocument := oldDocument
+	newDocument.Metadata = policy.Metadata{Name: "new", Namespace: "tenant/group", Revision: 1}
+	newDocument.Rules[0].ID = "rule"
+	newCompiled := compile(t, newDocument)
+	if err := s.ApplyPolicyDocument(store.PolicyDocumentRecord{
+		AppliedAt: now.Add(2 * time.Second), APIVersion: newCompiled.Document.APIVersion,
+		Name: newCompiled.Document.Metadata.Name, Namespace: newCompiled.Document.Metadata.Namespace,
+		Revision: newCompiled.Document.Metadata.Revision, Digest: newCompiled.Digest,
+		DocumentJSON: string(newCompiled.Canonical),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// "tenant" + "/" + "group/rule" and
+	// "tenant/group" + "/" + "rule" used to alias. The old pending and
+	// concurrency reservations must remain isolated from the new lineage.
+	newReservation, decision, err := engine.Prepare(now.Add(3*time.Second), policy.Context{Provider: "openai"})
+	if err != nil || decision.Denied() {
+		t.Fatalf("new lineage inherited colliding reservation: decision=%+v err=%v", decision, err)
+	}
+	newReservation.Release()
+}
+
 func TestUntrustedIdentityScopesCannotEnforce(t *testing.T) {
 	for _, dimension := range []string{"team", "user", "project", "agent", "session", "model_class"} {
 		t.Run(dimension, func(t *testing.T) {

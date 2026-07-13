@@ -21,10 +21,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: zgosalvez/github-actions-ensure-sha-pinned-actions@9e9574ef04ea69da568d6249bd69539ccc704e74 # v4.0.0
+      - uses: zgosalvez/github-actions-ensure-sha-pinned-actions@3db98c0363e2fa5df3e1c4c471777a7c10b24cc9 # v5.0.5
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
           go-version-file: go.mod
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
 
       - name: Formatting
         shell: bash
@@ -41,10 +44,26 @@ jobs:
           go mod tidy -diff
           go mod verify
       - name: Vet, race tests, and static build
+        shell: bash
         run: |
+          set -euo pipefail
           go vet ./...
-          go test -race -coverprofile=coverage.out ./...
+          go test -race -count=1 -coverpkg=./... -coverprofile=coverage.out ./...
+          coverage=$(go tool cover -func=coverage.out | awk '/^total:/ { gsub("%", "", $3); print $3 }')
+          awk -v coverage="$coverage" 'BEGIN { if (coverage + 0 < 70) { printf "coverage %.1f%% is below 70%%\n", coverage > "/dev/stderr"; exit 1 } }'
           CGO_ENABLED=0 go build -trimpath -o /tmp/burnban .
+      - name: Feature command smoke
+        shell: bash
+        run: |
+          set -euo pipefail
+          db=$(mktemp)
+          trap 'rm -f "$db"' EXIT
+          /tmp/burnban policy templates --list >/dev/null
+          /tmp/burnban downshift show --db "$db" >/dev/null
+          /tmp/burnban optimize cache --db "$db" --since 7d --format json >/dev/null
+          /tmp/burnban optimize allocation --db "$db" --dimension agent --days 30 --format json >/dev/null
+          /tmp/burnban reconcile report --db "$db" --since 30d --format json >/dev/null
+          /tmp/burnban policy coverage --db "$db" --since 7d --format json >/dev/null
       - name: Install pinned analysis tools
         env:
           GOBIN: ${{ runner.temp }}/tools
@@ -63,6 +82,16 @@ jobs:
         run: |
           actionlint
           gitleaks git --redact --no-banner .
+      - name: Parse and compile warehouse models
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 -m venv "${RUNNER_TEMP}/dbt"
+          "${RUNNER_TEMP}/dbt/bin/pip" install --disable-pip-version-check dbt-duckdb==1.10.1
+          "${RUNNER_TEMP}/dbt/bin/dbt" parse --no-use-colors \
+            --project-dir warehouse/dbt --profiles-dir warehouse/dbt --target ci
+          "${RUNNER_TEMP}/dbt/bin/dbt" compile --no-use-colors \
+            --project-dir warehouse/dbt --profiles-dir warehouse/dbt --target ci
       - name: License policy and notice coverage
         env:
           # setup-go installs the requested toolchain directly. Keep go-licenses

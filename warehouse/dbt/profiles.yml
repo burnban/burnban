@@ -1,0 +1,8 @@
+burnban_warehouse:
+  target: ci
+  outputs:
+    ci:
+      type: duckdb
+      path: ":memory:"
+      schema: burnban
+      threads: 1

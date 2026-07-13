@@ -7,7 +7,7 @@ following runtime dependencies. Versions are locked by `go.mod` and `go.sum`.
 |---|---:|---|
 | `github.com/dustin/go-humanize` | v1.0.1 | MIT |
 | `github.com/google/uuid` | v1.6.0 | BSD-3-Clause |
-| `github.com/mattn/go-isatty` | v0.0.20 | MIT |
+| `github.com/mattn/go-isatty` | v0.0.22 | MIT |
 | `github.com/ncruces/go-strftime` | v1.0.0 | MIT |
 | `github.com/remyoudompheng/bigfft` | v0.0.0-20230129092748-24d4a6f8daec | BSD-3-Clause |
 | `golang.org/x/sys` | v0.44.0 | BSD-3-Clause |

@@ -12,6 +12,8 @@ import (
 	"github.com/burnban/burnban/internal/store"
 )
 
+const checkpointSchemaVersion = "burnban.telemetry.checkpoint.v2"
+
 type telemetryStore interface {
 	TelemetryRowsAfter(afterID int64, limit int) ([]store.TelemetryRow, error)
 	TelemetryBacklog(afterID, keep int64) (pending, dropThrough int64, err error)
@@ -21,7 +23,7 @@ type telemetryStore interface {
 
 type Sink interface {
 	SinkID() string
-	Export(context.Context, Batch) error
+	Export(context.Context, Batch) (ExportResult, error)
 }
 
 type WorkerConfig struct {
@@ -36,7 +38,11 @@ type Stats struct {
 	State          string     `json:"state"`
 	AckedThrough   int64      `json:"acked_through"`
 	DroppedThrough int64      `json:"dropped_through"`
+	TracesThrough  int64      `json:"traces_through"`
+	MetricsThrough int64      `json:"metrics_through"`
 	DroppedRows    int64      `json:"dropped_rows"`
+	RejectedSpans  int64      `json:"rejected_spans"`
+	RejectedPoints int64      `json:"rejected_data_points"`
 	PendingRows    int64      `json:"pending_rows"`
 	LastSuccess    *time.Time `json:"last_success,omitempty"`
 	LastFailure    *time.Time `json:"last_failure,omitempty"`
@@ -47,11 +53,17 @@ type checkpoint struct {
 	SchemaVersion  string `json:"schema_version"`
 	AckedThrough   int64  `json:"acked_through"`
 	DroppedThrough int64  `json:"dropped_through"`
+	TracesThrough  int64  `json:"traces_through,omitempty"`
+	MetricsThrough int64  `json:"metrics_through,omitempty"`
 	DroppedRows    int64  `json:"dropped_rows"`
+	RejectedSpans  int64  `json:"rejected_spans,omitempty"`
+	RejectedPoints int64  `json:"rejected_data_points,omitempty"`
+	TracesFailed   bool   `json:"traces_failed,omitempty"`
+	MetricsFailed  bool   `json:"metrics_failed,omitempty"`
 	UpdatedAt      string `json:"updated_at"`
 }
 
-func (c checkpoint) cursor() int64 { return max(c.AckedThrough, c.DroppedThrough) }
+func (c checkpoint) cursor() int64 { return min(c.TracesThrough, c.MetricsThrough) }
 
 type Worker struct {
 	store         telemetryStore
@@ -193,8 +205,13 @@ func (w *Worker) DrainOnce(ctx context.Context) error {
 	if dropThrough > cursor {
 		dropped := pending - w.maxBacklog
 		next := w.checkpoint
-		next.DroppedThrough = dropThrough
-		next.DroppedRows += dropped
+		next.DroppedThrough = max(next.DroppedThrough, dropThrough)
+		next.DroppedRows = saturatedCounterAdd(next.DroppedRows, dropped)
+		next.TracesThrough = max(next.TracesThrough, dropThrough)
+		next.MetricsThrough = max(next.MetricsThrough, dropThrough)
+		if next.TracesThrough == next.MetricsThrough {
+			next.TracesFailed, next.MetricsFailed = false, false
+		}
 		if err := w.saveCheckpoint(next); err != nil {
 			w.failed(err)
 			return err
@@ -214,41 +231,140 @@ func (w *Worker) DrainOnce(ctx context.Context) error {
 		w.healthy(false)
 		return nil
 	}
+	traceCursor, metricCursor := w.checkpoint.TracesThrough, w.checkpoint.MetricsThrough
+	if traceCursor != metricCursor {
+		// Do not mix rows that are already terminal for the leading signal with
+		// newer rows that still need both signals. This keeps the durable signal
+		// cursors aligned at explicit batch boundaries without assuming request
+		// IDs are contiguous.
+		ahead := max(traceCursor, metricCursor)
+		prefix := 0
+		for prefix < len(rows) && rows[prefix].ID <= ahead {
+			prefix++
+		}
+		if prefix > 0 {
+			rows = rows[:prefix]
+		}
+	}
 	events := make([]Event, len(rows))
 	for i, row := range rows {
 		events[i] = FromRow(row)
 	}
-	err = w.sink.Export(ctx, Batch{Events: events, DroppedRows: w.checkpoint.DroppedRows})
-	if err != nil {
-		var partial *PartialRejectError
-		var permanent *permanentExportError
-		if errors.As(err, &partial) || errors.As(err, &permanent) {
-			next := w.checkpoint
-			next.DroppedThrough = rows[len(rows)-1].ID
-			next.DroppedRows += int64(len(rows))
-			if saveErr := w.saveCheckpoint(next); saveErr != nil {
-				err = errors.Join(err, saveErr)
-			} else {
-				w.checkpoint = next
-				w.logf("burnban: telemetry collector permanently rejected %d rows; recorded as dropped without retry", len(rows))
-			}
-		}
+	lastID := rows[len(rows)-1].ID
+	var signals SignalMask
+	if traceCursor < lastID {
+		signals |= SignalTraces
+	}
+	if metricCursor < lastID {
+		signals |= SignalMetrics
+	}
+	if signals == 0 {
+		err := fmt.Errorf("telemetry signal cursors are inconsistent with selected rows")
 		w.failed(err)
 		return err
+	}
+	result, exportErr := w.sink.Export(ctx, Batch{
+		Events: events, DroppedRows: w.checkpoint.DroppedRows, Signals: signals,
+	})
+	contractErr := validateExportResult(signals, result)
+	if exportErr == nil {
+		if signals&SignalTraces != 0 && (!result.Traces.Terminal || result.Traces.Failed) {
+			contractErr = errors.Join(contractErr, fmt.Errorf("telemetry sink returned failed or non-terminal traces without an error"))
+		}
+		if signals&SignalMetrics != 0 && (!result.Metrics.Terminal || result.Metrics.Failed) {
+			contractErr = errors.Join(contractErr, fmt.Errorf("telemetry sink returned failed or non-terminal metrics without an error"))
+		}
+	}
+	if contractErr != nil {
+		exportErr = errors.Join(exportErr, contractErr)
 	}
 	next := w.checkpoint
-	next.AckedThrough = rows[len(rows)-1].ID
-	if err := w.saveCheckpoint(next); err != nil {
-		// The collector may have accepted the batch. Leaving the durable ACK
-		// unchanged intentionally produces an at-least-once duplicate on retry
-		// instead of claiming delivery that Burnban could not checkpoint.
-		w.failed(err)
-		return err
+	progressed := false
+	if signals&SignalTraces != 0 && result.Traces.Terminal {
+		next.TracesThrough = lastID
+		next.TracesFailed = next.TracesFailed || result.Traces.Failed
+		next.RejectedSpans = saturatedCounterAdd(next.RejectedSpans, result.Traces.RejectedItems)
+		progressed = true
 	}
-	w.checkpoint = next
-	w.setPending(max(0, pending-int64(len(rows))))
+	if signals&SignalMetrics != 0 && result.Metrics.Terminal {
+		next.MetricsThrough = lastID
+		next.MetricsFailed = next.MetricsFailed || result.Metrics.Failed
+		next.RejectedPoints = saturatedCounterAdd(next.RejectedPoints, result.Metrics.RejectedItems)
+		progressed = true
+	}
+	if next.TracesThrough == next.MetricsThrough && next.cursor() > cursor {
+		if next.TracesFailed || next.MetricsFailed {
+			next.DroppedThrough = max(next.DroppedThrough, next.cursor())
+		} else {
+			next.AckedThrough = max(next.AckedThrough, next.cursor())
+		}
+		next.TracesFailed, next.MetricsFailed = false, false
+	}
+	if progressed {
+		if saveErr := w.saveCheckpoint(next); saveErr != nil {
+			// A terminal response may already have been observed. Without a
+			// durable signal cursor the safest available behavior is still
+			// at-least-once retry after reporting the checkpoint failure.
+			exportErr = errors.Join(exportErr, saveErr)
+		} else {
+			w.checkpoint = next
+			if next.cursor() > cursor {
+				w.setPending(max(0, pending-int64(len(rows))))
+			}
+		}
+	}
+	w.logSignalWarning("traces", result.Traces.Warning)
+	w.logSignalWarning("metrics", result.Metrics.Warning)
+	if exportErr != nil {
+		w.failed(exportErr)
+		return exportErr
+	}
 	w.healthy(true)
 	return nil
+}
+
+func validateExportResult(signals SignalMask, result ExportResult) error {
+	checks := []struct {
+		mask   SignalMask
+		name   string
+		result SignalExportResult
+	}{
+		{SignalTraces, "traces", result.Traces},
+		{SignalMetrics, "metrics", result.Metrics},
+	}
+	for _, check := range checks {
+		if signals&check.mask == 0 {
+			if check.result.Attempted {
+				return fmt.Errorf("telemetry sink attempted unrequested %s", check.name)
+			}
+			continue
+		}
+		if !check.result.Attempted {
+			return fmt.Errorf("telemetry sink omitted requested %s", check.name)
+		}
+		if check.result.RejectedItems < 0 || check.result.RejectedItems > 0 && (!check.result.Terminal || !check.result.Failed) {
+			return fmt.Errorf("telemetry sink returned invalid %s rejection accounting", check.name)
+		}
+	}
+	return nil
+}
+
+func saturatedCounterAdd(current, delta int64) int64 {
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if delta <= 0 {
+		return current
+	}
+	if current > maxInt64-delta {
+		return maxInt64
+	}
+	return current + delta
+}
+
+func (w *Worker) logSignalWarning(signal, message string) {
+	if message == "" {
+		return
+	}
+	w.logf("burnban: OTLP collector warning for %s: %s", signal, safeLabel(message))
 }
 
 func (w *Worker) loadCheckpoint() error {
@@ -259,27 +375,42 @@ func (w *Worker) loadCheckpoint() error {
 	if err != nil {
 		return fmt.Errorf("load telemetry checkpoint: %w", err)
 	}
+	legacyCheckpoint := false
 	if raw != "" {
 		if len(raw) > 4096 || json.Unmarshal([]byte(raw), &w.checkpoint) != nil ||
-			w.checkpoint.SchemaVersion != SchemaVersion || w.checkpoint.AckedThrough < 0 ||
-			w.checkpoint.DroppedThrough < 0 || w.checkpoint.DroppedRows < 0 {
+			(w.checkpoint.SchemaVersion != checkpointSchemaVersion && w.checkpoint.SchemaVersion != SchemaVersion) ||
+			w.checkpoint.AckedThrough < 0 ||
+			w.checkpoint.DroppedThrough < 0 || w.checkpoint.DroppedRows < 0 ||
+			w.checkpoint.TracesThrough < 0 || w.checkpoint.MetricsThrough < 0 ||
+			w.checkpoint.RejectedSpans < 0 || w.checkpoint.RejectedPoints < 0 {
 			return fmt.Errorf("telemetry checkpoint is corrupt; remove setting %s after investigation", w.checkpointKey)
 		}
+		legacyCheckpoint = w.checkpoint.SchemaVersion == SchemaVersion
 	}
-	if w.checkpoint.SchemaVersion == "" {
-		w.checkpoint.SchemaVersion = SchemaVersion
+	if legacyCheckpoint {
+		// v1 checkpoints written before signal-specific progress tracked a
+		// single terminal cursor. Preserve it for both signals so an upgrade
+		// never re-exports or resurrects rows already classified by that worker.
+		legacyCursor := max(w.checkpoint.AckedThrough, w.checkpoint.DroppedThrough)
+		w.checkpoint.TracesThrough = legacyCursor
+		w.checkpoint.MetricsThrough = legacyCursor
 	}
+	w.checkpoint.SchemaVersion = checkpointSchemaVersion
 	w.loaded = true
 	w.statsMu.Lock()
 	w.stats.AckedThrough = w.checkpoint.AckedThrough
 	w.stats.DroppedThrough = w.checkpoint.DroppedThrough
+	w.stats.TracesThrough = w.checkpoint.TracesThrough
+	w.stats.MetricsThrough = w.checkpoint.MetricsThrough
 	w.stats.DroppedRows = w.checkpoint.DroppedRows
+	w.stats.RejectedSpans = w.checkpoint.RejectedSpans
+	w.stats.RejectedPoints = w.checkpoint.RejectedPoints
 	w.statsMu.Unlock()
 	return nil
 }
 
 func (w *Worker) saveCheckpoint(next checkpoint) error {
-	next.SchemaVersion = SchemaVersion
+	next.SchemaVersion = checkpointSchemaVersion
 	next.UpdatedAt = time.Now().UTC().Format(time.RFC3339Nano)
 	encoded, err := json.Marshal(next)
 	if err != nil {
@@ -292,7 +423,11 @@ func (w *Worker) saveCheckpoint(next checkpoint) error {
 	w.statsMu.Lock()
 	w.stats.AckedThrough = next.AckedThrough
 	w.stats.DroppedThrough = next.DroppedThrough
+	w.stats.TracesThrough = next.TracesThrough
+	w.stats.MetricsThrough = next.MetricsThrough
 	w.stats.DroppedRows = next.DroppedRows
+	w.stats.RejectedSpans = next.RejectedSpans
+	w.stats.RejectedPoints = next.RejectedPoints
 	w.statsMu.Unlock()
 	return nil
 }
@@ -345,5 +480,8 @@ func (w *Worker) failed(err error) {
 
 func (s Stats) String() string {
 	parts := []string{s.State, fmt.Sprintf("pending=%d", s.PendingRows), fmt.Sprintf("dropped=%d", s.DroppedRows)}
+	if s.RejectedSpans > 0 || s.RejectedPoints > 0 {
+		parts = append(parts, fmt.Sprintf("rejected_spans=%d", s.RejectedSpans), fmt.Sprintf("rejected_points=%d", s.RejectedPoints))
+	}
 	return strings.Join(parts, " ")
 }

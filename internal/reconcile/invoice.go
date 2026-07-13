@@ -72,6 +72,11 @@ type Invoice struct {
 	SourceFormat Format `json:"source_format"`
 	ContentHash  string `json:"content_sha256"`
 	Lines        []Line `json:"lines"`
+
+	// effectiveMappingHash is intentionally outside the public invoice/v1
+	// representation. ContentHash remains the digest of the source bytes while
+	// the store combines this value with ContentHash for replay identity.
+	effectiveMappingHash string
 }
 
 type CSVOptions struct {
@@ -88,6 +93,11 @@ var logicalFields = map[string]struct{}{
 	"line_id": {}, "occurred_at": {}, "billed_usd": {}, "model": {},
 	"service_tier": {}, "region": {}, "line_type": {},
 	"reference_line_id": {}, "description": {},
+}
+
+var logicalFieldOrder = []string{
+	"line_id", "occurred_at", "billed_usd", "model", "service_tier",
+	"region", "line_type", "reference_line_id", "description",
 }
 
 func preset(format Format) (map[string]string, error) {
@@ -143,6 +153,9 @@ func ParseMapping(value string) (map[string]string, error) {
 		if source == "" {
 			return nil, fmt.Errorf("mapping for %q has an empty source header", logical)
 		}
+		if err := validateText("source header", source, 200, false); err != nil {
+			return nil, fmt.Errorf("mapping for %q: %w", logical, err)
+		}
 		if _, duplicate := out[logical]; duplicate {
 			return nil, fmt.Errorf("duplicate mapping for %q", logical)
 		}
@@ -156,6 +169,88 @@ func ParseMapping(value string) (map[string]string, error) {
 	return out, nil
 }
 
+func resolveMapping(format Format, overlay map[string]string) (map[string]string, string, error) {
+	mapping, err := preset(format)
+	if err != nil {
+		return nil, "", err
+	}
+	for logical, source := range overlay {
+		if _, ok := logicalFields[logical]; !ok {
+			return nil, "", fmt.Errorf("unknown logical field %q", logical)
+		}
+		mapping[logical] = source
+	}
+
+	usedSource := make(map[string]string, len(mapping))
+	for _, logical := range logicalFieldOrder {
+		source := mapping[logical]
+		if source == "" {
+			return nil, "", fmt.Errorf("mapping for %q has an empty source header", logical)
+		}
+		if source != strings.TrimSpace(source) {
+			return nil, "", fmt.Errorf("mapping for %q has surrounding whitespace", logical)
+		}
+		if err := validateText("source header", source, 200, false); err != nil {
+			return nil, "", fmt.Errorf("mapping for %q: %w", logical, err)
+		}
+		folded := strings.ToLower(source)
+		if previous, duplicate := usedSource[folded]; duplicate {
+			return nil, "", fmt.Errorf("source header %q is mapped to both %q and %q", source, previous, logical)
+		}
+		usedSource[folded] = logical
+	}
+	return mapping, mappingHash(mapping), nil
+}
+
+func mappingHash(mapping map[string]string) string {
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, "burnban.invoice.csv-mapping/v1\x00")
+	for _, logical := range logicalFieldOrder {
+		_, _ = io.WriteString(hash, logical)
+		_, _ = io.WriteString(hash, "\x00")
+		// CSV header lookup is case-insensitive, so semantically equivalent
+		// casing must not create a distinct replay identity.
+		_, _ = io.WriteString(hash, strings.ToLower(mapping[logical]))
+		_, _ = io.WriteString(hash, "\x00")
+	}
+	return hex.EncodeToString(hash.Sum(nil))
+}
+
+// ImportIdentity returns the domain-separated replay identity for an invoice.
+// CSV parsers bind it to the complete post-overlay mapping. Invoices built by
+// API callers use their source format's preset, preserving the invoice/v1 JSON
+// schema and the raw-byte meaning of ContentHash.
+func ImportIdentity(invoice Invoice) (string, error) {
+	mappingDigest := invoice.effectiveMappingHash
+	if mappingDigest == "" {
+		_, digest, err := resolveMapping(invoice.SourceFormat, nil)
+		if err != nil {
+			return "", err
+		}
+		mappingDigest = digest
+	}
+	if !validSHA256(invoice.ContentHash) {
+		return "", errors.New("invoice content_sha256 must be a SHA-256 hex digest")
+	}
+	if !validSHA256(mappingDigest) {
+		return "", errors.New("invoice mapping identity must be a SHA-256 hex digest")
+	}
+	hash := sha256.New()
+	_, _ = io.WriteString(hash, "burnban.invoice.import-identity/v2\x00")
+	_, _ = io.WriteString(hash, invoice.ContentHash)
+	_, _ = io.WriteString(hash, "\x00")
+	_, _ = io.WriteString(hash, mappingDigest)
+	return hex.EncodeToString(hash.Sum(nil)), nil
+}
+
+func validSHA256(value string) bool {
+	if len(value) != sha256.Size*2 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
+}
+
 func ParseCSV(r io.Reader, options CSVOptions) (Invoice, error) {
 	data, hash, err := boundedBytes(r)
 	if err != nil {
@@ -167,20 +262,14 @@ func ParseCSV(r io.Reader, options CSVOptions) (Invoice, error) {
 	if bytes.HasPrefix(data, []byte{0xef, 0xbb, 0xbf}) {
 		return Invoice{}, errors.New("invoice CSV must not contain a UTF-8 BOM")
 	}
-	mapping, err := preset(options.Format)
+	mapping, mappingDigest, err := resolveMapping(options.Format, options.Mapping)
 	if err != nil {
 		return Invoice{}, err
-	}
-	for logical, source := range options.Mapping {
-		if _, ok := logicalFields[logical]; !ok {
-			return Invoice{}, fmt.Errorf("unknown logical field %q", logical)
-		}
-		mapping[logical] = source
 	}
 	invoice := Invoice{
 		Schema: "burnban.invoice/v1", InvoiceID: options.InvoiceID,
 		Provider: strings.ToLower(options.Provider), Currency: strings.ToUpper(options.Currency),
-		SourceFormat: options.Format, ContentHash: hash,
+		SourceFormat: options.Format, ContentHash: hash, effectiveMappingHash: mappingDigest,
 	}
 	if invoice.Currency == "" {
 		invoice.Currency = "USD"
@@ -431,11 +520,11 @@ func ValidateInvoice(invoice Invoice) error {
 	if len(invoice.Lines) == 0 || len(invoice.Lines) > MaxImportRows {
 		return fmt.Errorf("invoice lines must contain between 1 and %d rows", MaxImportRows)
 	}
-	if len(invoice.ContentHash) != sha256.Size*2 {
+	if !validSHA256(invoice.ContentHash) {
 		return errors.New("invoice content_sha256 must be a SHA-256 hex digest")
 	}
-	if _, err := hex.DecodeString(invoice.ContentHash); err != nil || invoice.ContentHash != strings.ToLower(invoice.ContentHash) {
-		return errors.New("invoice content_sha256 must be a SHA-256 hex digest")
+	if _, err := ImportIdentity(invoice); err != nil {
+		return err
 	}
 	seen := map[string]struct{}{}
 	for i, line := range invoice.Lines {

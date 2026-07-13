@@ -125,8 +125,11 @@ Canonical API JSON uses schema `burnban.invoice/v1`; money remains a string:
 ```
 
 Import that payload with `--input json`. The same provider/invoice identity and
-same SHA-256 content is an idempotent replay. Reusing the identity with changed
-bytes is an immutable conflict.
+same SHA-256 content is an idempotent replay. CSV replay identity additionally
+binds the complete effective column mapping after preset overrides; correcting
+a mapping for the same bytes is therefore an immutable conflict instead of a
+false replay. The public `content_sha256` remains the digest of the unmodified
+source bytes, and `burnban.invoice/v1` remains unchanged.
 
 ## Reports and matching confidence
 

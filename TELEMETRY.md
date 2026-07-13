@@ -43,19 +43,25 @@ variable. Do not place credentials in the endpoint.
 
 The exporter is asynchronous. It polls already-committed SQLite receipts and
 has no callback on the provider request path. Collector failure therefore
-never blocks or rejects inference. Delivery is at least once: a sink-bound
-cursor advances only after both OTLP trace and metric requests succeed and the
-new cursor is durably written. A collector can see a duplicate when delivery
-succeeds but the local cursor write fails.
+never blocks or rejects inference. Delivery is at least once. Sink-bound trace
+and metric cursors advance independently after each request reaches a terminal
+OTLP response and the new cursor is durably written. This lets a lagging signal
+retry without resending a signal that was already accepted or partially
+accepted. A collector can still see a duplicate when delivery succeeds but the
+local cursor write fails.
 
 `--otlp-max-backlog` bounds pending receipts without creating a second disk
 queue. If collector downtime exceeds that bound, the oldest pending receipts
 are recorded on a separate dropped cursor, logged, exposed in the private
 control status, and included in the next `burnban.telemetry.dropped` metric.
-They are never labeled as delivered. OTLP partial-success responses are not
-retried, as required by the protocol; affected rows are likewise recorded as
-dropped. Retryable failures use bounded exponential backoff with jitter and
-honor a bounded `Retry-After` value.
+That gauge and `dropped_rows` count only rows discarded by this local backlog
+bound. They are never labeled as delivered. An OTLP partial-success response
+with a non-zero rejection count is terminal for that signal and is not retried,
+as required by the protocol; exact rejected span and metric-point totals are
+stored separately. An empty `partial_success` is full success, while a zero
+count with a message is a collector warning on a fully accepted request.
+Retryable failures use bounded exponential backoff with jitter and honor a
+bounded `Retry-After` value.
 
 ### Signal schema
 

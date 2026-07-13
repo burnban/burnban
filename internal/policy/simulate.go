@@ -285,9 +285,9 @@ func Simulate(compiled *Compiled, samples []HistoricalSample) SimulationReport {
 	report.PolicyRevision = compiled.Document.Metadata.Revision
 	report.PolicyDigest = compiled.Digest
 	sort.SliceStable(samples, func(i, j int) bool { return samples[i].Ts.Before(samples[j].Ts) })
-	history := map[string][]simEvent{}
+	history := map[ruleCounterKey][]simEvent{}
 	windowCursors := map[policyWindowKey]int{}
-	inFlight := map[string][]time.Time{}
+	inFlight := map[ruleCounterKey][]time.Time{}
 	var affected simulationAffectedAccumulator
 	var interactions simulationInteractionAccumulator
 	legacy := int64(0)

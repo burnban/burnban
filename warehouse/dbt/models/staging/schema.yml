@@ -8,7 +8,8 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['burnban.telemetry.v1']
+              arguments:
+                values: ['burnban.telemetry.v1']
       - name: request_id
         tests: [not_null]
       - name: observed_at
@@ -19,7 +20,8 @@ models:
         tests:
           - not_null
           - accepted_values:
-              values: ['authenticated', 'self_reported', 'unverified']
+              arguments:
+                values: ['authenticated', 'self_reported', 'unverified']
       - name: input_tokens
         tests: [not_null]
       - name: output_tokens

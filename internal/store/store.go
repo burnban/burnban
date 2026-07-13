@@ -161,6 +161,10 @@ func Open(path string) (*Store, error) {
 		db.Close()
 		return nil, err
 	}
+	if err := migrateReconciliationSchema(db); err != nil {
+		db.Close()
+		return nil, err
+	}
 	if _, err := db.Exec(optimizationSchema); err != nil {
 		db.Close()
 		return nil, err

@@ -38,6 +38,85 @@ func TestParseCSVPresetsAndExplicitMapping(t *testing.T) {
 	}
 }
 
+func TestParseCSVValidatesCompletePresetOverlay(t *testing.T) {
+	body := "id,usage_start_time,cost_usd\nline,2026-07-12T00:00:00Z,1\n"
+	for name, mapping := range map[string]map[string]string{
+		"exact collision":       {"line_id": "usage_start_time"},
+		"case-folded collision": {"line_id": "USAGE_START_TIME"},
+		"optional collision":    {"description": "cost_usd"},
+	} {
+		if _, err := ParseCSV(strings.NewReader(body), CSVOptions{
+			Format: FormatOpenAI, InvoiceID: "inv", Provider: "openai", Currency: "USD", Mapping: mapping,
+		}); err == nil {
+			t.Errorf("%s was accepted", name)
+		}
+	}
+
+	// A complete swap is unambiguous after both overrides have been applied and
+	// must not be rejected by validating one overlay entry at a time.
+	swapped, err := ParseCSV(strings.NewReader(
+		"id,usage_start_time,cost_usd\n2026-07-12T00:00:00Z,line,1\n"), CSVOptions{
+		Format: FormatOpenAI, InvoiceID: "inv", Provider: "openai", Currency: "USD",
+		Mapping: map[string]string{"line_id": "usage_start_time", "occurred_at": "id"},
+	})
+	if err != nil || len(swapped.Lines) != 1 || swapped.Lines[0].LineID != "line" {
+		t.Fatalf("complete mapping swap = %+v, %v", swapped, err)
+	}
+}
+
+func TestCSVImportIdentityBindsEveryEffectiveMappingField(t *testing.T) {
+	body := "id,usage_start_time,cost_usd,model,service_tier,region,type,reference_id,description," +
+		"alt_id,alt_time,alt_cost,alt_model,alt_tier,alt_region,alt_type,alt_reference,alt_description\n" +
+		"line,2026-07-12T00:00:00Z,1,model,tier,region,usage,,description," +
+		"other,2026-07-13T00:00:00Z,2,other-model,other-tier,other-region,usage,other-ref,other-description\n"
+	options := CSVOptions{Format: FormatOpenAI, InvoiceID: "inv", Provider: "openai", Currency: "USD"}
+	base, err := ParseCSV(strings.NewReader(body), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	baseIdentity, err := ImportIdentity(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Header lookup is case-insensitive, so spelling-only changes are the same
+	// effective mapping and retain exact replay identity.
+	options.Mapping = map[string]string{"line_id": "ID"}
+	equivalent, err := ParseCSV(strings.NewReader(body), options)
+	if err != nil {
+		t.Fatal(err)
+	}
+	equivalentIdentity, err := ImportIdentity(equivalent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if equivalentIdentity != baseIdentity || equivalent.ContentHash != base.ContentHash {
+		t.Fatalf("case-equivalent mapping changed identity: base=%s equivalent=%s", baseIdentity, equivalentIdentity)
+	}
+
+	for logical, alternate := range map[string]string{
+		"line_id": "alt_id", "occurred_at": "alt_time", "billed_usd": "alt_cost",
+		"model": "alt_model", "service_tier": "alt_tier", "region": "alt_region",
+		"line_type": "alt_type", "reference_line_id": "alt_reference", "description": "alt_description",
+	} {
+		options.Mapping = map[string]string{logical: alternate}
+		changed, err := ParseCSV(strings.NewReader(body), options)
+		if err != nil {
+			t.Fatalf("map %s: %v", logical, err)
+		}
+		identity, err := ImportIdentity(changed)
+		if err != nil {
+			t.Fatalf("identity for %s: %v", logical, err)
+		}
+		if changed.ContentHash != base.ContentHash {
+			t.Errorf("map %s changed raw content hash", logical)
+		}
+		if identity == baseIdentity {
+			t.Errorf("map %s did not change import identity", logical)
+		}
+	}
+}
+
 func TestParseCSVAdjustmentsAndMoneyRules(t *testing.T) {
 	body := "line_id,occurred_at,billed_usd,line_type,reference_line_id\n" +
 		"u,2026-07-12T00:00:00Z,2,usage,\n" +
@@ -93,6 +172,9 @@ func TestParseCSVRejectsAmbiguityAndUnsafeData(t *testing.T) {
 	}
 	if _, err := ParseMapping("line_id=id,occurred_at=ID"); err == nil {
 		t.Fatal("duplicate source mapping accepted")
+	}
+	if _, err := ParseMapping("line_id=unsafe\u202e"); err == nil {
+		t.Fatal("unsafe source mapping accepted")
 	}
 	oversizedField := strings.Repeat("x", MaxFieldBytes+1)
 	if err := base("line_id,occurred_at,billed_usd,ignored", "a,2026-01-01T00:00:00Z,1,"+oversizedField); err == nil {

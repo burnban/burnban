@@ -21,6 +21,7 @@ CREATE TABLE IF NOT EXISTS invoice_imports (
 	currency TEXT NOT NULL CHECK(currency='USD'),
 	source_format TEXT NOT NULL,
 	content_sha256 TEXT NOT NULL,
+	import_identity_sha256 TEXT NOT NULL DEFAULT '',
 	imported_at TEXT NOT NULL,
 	row_count INTEGER NOT NULL CHECK(row_count > 0),
 	billed_micros INTEGER NOT NULL,
@@ -67,7 +68,23 @@ CREATE TRIGGER IF NOT EXISTS reconciliation_adjustments_no_delete BEFORE DELETE 
 BEGIN SELECT RAISE(ABORT, 'reconciliation adjustments are immutable'); END;
 `
 
-var ErrInvoiceConflict = errors.New("invoice ID was already imported with different content")
+var ErrInvoiceConflict = errors.New("invoice ID was already imported with different content or mapping")
+
+func migrateReconciliationSchema(db *sql.DB) error {
+	var present int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM pragma_table_info('invoice_imports')
+		WHERE name='import_identity_sha256'`).Scan(&present); err != nil {
+		return fmt.Errorf("inspect reconciliation schema: %w", err)
+	}
+	if present != 0 {
+		return nil
+	}
+	if _, err := db.Exec(`ALTER TABLE invoice_imports
+		ADD COLUMN import_identity_sha256 TEXT NOT NULL DEFAULT ''`); err != nil {
+		return fmt.Errorf("migrate invoice_imports.import_identity_sha256: %w", err)
+	}
+	return nil
+}
 
 type InvoiceImportResult struct {
 	ImportID int64 `json:"import_id"`
@@ -77,7 +94,8 @@ type InvoiceImportResult struct {
 
 // ImportInvoice appends invoice evidence and adjustments in one transaction.
 // An exact replay is idempotent. Reusing an invoice identity with different
-// bytes fails closed and never replaces the first import.
+// bytes or a different effective CSV mapping fails closed and never replaces
+// the first import.
 func (s *Store) ImportInvoice(invoice reconcile.Invoice, importedAt time.Time) (InvoiceImportResult, error) {
 	s.reconciliationMu.Lock()
 	defer s.reconciliationMu.Unlock()
@@ -86,6 +104,10 @@ func (s *Store) ImportInvoice(invoice reconcile.Invoice, importedAt time.Time) (
 	}
 	if importedAt.IsZero() {
 		return InvoiceImportResult{}, errors.New("imported_at is required")
+	}
+	importIdentity, err := reconcile.ImportIdentity(invoice)
+	if err != nil {
+		return InvoiceImportResult{}, err
 	}
 	var total int64
 	for _, line := range invoice.Lines {
@@ -100,24 +122,48 @@ func (s *Store) ImportInvoice(invoice reconcile.Invoice, importedAt time.Time) (
 		return InvoiceImportResult{}, err
 	}
 	defer tx.Rollback()
-	var existingID int64
-	var existingHash string
-	err = tx.QueryRow(`SELECT id, content_sha256 FROM invoice_imports WHERE provider=? AND invoice_id=?`, invoice.Provider, invoice.InvoiceID).Scan(&existingID, &existingHash)
-	if err == nil {
-		if len(existingHash) == len(invoice.ContentHash) && subtle.ConstantTimeCompare([]byte(existingHash), []byte(invoice.ContentHash)) == 1 {
-			return InvoiceImportResult{ImportID: existingID, Rows: len(invoice.Lines), Replayed: true}, tx.Commit()
-		}
-		return InvoiceImportResult{}, ErrInvoiceConflict
-	}
-	if !errors.Is(err, sql.ErrNoRows) {
-		return InvoiceImportResult{}, err
-	}
 	result, err := tx.Exec(`INSERT INTO invoice_imports
-		(provider,invoice_id,currency,source_format,content_sha256,imported_at,row_count,billed_micros)
-		VALUES(?,?,?,?,?,?,?,?)`, invoice.Provider, invoice.InvoiceID, invoice.Currency,
-		string(invoice.SourceFormat), invoice.ContentHash, importedAt.UTC().Format(time.RFC3339Nano), len(invoice.Lines), total)
+		(provider,invoice_id,currency,source_format,content_sha256,import_identity_sha256,imported_at,row_count,billed_micros)
+		VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(provider,invoice_id) DO NOTHING`, invoice.Provider, invoice.InvoiceID,
+		invoice.Currency, string(invoice.SourceFormat), invoice.ContentHash, importIdentity,
+		importedAt.UTC().Format(time.RFC3339Nano), len(invoice.Lines), total)
 	if err != nil {
 		return InvoiceImportResult{}, err
+	}
+	inserted, err := result.RowsAffected()
+	if err != nil {
+		return InvoiceImportResult{}, err
+	}
+	if inserted == 0 {
+		var existingID int64
+		var existingHash, existingIdentity string
+		if err := tx.QueryRow(`SELECT id, content_sha256, import_identity_sha256
+			FROM invoice_imports WHERE provider=? AND invoice_id=?`, invoice.Provider, invoice.InvoiceID).
+			Scan(&existingID, &existingHash, &existingIdentity); err != nil {
+			return InvoiceImportResult{}, err
+		}
+		sameContent := sameInvoiceDigest(existingHash, invoice.ContentHash)
+		sameIdentity := sameInvoiceDigest(existingIdentity, importIdentity)
+		if existingIdentity == "" {
+			// Legacy rows predate mapping-bound identities, so their preset or
+			// custom mapping cannot be reconstructed. Raw content plus the immutable
+			// normalized rows below is the strongest replay evidence they contain.
+			sameIdentity = true
+		}
+		if sameContent && sameIdentity {
+			// Do not trust a caller-supplied content digest to stand in for the
+			// normalized invoice. This also supplies the compatibility proof for
+			// legacy rows without weakening mapping checks on new imports.
+			var sameNormalized bool
+			sameNormalized, err = importedInvoiceMatches(tx, existingID, invoice)
+			if err != nil {
+				return InvoiceImportResult{}, err
+			}
+			if sameNormalized {
+				return InvoiceImportResult{ImportID: existingID, Rows: len(invoice.Lines), Replayed: true}, tx.Commit()
+			}
+		}
+		return InvoiceImportResult{}, ErrInvoiceConflict
 	}
 	importID, err := result.LastInsertId()
 	if err != nil {
@@ -143,6 +189,54 @@ func (s *Store) ImportInvoice(invoice reconcile.Invoice, importedAt time.Time) (
 		return InvoiceImportResult{}, err
 	}
 	return InvoiceImportResult{ImportID: importID, Rows: len(invoice.Lines)}, nil
+}
+
+func sameInvoiceDigest(left, right string) bool {
+	return len(left) == len(right) && subtle.ConstantTimeCompare([]byte(left), []byte(right)) == 1
+}
+
+func importedInvoiceMatches(tx *sql.Tx, importID int64, invoice reconcile.Invoice) (bool, error) {
+	rows, err := tx.Query(`SELECT line_id,occurred_at,billed_micros,model,service_tier,region,
+			line_type,reference_line_id,description FROM (
+			SELECT line_id,occurred_at,billed_micros,model,service_tier,region,
+				'usage' AS line_type,'' AS reference_line_id,description
+			FROM invoice_lines WHERE import_id=?
+			UNION ALL
+			SELECT line_id,occurred_at,amount_micros,model,service_tier,region,
+				adjustment_type AS line_type,reference_line_id,description
+			FROM reconciliation_adjustments WHERE import_id=?
+		) ORDER BY line_id`, importID, importID)
+	if err != nil {
+		return false, err
+	}
+	defer rows.Close()
+
+	incoming := append([]reconcile.Line(nil), invoice.Lines...)
+	sort.Slice(incoming, func(i, j int) bool { return incoming[i].LineID < incoming[j].LineID })
+	matched := 0
+	for rows.Next() {
+		if matched >= len(incoming) {
+			return false, nil
+		}
+		var lineID, occurredAt, model, serviceTier, region, lineType, referenceLineID, description string
+		var billedMicros int64
+		if err := rows.Scan(&lineID, &occurredAt, &billedMicros, &model, &serviceTier, &region,
+			&lineType, &referenceLineID, &description); err != nil {
+			return false, err
+		}
+		line := incoming[matched]
+		if lineID != line.LineID || occurredAt != line.OccurredAt.UTC().Format(reconcile.TimestampFormat) ||
+			billedMicros != line.BilledMicros || model != line.Model || serviceTier != line.ServiceTier ||
+			region != line.Region || lineType != string(line.Type) || referenceLineID != line.ReferenceLineID ||
+			description != line.Description {
+			return false, nil
+		}
+		matched++
+	}
+	if err := rows.Err(); err != nil {
+		return false, err
+	}
+	return matched == len(incoming), nil
 }
 
 type ReconciliationReport struct {

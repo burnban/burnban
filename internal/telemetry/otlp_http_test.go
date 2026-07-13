@@ -50,8 +50,12 @@ func TestHTTPExporterRetriesFakeCollectorAndReadsAuthFromEnv(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}}); err != nil {
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	if err != nil {
 		t.Fatal(err)
+	}
+	if !result.Traces.Terminal || !result.Metrics.Terminal {
+		t.Fatalf("non-terminal successful result = %+v", result)
 	}
 	if traces.Load() != 2 || metrics.Load() != 1 {
 		t.Fatalf("collector calls traces=%d metrics=%d", traces.Load(), metrics.Load())
@@ -80,7 +84,7 @@ func TestHTTPExporterDoesNotFollowRedirectWithAuthorization(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	_, err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
 	if err == nil || !strings.Contains(err.Error(), "non-retryable HTTP 307") {
 		t.Fatalf("redirect error = %v", err)
 	}
@@ -89,22 +93,144 @@ func TestHTTPExporterDoesNotFollowRedirectWithAuthorization(t *testing.T) {
 	}
 }
 
-func TestHTTPExporterPartialSuccessIsExplicitNonRetryableDrop(t *testing.T) {
-	var calls atomic.Int64
-	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		calls.Add(1)
+func TestHTTPExporterPartialSuccessIsSignalSpecificAndNonRetryable(t *testing.T) {
+	var traces, metrics atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"partialSuccess":{"rejectedSpans":"1","errorMessage":"synthetic"}}`))
+		if r.URL.Path == "/v1/traces" {
+			traces.Add(1)
+			_, _ = w.Write([]byte(`{"partialSuccess":{"rejectedSpans":"1","errorMessage":"synthetic"}}`))
+			return
+		}
+		metrics.Add(1)
+		_, _ = w.Write([]byte(`{}`))
 	}))
 	defer collector.Close()
 	exporter, err := NewHTTPExporter(HTTPConfig{Endpoint: collector.URL, MaxAttempts: 5})
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
 	var partial *PartialRejectError
-	if !errors.As(err, &partial) || calls.Load() != 1 {
-		t.Fatalf("partial error=%v calls=%d", err, calls.Load())
+	if !errors.As(err, &partial) || partial.Signal != "traces" || partial.RejectedItems != 1 {
+		t.Fatalf("partial error=%v result=%+v", err, result)
+	}
+	if traces.Load() != 1 || metrics.Load() != 1 || !result.Traces.Terminal || !result.Traces.Failed ||
+		result.Traces.RejectedItems != 1 || result.Traces.Warning != "synthetic" ||
+		!result.Metrics.Terminal || result.Metrics.Failed {
+		t.Fatalf("partial signal result=%+v traces=%d metrics=%d", result, traces.Load(), metrics.Load())
+	}
+}
+
+func TestHTTPExporterZeroRejectedWarningIsFullSuccess(t *testing.T) {
+	var calls atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/traces" {
+			_, _ = w.Write([]byte(`{"partialSuccess":{"rejectedSpans":"0","errorMessage":"use a newer attribute"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"partialSuccess":{}}`))
+	}))
+	defer collector.Close()
+	exporter, err := NewHTTPExporter(HTTPConfig{Endpoint: collector.URL, MaxAttempts: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	if err != nil || calls.Load() != 2 || result.Traces.Warning != "use a newer attribute" ||
+		result.Traces.Failed || result.Metrics.Failed || !result.Traces.Terminal || !result.Metrics.Terminal {
+		t.Fatalf("warning result=%+v calls=%d err=%v", result, calls.Load(), err)
+	}
+}
+
+func TestHTTPExporterExhaustedTraceRetryStillAttemptsMetrics(t *testing.T) {
+	var traces, metrics atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/v1/traces" {
+			traces.Add(1)
+			http.Error(w, "retry", http.StatusServiceUnavailable)
+			return
+		}
+		metrics.Add(1)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer collector.Close()
+	exporter, err := NewHTTPExporter(HTTPConfig{
+		Endpoint: collector.URL, MaxAttempts: 2, BaseBackoff: 10 * time.Millisecond,
+		sleep: func(context.Context, time.Duration) error { return nil },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	if err == nil || traces.Load() != 2 || metrics.Load() != 1 || result.Traces.Terminal ||
+		!result.Traces.Failed || !result.Metrics.Terminal || result.Metrics.Failed {
+		t.Fatalf("independent result=%+v traces=%d metrics=%d err=%v", result, traces.Load(), metrics.Load(), err)
+	}
+}
+
+func TestHTTPExporterRejectsImpossiblePartialCount(t *testing.T) {
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		if r.URL.Path == "/v1/traces" {
+			_, _ = w.Write([]byte(`{"partialSuccess":{"rejectedSpans":"2"}}`))
+			return
+		}
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer collector.Close()
+	exporter, err := NewHTTPExporter(HTTPConfig{Endpoint: collector.URL, MaxAttempts: 3})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	var permanent *permanentExportError
+	var partial *PartialRejectError
+	if !errors.As(err, &permanent) || errors.As(err, &partial) || result.Traces.RejectedItems != 0 ||
+		!result.Traces.Terminal || !result.Traces.Failed || !result.Metrics.Terminal {
+		t.Fatalf("impossible rejection result=%+v err=%v", result, err)
+	}
+}
+
+func TestParseSuccessResponsePartialSemantics(t *testing.T) {
+	tests := []struct {
+		name, signal, body string
+		rejected           int64
+		warning            string
+		partial            bool
+		permanent          bool
+	}{
+		{name: "unset", signal: "traces", body: `{}`},
+		{name: "null", signal: "traces", body: `{"partialSuccess":null}`},
+		{name: "empty", signal: "traces", body: `{"partialSuccess":{}}`},
+		{name: "zero string", signal: "traces", body: `{"partialSuccess":{"rejectedSpans":"0"}}`},
+		{name: "trace warning", signal: "traces", body: `{"partialSuccess":{"rejectedSpans":0,"errorMessage":"warning"}}`, warning: "warning"},
+		{name: "metric warning", signal: "metrics", body: `{"partialSuccess":{"rejectedDataPoints":"0","errorMessage":"warning"}}`, warning: "warning"},
+		{name: "trace partial", signal: "traces", body: `{"partialSuccess":{"rejectedSpans":"2"}}`, rejected: 2, partial: true},
+		{name: "metric partial", signal: "metrics", body: `{"partialSuccess":{"rejectedDataPoints":3}}`, rejected: 3, partial: true},
+		{name: "negative", signal: "traces", body: `{"partialSuccess":{"rejectedSpans":"-1"}}`, permanent: true},
+		{name: "fraction", signal: "metrics", body: `{"partialSuccess":{"rejectedDataPoints":1.5}}`, permanent: true},
+		{name: "trace field in metrics", signal: "metrics", body: `{"partialSuccess":{"rejectedSpans":"1"}}`, permanent: true},
+		{name: "metric field in traces", signal: "traces", body: `{"partialSuccess":{"rejectedDataPoints":"1"}}`, permanent: true},
+		{name: "unknown partial field", signal: "traces", body: `{"partialSuccess":{"rejectedSpans":"0","futureCount":"1"}}`, permanent: true},
+		{name: "invalid message", signal: "traces", body: `{"partialSuccess":{"errorMessage":7}}`, permanent: true},
+		{name: "wrong shape", signal: "traces", body: `{"partialSuccess":true}`, permanent: true},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			outcome, err := parseSuccessResponse([]byte(test.body), test.signal)
+			var partial *PartialRejectError
+			var permanent *permanentExportError
+			if errors.As(err, &partial) != test.partial || errors.As(err, &permanent) != test.permanent {
+				t.Fatalf("outcome=%+v err=%T %v", outcome, err, err)
+			}
+			if outcome.RejectedItems != test.rejected || outcome.Message != test.warning {
+				t.Fatalf("outcome=%+v", outcome)
+			}
+		})
 	}
 }
 
@@ -120,10 +246,28 @@ func TestHTTPExporterRejectsMalformedSuccessWithoutRetry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
 	var permanent *permanentExportError
-	if !errors.As(err, &permanent) || calls.Load() != 1 {
-		t.Fatalf("malformed-success error=%v calls=%d", err, calls.Load())
+	if !errors.As(err, &permanent) || calls.Load() != 2 || !result.Traces.Terminal || !result.Metrics.Terminal {
+		t.Fatalf("malformed-success result=%+v error=%v calls=%d", result, err, calls.Load())
+	}
+}
+
+func TestHTTPExporterRejectsEmptySuccessBody(t *testing.T) {
+	var calls atomic.Int64
+	collector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer collector.Close()
+	exporter, err := NewHTTPExporter(HTTPConfig{Endpoint: collector.URL, MaxAttempts: 4})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	var permanent *permanentExportError
+	if !errors.As(err, &permanent) || calls.Load() != 2 || !result.Traces.Terminal || !result.Metrics.Terminal {
+		t.Fatalf("empty-success result=%+v error=%v calls=%d", result, err, calls.Load())
 	}
 }
 
@@ -138,7 +282,7 @@ func TestAuthorizationValidationNeverReflectsSecret(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
+	_, err = exporter.Export(context.Background(), Batch{Events: []Event{fixtureEvent()}})
 	if err == nil || strings.Contains(err.Error(), "secret") || strings.Contains(err.Error(), "smuggled") {
 		t.Fatalf("authorization error leaked value: %v", err)
 	}
