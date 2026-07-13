@@ -235,8 +235,14 @@ func readCodexRollout(scanner *fileScanner, path string) (codexRollout, error) {
 	err := scanner.eachLine(path, func(line []byte) {
 		isFirst := firstPhysicalLine
 		firstPhysicalLine = false
-		if !isFirst && !bytes.Contains(line, []byte(`"session_meta"`)) &&
-			!bytes.Contains(line, []byte(`"turn_context"`)) && !bytes.Contains(line, []byte(`"token_count"`)) {
+		relevant := isFirst || bytes.Contains(line, []byte(`"session_meta"`)) ||
+			bytes.Contains(line, []byte(`"turn_context"`)) || bytes.Contains(line, []byte(`"token_count"`))
+		if !relevant {
+			// A torn line can end before its type marker. Validate every physical
+			// JSONL record so an incomplete parent projection never looks exact.
+			if !json.Valid(line) {
+				rollout.MetadataValid = false
+			}
 			return
 		}
 		var v codexLine

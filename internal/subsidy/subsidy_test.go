@@ -485,7 +485,7 @@ func TestScanCodexTornParentFailsClosed(t *testing.T) {
 	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
 {"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
 {"timestamp":"2026-07-05T10:00:02.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":20}}}}
-{"timestamp":"2026-07-05T10:00:03.000Z","type":"event_msg","payload":{"type":"token_count"
+{"timestamp":"2026-07-05T10:00:03.000Z","type":"event_
 `)
 	writeLog(t, day, "rollout-child.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":"cli","forked_from_id":"parent"}}
 {"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
