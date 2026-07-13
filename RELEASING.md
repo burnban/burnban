@@ -5,8 +5,9 @@ Native Linux package and repository signing is documented in
 protected GPG identity and has no unsigned `.deb`/`.rpm` fallback.
 
 Only maintainers with protected-tag and release-environment access may publish
-Burnban releases. Releases are built by GitHub Actions from an annotated `v*`
-tag; binaries built on a workstation are never uploaded as official artifacts.
+Burnban releases. Releases are built by GitHub Actions only from a signed
+stable `vX.Y.Z` or release-candidate `vX.Y.Z-rc.N` tag; binaries built on a
+workstation are never uploaded as official artifacts.
 
 ## First public release
 
@@ -45,8 +46,14 @@ Create and push an annotated semantic-version tag, for example:
 
 ```sh
 git tag -s v0.4.0 -m "burnban v0.4.0"
+git verify-tag v0.4.0
 git push burnban v0.4.0
 ```
+
+The workflow pins the expected signer fingerprint and imports
+`.github/release-signing-key.asc` into a fresh keyring before running
+`git verify-tag`. A signer rotation must update both files in a reviewed,
+protected-main change before any tag is created.
 
 Wait for the canonical publish and anonymous-install verification to pass, then
 mirror that exact annotated tag to the private backup remotes. Their workflows
