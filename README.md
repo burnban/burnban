@@ -32,10 +32,10 @@ Release installers verify the archive against published SHA-256 checksums. For a
 
 ## Price the plans you already use
 
-Claude Code, Codex, Gemini CLI, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
+Claude Code, Codex, Gemini CLI, OpenCode, Hermes Agent, OpenClaw, and Goose retain local token usage. Burnban reads those stores in place, read-only, and prices input, output, cache-read, and cache-write tokens with its dated API table:
 
 ```sh
-burnban subsidy                 # auto-detect all six sources; last 30 days
+burnban subsidy                 # auto-detect all seven sources; last 30 days
 burnban subsidy --since 7d      # another window
 burnban subsidy --daily --json  # daily detail or machine-readable output
 ```
@@ -44,7 +44,7 @@ The $4,173.49 result is a real machine's last 30 days, not a provider invoice. T
 
 Local readers implement a versioned, metadata-only [source adapter contract](SOURCE_ADAPTERS.md). Each adapter is read-only, offline, resource-bounded, fixture-tested, and declares its privacy behavior. The registry remains compile-time; Burnban never downloads or executes plugins.
 
-Gemini CLI history does not prove whether API-key or Vertex usage was free-tier or billed. Burnban therefore keeps it in the API-equivalent comparison by default; pass `--metered gemini-cli` only when you know the selected traffic was billed.
+Gemini CLI and OpenCode histories do not prove whether the selected traffic was subscription/free-tier usage or billed to an API key. Burnban therefore keeps them in the API-equivalent comparison by default; pass `--metered gemini-cli` or `--metered opencode` only when you know the selected traffic was billed. OpenCode's database path can be overridden with `--opencode-db`.
 
 ## Proxy quickstart
 
@@ -122,7 +122,7 @@ What it sees: request metadata and provider usage frames needed to meter live tr
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, last-hour spend, and every budget window. Redirected output is plain text; `--once` prints one snapshot.
 - **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste.
 - **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
-- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
+- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model input/output/cache tokens and API-equivalent prices.
 - **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst velocity fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
 - **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active dollar guardrails fail safe around accounting gaps.
 - **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state.

@@ -48,6 +48,7 @@ func TestPublicAdapterContractIntegratesWithReport(t *testing.T) {
 			"claude-code": filepath.Join(home, "missing-claude"),
 			"codex":       filepath.Join(home, "missing-codex"),
 			"gemini-cli":  filepath.Join(home, "missing-gemini"),
+			"opencode":    filepath.Join(home, "missing-opencode"),
 			"hermes":      filepath.Join(home, "missing-hermes"),
 			"openclaw":    filepath.Join(home, "missing-openclaw"),
 			"goose":       filepath.Join(home, "missing-goose"),
