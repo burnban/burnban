@@ -167,6 +167,7 @@ func TestScanCursorOversizedRecordIsNotDecoded(t *testing.T) {
 }
 
 func TestDefaultCursorDB(t *testing.T) {
+	t.Setenv("XDG_CONFIG_HOME", "")
 	home := filepath.Join("home", "user")
 	got := DefaultCursorDB(home)
 	switch runtime.GOOS {
