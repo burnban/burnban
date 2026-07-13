@@ -33,6 +33,8 @@ func cmdSubsidy(args []string) error {
 	daily := fs.Bool("daily", false, "per-day breakdown")
 	share := fs.Bool("share", false, "compact screenshot-ready card (defaults to a $200/mo plan comparison)")
 	asJSON := fs.Bool("json", false, "machine-readable output")
+	meteredArg := fs.String("metered", "", "comma-separated sources billed per token, not by subscription (e.g. claude-code,codex); auto-detected from API-key auth otherwise")
+	noAutoMetered := fs.Bool("no-auto-metered", false, "do not auto-classify sources as metered from current API-key auth state")
 	maxFiles := fs.Int("max-files", 5_000, "maximum local log files scanned per source")
 	maxScanMB := fs.Int64("max-scan-mb", 512, "maximum local log MiB scanned per source")
 	maxLineMB := fs.Int("max-line-mb", 32, "maximum size of one JSONL record in MiB")
@@ -60,11 +62,16 @@ func cmdSubsidy(args []string) error {
 	if err != nil {
 		return err
 	}
+	metered := parseMeteredList(*meteredArg)
+	if !*noAutoMetered {
+		metered = append(metered, subsidy.DetectMeteredProviders(home)...)
+	}
 	until := time.Now()
 	report, err := subsidy.BuildReport(prices, subsidy.ReportOptions{
 		Since: from, Until: until,
 		ClaudeDir: *claudeDir, CodexDir: *codexDir,
 		HermesDB: *hermesDB, OpenClawDir: *openClawDir, GooseDB: *gooseDB,
+		MeteredProviders: metered,
 		ScanLimits: subsidy.ScanLimits{
 			MaxFiles: *maxFiles, MaxBytes: *maxScanMB << 20, MaxLineBytes: *maxLineMB << 20,
 			MaxRecords: *maxRecords, MaxDuration: *scanTimeout,
@@ -85,6 +92,7 @@ func cmdSubsidy(args []string) error {
 			"since": report.Since, "until": report.Until,
 			"providers": report.Providers, "totals": report.Totals,
 			"api_usd_total": report.APIUSD, "partial": report.Partial,
+			"subscription_usd": report.SubscriptionUSD, "metered_usd": report.MeteredUSD,
 			"unpriced_calls": report.UnpricedCalls, "unpriced_tokens": report.UnpricedTokens,
 			"unpriced_models": report.UnpricedModels, "pricing": prices.Diagnostics(),
 		})
@@ -112,14 +120,21 @@ func cmdSubsidy(args []string) error {
 		return nil
 	}
 
-	fmt.Printf("BURNBAN LOCAL USAGE — %s at API-equivalent prices\n\n", label)
-	fmt.Println("Auto-detected local agent logs. These dollar values show what the same")
-	fmt.Println("tokens cost at API rates; they are not a provider invoice.")
+	fmt.Printf("BURNBAN LOCAL USAGE — %s\n\n", label)
+	fmt.Println("Auto-detected local agent logs. Subscription usage is priced at API rates")
+	fmt.Println("for comparison; metered sources are real API spend that was already billed.")
 	for _, provider := range report.Providers {
 		if provider.Sessions == 0 && provider.Error == "" {
 			continue
 		}
-		fmt.Printf("\n%s  %s · %d sessions\n", subsidyTitle(provider.Provider), terminalText(provider.Dir, 240), provider.Sessions)
+		tag := "subscription · API-equivalent"
+		if provider.Metered {
+			tag = "REAL API SPEND · billed"
+			if provider.BillingProvider != "" {
+				tag = "REAL API SPEND · billed via " + provider.BillingProvider
+			}
+		}
+		fmt.Printf("\n%s  %s · %d sessions · %s\n", subsidyTitle(provider.Provider), terminalText(provider.Dir, 240), provider.Sessions, tag)
 		if provider.Detail != "" {
 			fmt.Printf("  scan issue: %s\n", terminalText(provider.Detail, 240))
 		} else if provider.Error != "" {
@@ -169,14 +184,18 @@ func cmdSubsidy(args []string) error {
 	if windowDays <= 0 {
 		windowDays = 1
 	}
-	monthlyPace := report.APIUSD / windowDays * 30
+	fmt.Printf("\nSUBSCRIPTION   $%.2f at API-equivalent prices (comparison, not a bill)\n", report.SubscriptionUSD)
+	if report.MeteredUSD > 0 {
+		fmt.Printf("REAL API SPEND $%.2f already billed per token (not a subsidy)\n", report.MeteredUSD)
+	}
+	subPace := report.SubscriptionUSD / windowDays * 30
 	fmt.Printf("\nTOTAL  $%.2f API equivalent", report.APIUSD)
-	if math.Abs(monthlyPace-report.APIUSD) > .5 {
-		fmt.Printf("  ·  ≈ $%.2f/mo pace", monthlyPace)
+	if math.Abs(subPace-report.SubscriptionUSD) > .5 {
+		fmt.Printf("  ·  subscription ≈ $%.2f/mo pace", subPace)
 	}
 	fmt.Println()
 	if *planCost > 0 {
-		fmt.Printf("\n  vs your $%.0f/mo in plans → %.1fx the sticker price in API value\n", *planCost, monthlyPace/(*planCost))
+		fmt.Printf("\n  subscription vs your $%.0f/mo in plans → %.1fx the sticker price in API value\n", *planCost, subPace/(*planCost))
 	} else {
 		// Without an explicit --plan-cost, compare against the vendor's public
 		// tiers — but only the ones you could plausibly be on. A vendor's tiers
@@ -198,7 +217,9 @@ func cmdSubsidy(args []string) error {
 		}
 		for _, provider := range report.Providers {
 			providerPlans := plans[provider.Provider]
-			if provider.APIUSD <= 0 || len(providerPlans) == 0 {
+			// Metered sources are a real bill, not a plan subsidy; comparing them
+			// to a subscription price would be meaningless.
+			if provider.Metered || provider.APIUSD <= 0 || len(providerPlans) == 0 {
 				continue
 			}
 			pace := provider.APIUSD / windowDays * 30
@@ -318,6 +339,18 @@ func safeNames(names []string) string {
 		safe = append(safe, terminalText(name, 100))
 	}
 	return strings.Join(safe, ", ")
+}
+
+// parseMeteredList splits a comma-separated --metered value into normalized
+// provider names, ignoring blanks and surrounding spaces.
+func parseMeteredList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		if name := strings.TrimSpace(part); name != "" {
+			out = append(out, name)
+		}
+	}
+	return out
 }
 
 func defaultHermesDB(home string) string {

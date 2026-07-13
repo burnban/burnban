@@ -35,11 +35,15 @@ func NewShareCard(report Report, window string, planCostUSD float64) ShareCard {
 	if windowDays <= 0 {
 		windowDays = 1
 	}
-	monthlyPaceUSD := math.Round(report.APIUSD/windowDays*30*100) / 100
+	// The subsidy story is about flat-rate subscription usage repriced at API
+	// rates. Real pay-per-token spend (BYO-key agents, API-key auth) is an
+	// actual bill, not a subsidy, so it must not inflate the multiple.
+	subsidyUSD := report.SubsidyBaseUSD()
+	monthlyPaceUSD := math.Round(subsidyUSD/windowDays*30*100) / 100
 	multiplier := math.Round(monthlyPaceUSD/planCostUSD*10) / 10
 	return ShareCard{
 		HasUsage:         report.HasUsage,
-		APIEquivalentUSD: report.APIUSD,
+		APIEquivalentUSD: subsidyUSD,
 		MonthlyPaceUSD:   monthlyPaceUSD,
 		PlanCostUSD:      planCostUSD,
 		Multiplier:       multiplier,

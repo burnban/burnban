@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"slices"
 	"strconv"
 	"strings"
@@ -352,7 +353,11 @@ func (f *subscriptionFeed) get(window string, now time.Time) (*subscriptionRespo
 		(window != "today" || cached.since.Equal(since)) {
 		return cached.value, nil
 	}
-	report, err := subsidy.BuildReport(f.prices, subsidy.ReportOptions{Since: since, Until: now})
+	home, _ := os.UserHomeDir()
+	report, err := subsidy.BuildReport(f.prices, subsidy.ReportOptions{
+		Since: since, Until: now,
+		MeteredProviders: subsidy.DetectMeteredProviders(home),
+	})
 	if err != nil {
 		return nil, err
 	}

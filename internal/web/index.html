@@ -271,7 +271,7 @@
     <div class="local-head">
       <div>
         <div class="label">Auto-detected local agent logs</div>
-        <div class="local-title">SUBSCRIPTION USAGE</div>
+        <div class="local-title">LOCAL AGENT USAGE</div>
       </div>
       <div class="windows" aria-label="Subscription usage window">
         <button type="button" data-window="today" class="active" aria-pressed="true">today</button>
@@ -295,6 +295,7 @@
           <div class="token-cell"><div class="label">Cache write</div><div id="subCacheWrite" class="val">0</div></div>
         </div>
       </div>
+      <div id="subMetered" class="sub-note hidden"></div>
       <div id="subSources" class="source-list"></div>
       <div class="table-scroll" role="region" aria-label="Subscription usage by source and model" tabindex="0">
         <table>
@@ -527,7 +528,9 @@
     $("subLoading").classList.add("hidden");
     $("subError").classList.add("hidden");
     $("subContent").classList.remove("hidden");
-    setText("subCost", fmt$(d.api_usd));
+    const subscriptionUSD = typeof d.subscription_usd === "number" ? d.subscription_usd : d.api_usd;
+    const meteredUSD = Number(d.metered_usd || 0);
+    setText("subCost", fmt$(subscriptionUSD));
     setText("subCalls", exactTok(d.calls));
     setText("subIn", fmtTok(d.in_tokens));
     setText("subOut", fmtTok(d.out_tokens));
@@ -537,20 +540,29 @@
     $("subOut").title = exactTok(d.out_tokens) + " output tokens";
     $("subCacheRead").title = exactTok(d.cache_read_tokens) + " cache-read tokens";
     $("subCacheWrite").title = exactTok(d.cache_write_tokens) + " cache-write tokens";
-    $("subCostLabel").textContent = "API equivalent · " + d.label;
+    $("subCostLabel").textContent = "Subscription · API-equivalent · " + d.label;
+
+    const subMetered = $("subMetered");
+    if (meteredUSD > 0) {
+      subMetered.textContent = "Real API spend: " + fmt$(meteredUSD) + " already billed per token (not a subsidy).";
+      subMetered.classList.remove("hidden");
+    } else {
+      subMetered.classList.add("hidden");
+    }
 
     const providers = Array.isArray(d.providers) ? d.providers : [];
     const detected = providers.filter(p => p.detected);
     $("subSources").innerHTML = providers.map(p => {
       const hasIssue = Boolean(p.error || p.partial || (p.warnings && p.warnings.length));
       const cls = hasIssue ? "source-chip err" : "source-chip" + (p.detected ? " on" : "");
-      const state = hasIssue ? "partial scan" : p.detected ? `${Number(p.sessions || 0)} session${p.sessions === 1 ? "" : "s"}` : "not found";
+      const billed = p.metered ? " · billed" + (p.billing_provider ? " via " + esc(p.billing_provider) : "") : "";
+      const state = hasIssue ? "partial scan" : p.detected ? `${Number(p.sessions || 0)} session${p.sessions === 1 ? "" : "s"}${billed}` : "not found";
       return `<span class="${cls}">${esc(sourceNames[p.provider] || p.provider)} · ${state}</span>`;
     }).join("");
 
     const rows = [];
     providers.forEach(p => (p.models || []).forEach(m => rows.push(
-      `<tr><td class="source-name">${esc(sourceNames[p.provider] || p.provider)}</td>` +
+      `<tr><td class="source-name">${esc(sourceNames[p.provider] || p.provider)}${p.metered ? " (billed)" : ""}</td>` +
       `<td class="name model-indent">${esc(m.model)}</td><td>${exactTok(m.calls)}</td>` +
       `<td title="${exactTok(m.in_tokens)}">${fmtTok(m.in_tokens)}</td>` +
       `<td title="${exactTok(m.out_tokens)}">${fmtTok(m.out_tokens)}</td>` +
@@ -559,7 +571,9 @@
     )));
     $("subModels").innerHTML = rows.length ? rows.join("") :
       `<tr class="empty"><td colspan="7">${detected.length ? "no local usage in this window" : "no supported local agent logs found"}</td></tr>`;
-    const notes = ["Local subscription usage is not a per-token bill. Dollar values show what the same tokens would cost at API prices."];
+    const notes = [meteredUSD > 0
+      ? "Subscription usage is priced at API rates for comparison; metered sources (billed) are real API spend already charged to your key."
+      : "Subscription usage is not a per-token bill. Dollar values show what the same tokens would cost at API prices."];
     if (d.unpriced_tokens > 0) notes.push(exactTok(d.unpriced_tokens) + " tokens use models not yet in the pricing table.");
     if (Number(d.server_tool_usd || 0) > 0) notes.push(fmt$(d.server_tool_usd) + " of API equivalent came from provider-hosted tools.");
     if (d.service_tiers && Object.keys(d.service_tiers).length) notes.push("Service tiers: " + Object.entries(d.service_tiers).map(([name, count]) => `${name} ${count}`).join(", ") + ".");

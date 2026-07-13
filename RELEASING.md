@@ -18,8 +18,9 @@ Before creating the first public tag:
   a prelaunch placeholder until the public release assets and checksums exist.
 
 If the workflow is run in a fork or private staging repository, its release
-assets will be published there while the official installers still resolve
-`burnban/burnban`; that is not a valid production release.
+candidate and installer gates run, but the publish and anonymous-install jobs
+are skipped. Only `burnban/burnban` may create the official release resolved by
+the installers.
 
 ## Release candidate
 
@@ -40,7 +41,16 @@ Create and push an annotated semantic-version tag, for example:
 
 ```sh
 git tag -s v0.4.0 -m "burnban v0.4.0"
+git push burnban v0.4.0
+```
+
+Wait for the canonical publish and anonymous-install verification to pass, then
+mirror that exact annotated tag to the private backup remotes. Their workflows
+validate the candidate but cannot create public or private releases:
+
+```sh
 git push origin v0.4.0
+git push op8 v0.4.0
 ```
 
 Before publication, the release workflow pins and runs GoReleaser and Syft,
