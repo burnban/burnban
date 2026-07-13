@@ -150,6 +150,70 @@ func TestScanCodexBaselineBeforeWindow(t *testing.T) {
 	}
 }
 
+func TestScanCodexSubagentReplayAdvancesBaselineWithoutDuplicatingParent(t *testing.T) {
+	root := t.TempDir()
+	day := filepath.Join(root, "2026", "07", "05")
+	writeLog(t, day, "rollout-parent.jsonl", `{"timestamp":"2026-07-05T10:00:00.000Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T10:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T10:00:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T10:01:10.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300},"last_token_usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":100}}}}
+`)
+	// Current Codex subagent rollouts write the child metadata first, replay the
+	// parent's history with fresh serialization timestamps, then write a
+	// trigger-turn boundary before the child's first model call. The replay must
+	// establish the 1500/900/300 baseline without emitting either parent call.
+	writeLog(t, day, "rollout-subagent.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1,"agent_path":"/root/fixture"}}},"parent_thread_id":"parent","forked_from_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T11:00:00.002Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:00.003Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+{"timestamp":"2026-07-05T11:00:00.004Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1500,"cached_input_tokens":900,"output_tokens":300},"last_token_usage":{"input_tokens":500,"cached_input_tokens":300,"output_tokens":100}}}}
+{"timestamp":"2026-07-05T11:00:01.000Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:01.001Z","type":"inter_agent_communication_metadata","payload":{"trigger_turn":true}}
+{"timestamp":"2026-07-05T11:00:06.000Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1700,"cached_input_tokens":1000,"output_tokens":340},"last_token_usage":{"input_tokens":200,"cached_input_tokens":100,"output_tokens":40}}}}
+`)
+
+	sessions, got := collect(t, ScanCodex, root)
+	if sessions != 2 {
+		t.Fatalf("sessions = %d, want parent and live child", sessions)
+	}
+	if len(got) != 3 {
+		t.Fatalf("events = %d, want two parent calls plus one live child call: %+v", len(got), got)
+	}
+	var totals Event
+	for _, event := range got {
+		totals.In += event.In
+		totals.Out += event.Out
+		totals.CacheRead += event.CacheRead
+	}
+	if totals.In != 700 || totals.Out != 340 || totals.CacheRead != 1000 {
+		t.Fatalf("deduplicated totals = %+v", totals)
+	}
+	if child := got[2]; child.In != 100 || child.Out != 40 || child.CacheRead != 100 {
+		t.Fatalf("child delta did not use replay baseline: %+v", child)
+	}
+}
+
+func TestScanCodexSubagentWithoutLiveBoundaryFailsClosed(t *testing.T) {
+	root := t.TempDir()
+	writeLog(t, filepath.Join(root, "2026", "07", "05"), "rollout-subagent.jsonl", `{"timestamp":"2026-07-05T11:00:00.000Z","type":"session_meta","payload":{"id":"child","source":{"subagent":{"thread_spawn":{"parent_thread_id":"parent","depth":1}}},"parent_thread_id":"parent"}}
+{"timestamp":"2026-07-05T11:00:00.001Z","type":"session_meta","payload":{"id":"parent","source":"cli"}}
+{"timestamp":"2026-07-05T11:00:00.002Z","type":"turn_context","payload":{"model":"gpt-5.6-sol"}}
+{"timestamp":"2026-07-05T11:00:00.003Z","type":"event_msg","payload":{"type":"token_count","info":{"total_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200},"last_token_usage":{"input_tokens":1000,"cached_input_tokens":600,"output_tokens":200}}}}
+`)
+
+	var got []Event
+	result, err := scanCodex(root, since, DefaultScanLimits(), func(event Event) {
+		got = append(got, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Sessions != 0 || len(got) != 0 || !result.Stats.Partial ||
+		!hasStr(result.Stats.Warnings, "one or more Codex subagent logs did not expose a live-usage boundary") {
+		t.Fatalf("unbounded fork replay result=%+v events=%+v", result, got)
+	}
+}
+
 func TestCostHonors1hWriteTier(t *testing.T) {
 	p := pricing.Price{InputPerMTok: 10, OutputPerMTok: 50, CacheReadMult: 0.1, CacheWriteMult: 1.25}
 	// 1M of everything: 10 + 50 + 1 (read) + 12.50 (5m write) + 20 (1h write at 2x).

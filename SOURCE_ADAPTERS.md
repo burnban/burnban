@@ -116,6 +116,22 @@ The built-in manifests and Gemini CLI, GitHub Copilot CLI, Cursor, and OpenCode
 compatibility fixtures exercise the same public v1 contract used by new
 adapters.
 
+## Codex compatibility
+
+Codex rollout files expose cumulative `token_count` totals rather than a stable
+request ledger. Burnban advances a per-file baseline for every valid counter
+record and emits only the delta, including when an older record falls before the
+selected report window.
+
+Subagent rollout files also begin by replaying the parent's conversation and
+cumulative token history. Their first `session_meta` identifies the structured
+`subagent` source, and the first trigger-turn
+`inter_agent_communication_metadata` record marks the end of that replay.
+Burnban uses inherited counters to establish the child's baseline but does not
+emit them a second time; live child deltas after the boundary remain separate
+usage. A subagent file without that explicit boundary fails closed with a
+partial-scan warning instead of presenting copied parent traffic as exact usage.
+
 ## Gemini CLI compatibility
 
 Gemini CLI support was checked on 2026-07-12 against upstream commit

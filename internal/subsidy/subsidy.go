@@ -196,9 +196,28 @@ type codexTotals struct {
 // in-window event would swallow the whole pre-window session), and a total
 // that shrinks means the counter reset on restart, so the new total becomes
 // the delta. The model comes from the most recent turn_context.
+//
+// Codex subagent rollouts begin with a replay of the parent's history. Those
+// replayed token_count records retain the parent's cumulative counter and
+// must advance the child's baseline, but must not be emitted again. The first
+// trigger-turn inter-agent record marks the transition to live child traffic.
 func ScanCodex(dir string, since time.Time, emit func(Event)) (int, error) {
 	result, err := scanCodex(dir, since, DefaultScanLimits(), emit)
 	return result.Sessions, err
+}
+
+func codexSubagentSource(raw json.RawMessage) bool {
+	if len(raw) == 0 {
+		return false
+	}
+	var label string
+	if json.Unmarshal(raw, &label) == nil {
+		return label == "subagent"
+	}
+	var source struct {
+		Subagent json.RawMessage `json:"subagent"`
+	}
+	return json.Unmarshal(raw, &source) == nil && len(source.Subagent) > 0 && string(source.Subagent) != "null"
 }
 
 func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
@@ -208,8 +227,14 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 		model := "unknown"
 		var prev codexTotals
 		contributed := false
+		sessionMetaSeen := false
+		subagent := false
+		replayingParent := false
+		liveBoundarySeen := false
 		ferr := scanner.eachLine(path, func(line []byte) {
-			if !bytes.Contains(line, []byte(`"turn_context"`)) && !bytes.Contains(line, []byte(`"token_count"`)) {
+			if !bytes.Contains(line, []byte(`"session_meta"`)) &&
+				!bytes.Contains(line, []byte(`"inter_agent_communication_metadata"`)) &&
+				!bytes.Contains(line, []byte(`"turn_context"`)) && !bytes.Contains(line, []byte(`"token_count"`)) {
 				return
 			}
 			var v codexLine
@@ -217,6 +242,31 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 				return
 			}
 			switch v.Type {
+			case "session_meta":
+				// A fork replay can contain the parent's session_meta immediately
+				// after the child's. Only the first record describes this file.
+				if sessionMetaSeen {
+					return
+				}
+				sessionMetaSeen = true
+				var meta struct {
+					Source json.RawMessage `json:"source"`
+				}
+				if json.Unmarshal(v.Payload, &meta) == nil && codexSubagentSource(meta.Source) {
+					subagent = true
+					replayingParent = true
+				}
+			case "inter_agent_communication_metadata":
+				if !replayingParent {
+					return
+				}
+				var communication struct {
+					TriggerTurn bool `json:"trigger_turn"`
+				}
+				if json.Unmarshal(v.Payload, &communication) == nil && communication.TriggerTurn {
+					replayingParent = false
+					liveBoundarySeen = true
+				}
 			case "turn_context":
 				var tc struct {
 					Model string `json:"model"`
@@ -247,6 +297,9 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 				if terr != nil || ts.Before(since) {
 					return
 				}
+				if replayingParent {
+					return
+				}
 				in := d.Input - d.Cached // OpenAI input counts include the cached subset
 				if in < 0 {
 					in = 0
@@ -261,6 +314,9 @@ func scanCodex(dir string, since time.Time, limits ScanLimits, emit func(Event))
 		})
 		if contributed {
 			sessions++
+		}
+		if subagent && !liveBoundarySeen {
+			scanner.stats.Warn("one or more Codex subagent logs did not expose a live-usage boundary")
 		}
 		return ferr
 	})
