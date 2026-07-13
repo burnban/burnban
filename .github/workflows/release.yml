@@ -246,6 +246,9 @@ jobs:
           path: qa/browser/test-results
 
   publish:
+    # Tags are mirrored to private backup repositories, but only the canonical
+    # public repository may create releases or provenance attestations.
+    if: github.repository == 'burnban/burnban'
     needs: [installer, container, browser-accessibility]
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -345,7 +348,7 @@ jobs:
     needs: publish
     # The final publish API call may succeed before the client observes its
     # response. Exercise public URLs whenever the publish job was not cancelled.
-    if: ${{ always() && needs.publish.result != 'cancelled' }}
+    if: ${{ github.repository == 'burnban/burnban' && always() && needs.publish.result != 'cancelled' }}
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
