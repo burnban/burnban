@@ -13,6 +13,27 @@ import (
 type Batch struct {
 	Events      []Event
 	DroppedRows int64
+	// Signals is zero for the normal all-signal export. The worker sets an
+	// explicit mask when one signal has already reached a terminal OTLP
+	// response for the current ledger range and only the lagging signal should
+	// be retried.
+	Signals SignalMask
+}
+
+type SignalMask uint8
+
+const (
+	SignalTraces SignalMask = 1 << iota
+	SignalMetrics
+	signalAll = SignalTraces | SignalMetrics
+)
+
+func (b Batch) exports(signal SignalMask) bool {
+	mask := b.Signals
+	if mask == 0 {
+		mask = signalAll
+	}
+	return mask&signal != 0
 }
 
 type otlpValue struct {

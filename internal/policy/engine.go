@@ -19,13 +19,22 @@ type Engine struct {
 	mu          sync.Mutex
 	active      *Compiled
 	activeID    int64
-	inFlight    map[string]int64
-	pending     map[string]map[uint64]pendingUsage
+	inFlight    map[ruleCounterKey]int64
+	pending     map[ruleCounterKey]map[uint64]pendingUsage
 	nextPending uint64
 }
 
 func NewEngine(s *store.Store) *Engine {
-	return &Engine{S: s, inFlight: map[string]int64{}, pending: map[string]map[uint64]pendingUsage{}}
+	return &Engine{S: s, inFlight: map[ruleCounterKey]int64{}, pending: map[ruleCounterKey]map[uint64]pendingUsage{}}
+}
+
+// ruleCounterKey is deliberately structured. Namespace and rule identifiers
+// may both contain '/', so delimiter concatenation is not injective and could
+// make a reservation from a reset policy lineage consume the new lineage's
+// pending or concurrency capacity.
+type ruleCounterKey struct {
+	namespace string
+	ruleID    string
 }
 
 type pendingUsage struct {
@@ -77,8 +86,8 @@ type Reservation struct {
 	engine          *Engine
 	decision        *Decision
 	record          store.PolicyDecisionRecord
-	concurrencyKeys []string
-	counterKeys     []string
+	concurrencyKeys []ruleCounterKey
+	counterKeys     []ruleCounterKey
 	pendingID       uint64
 	state           int // 0 prepared, 1 committed/in-flight, 2 released or cancelled
 }
@@ -390,7 +399,7 @@ func (e *Engine) Prepare(now time.Time, context Context) (*Reservation, *Decisio
 	return reservation, decision, nil
 }
 
-func (e *Engine) pendingSince(key string, cutoff time.Time) pendingUsage {
+func (e *Engine) pendingSince(key ruleCounterKey, cutoff time.Time) pendingUsage {
 	var out pendingUsage
 	for _, usage := range e.pending[key] {
 		if usage.ts.Before(cutoff) {
@@ -730,7 +739,9 @@ func windowStart(now time.Time, duration time.Duration, kind string) time.Time {
 	return time.Unix(0, nanos-nanos%int64(duration)).UTC()
 }
 
-func counterKey(namespace, ruleID string) string { return namespace + "/" + ruleID }
+func counterKey(namespace, ruleID string) ruleCounterKey {
+	return ruleCounterKey{namespace: namespace, ruleID: ruleID}
+}
 
 type ActiveSummary struct {
 	Active    bool      `json:"active"`

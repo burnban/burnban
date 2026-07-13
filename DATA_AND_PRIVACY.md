@@ -65,6 +65,9 @@ Provider invoice imports are stored in separate immutable tables as normalized
 line metadata: provider, non-secret invoice/line identifiers, occurrence time,
 USD amount, model, service tier, region, adjustment type/reference, optional
 description, source format, import timestamp, and SHA-256 content digest.
+CSV imports also store a domain-separated replay digest bound to the complete
+effective column mapping; no plaintext invoice cell values or header names are
+added to the import record.
 Descriptions can contain provider billing metadata; review exports before
 sharing them. Imports never update observed request rows. Reconciliation CSV
 output neutralizes spreadsheet formulas, and invoice file paths must be stable

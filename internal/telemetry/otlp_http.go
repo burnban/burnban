@@ -60,20 +60,44 @@ type HTTPExporter struct {
 	sleep            func(context.Context, time.Duration) error
 }
 
-// PartialRejectError means an OTLP receiver populated partialSuccess. The OTLP
-// specification forbids retrying that request; the worker records those rows
-// on its separate dropped cursor rather than calling them delivered.
+// PartialRejectError means an OTLP receiver reported a non-zero rejected item
+// count. OTLP forbids retrying that signal request. A populated partialSuccess
+// with a zero count is instead a full success (and may carry a warning).
 type PartialRejectError struct {
-	Signal string
+	Signal           string
+	RejectedItems    int64
+	CollectorMessage string
 }
 
 func (e *PartialRejectError) Error() string {
-	return "OTLP collector partially rejected " + e.Signal + "; request will not be retried"
+	return fmt.Sprintf("OTLP collector rejected %d items for %s; request will not be retried", e.RejectedItems, e.Signal)
 }
 
 type permanentExportError struct{ message string }
 
 func (e *permanentExportError) Error() string { return e.message }
+
+// SignalExportResult separates request terminality from the aggregate error.
+// The worker durably advances only the signal whose request reached a terminal
+// OTLP outcome, so a trace failure cannot suppress or cause a retry of an
+// independently completed metrics request (and vice versa).
+type SignalExportResult struct {
+	Attempted     bool
+	Terminal      bool
+	Failed        bool
+	RejectedItems int64
+	Warning       string
+}
+
+type ExportResult struct {
+	Traces  SignalExportResult
+	Metrics SignalExportResult
+}
+
+type responseOutcome struct {
+	RejectedItems int64
+	Message       string
+}
 
 func NewHTTPExporter(config HTTPConfig) (*HTTPExporter, error) {
 	endpoint, err := parseEndpoint(config.Endpoint, config.AllowPrivateNetwork)
@@ -134,104 +158,218 @@ func NewHTTPExporter(config HTTPConfig) (*HTTPExporter, error) {
 
 func (e *HTTPExporter) SinkID() string { return e.sinkID }
 
-func (e *HTTPExporter) Export(ctx context.Context, batch Batch) error {
+func (e *HTTPExporter) Export(ctx context.Context, batch Batch) (ExportResult, error) {
+	var result ExportResult
 	if len(batch.Events) == 0 {
-		return nil
+		return result, nil
 	}
-	traces, err := buildTracePayload(batch, e.serviceName, e.serviceVersion, e.random)
-	if err != nil {
-		return err
+	var exportErrors []error
+	if batch.exports(SignalTraces) {
+		result.Traces.Attempted = true
+		traces, err := buildTracePayload(batch, e.serviceName, e.serviceVersion, e.random)
+		if err != nil {
+			result.Traces.Failed = true
+			exportErrors = append(exportErrors, err)
+		} else if len(traces) > maxOTLPPayload {
+			result.Traces.Terminal, result.Traces.Failed = true, true
+			exportErrors = append(exportErrors, &permanentExportError{message: "OTLP traces batch exceeds the 8 MiB payload bound; lower --otlp-batch"})
+		} else {
+			result.Traces, err = e.exportSignal(ctx, e.tracesURL, "traces", traces)
+			if result.Traces.RejectedItems > int64(len(batch.Events)) {
+				result.Traces.RejectedItems = 0
+				err = &permanentExportError{message: "OTLP collector rejected more spans than the request contained"}
+			}
+			if err != nil {
+				exportErrors = append(exportErrors, err)
+			}
+		}
 	}
-	metrics, err := buildMetricsPayload(batch, e.serviceName, e.serviceVersion, time.Now().UTC())
-	if err != nil {
-		return err
+	if batch.exports(SignalMetrics) {
+		result.Metrics.Attempted = true
+		metrics, err := buildMetricsPayload(batch, e.serviceName, e.serviceVersion, time.Now().UTC())
+		if err != nil {
+			result.Metrics.Failed = true
+			exportErrors = append(exportErrors, err)
+		} else if len(metrics) > maxOTLPPayload {
+			result.Metrics.Terminal, result.Metrics.Failed = true, true
+			exportErrors = append(exportErrors, &permanentExportError{message: "OTLP metrics batch exceeds the 8 MiB payload bound; lower --otlp-batch"})
+		} else {
+			result.Metrics, err = e.exportSignal(ctx, e.metricsURL, "metrics", metrics)
+			metricItems := int64(len(batch.Events)) * 3
+			if batch.DroppedRows > 0 {
+				metricItems++
+			}
+			if result.Metrics.RejectedItems > metricItems {
+				result.Metrics.RejectedItems = 0
+				err = &permanentExportError{message: "OTLP collector rejected more data points than the request contained"}
+			}
+			if err != nil {
+				exportErrors = append(exportErrors, err)
+			}
+		}
 	}
-	if len(traces) > maxOTLPPayload || len(metrics) > maxOTLPPayload {
-		return &permanentExportError{message: "OTLP batch exceeds the 8 MiB payload bound; lower --otlp-batch"}
-	}
-	if err := e.postWithRetry(ctx, e.tracesURL, "traces", traces); err != nil {
-		return err
-	}
-	return e.postWithRetry(ctx, e.metricsURL, "metrics", metrics)
+	return result, errors.Join(exportErrors...)
 }
 
-func (e *HTTPExporter) postWithRetry(ctx context.Context, endpoint, signal string, body []byte) error {
+func (e *HTTPExporter) exportSignal(ctx context.Context, endpoint, signal string, body []byte) (SignalExportResult, error) {
+	result := SignalExportResult{Attempted: true}
+	outcome, err := e.postWithRetry(ctx, endpoint, signal, body)
+	if err == nil {
+		result.Terminal = true
+		result.Warning = outcome.Message
+		return result, nil
+	}
+	result.Failed = true
+	var permanent *permanentExportError
+	var partial *PartialRejectError
+	if errors.As(err, &permanent) || errors.As(err, &partial) {
+		result.Terminal = true
+	}
+	if partial != nil {
+		result.RejectedItems = partial.RejectedItems
+		result.Warning = partial.CollectorMessage
+	}
+	return result, err
+}
+
+func (e *HTTPExporter) postWithRetry(ctx context.Context, endpoint, signal string, body []byte) (responseOutcome, error) {
 	var last error
+	var lastOutcome responseOutcome
 	var delay time.Duration
 	for attempt := 0; attempt < e.maxAttempts; attempt++ {
 		if delay > 0 {
 			if err := e.sleep(ctx, delay); err != nil {
-				return err
+				return responseOutcome{}, err
 			}
 		}
-		retryAfter, err := e.post(ctx, endpoint, signal, body)
+		retryAfter, outcome, err := e.post(ctx, endpoint, signal, body)
 		if err == nil {
-			return nil
+			return outcome, nil
 		}
-		last = err
+		last, lastOutcome = err, outcome
 		var permanent *permanentExportError
 		var partial *PartialRejectError
 		if errors.As(err, &permanent) || errors.As(err, &partial) {
-			return err
+			return outcome, err
 		}
 		delay = retryDelay(e.baseBackoff, attempt+1, retryAfter)
 	}
-	return last
+	return lastOutcome, last
 }
 
-func (e *HTTPExporter) post(ctx context.Context, endpoint, signal string, body []byte) (string, error) {
+func (e *HTTPExporter) post(ctx context.Context, endpoint, signal string, body []byte) (string, responseOutcome, error) {
 	attemptCtx, cancel := context.WithTimeout(ctx, e.requestTimeout)
 	defer cancel()
 	req, err := http.NewRequestWithContext(attemptCtx, http.MethodPost, endpoint, bytes.NewReader(body))
 	if err != nil {
-		return "", &permanentExportError{message: "build OTLP request: " + err.Error()}
+		return "", responseOutcome{}, &permanentExportError{message: "build OTLP request: " + err.Error()}
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Accept", "application/json")
 	if value, present := os.LookupEnv(e.authorizationEnv); present && value != "" {
 		if err := validateAuthorization(value); err != nil {
-			return "", err
+			return "", responseOutcome{}, err
 		}
 		req.Header.Set("Authorization", value)
 	}
 	resp, err := e.client.Do(req)
 	if err != nil {
 		if attemptCtx.Err() != nil {
-			return "", fmt.Errorf("OTLP %s request timed out or was canceled", signal)
+			return "", responseOutcome{}, fmt.Errorf("OTLP %s request timed out or was canceled", signal)
 		}
-		return "", fmt.Errorf("OTLP %s connection failed", signal)
+		return "", responseOutcome{}, fmt.Errorf("OTLP %s connection failed", signal)
 	}
 	defer resp.Body.Close()
 	response, readErr := io.ReadAll(io.LimitReader(resp.Body, maxOTLPResponse+1))
 	if readErr != nil {
-		return "", fmt.Errorf("read OTLP %s response: %w", signal, readErr)
+		return "", responseOutcome{}, fmt.Errorf("read OTLP %s response: %w", signal, readErr)
 	}
 	if len(response) > maxOTLPResponse {
-		return "", &permanentExportError{message: "OTLP collector response exceeds 64 KiB"}
+		return "", responseOutcome{}, &permanentExportError{message: "OTLP collector response exceeds 64 KiB"}
 	}
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if len(bytes.TrimSpace(response)) > 0 && !json.Valid(response) {
-			return "", &permanentExportError{message: "OTLP collector returned malformed JSON on success"}
+		if !json.Valid(response) {
+			return "", responseOutcome{}, &permanentExportError{message: "OTLP collector returned malformed JSON on success"}
 		}
-		if partialResponse(response) {
-			return "", &PartialRejectError{Signal: signal}
+		outcome, err := parseSuccessResponse(response, signal)
+		if err != nil {
+			return "", outcome, err
 		}
-		return "", nil
+		return "", outcome, nil
 	}
 	if retryableStatus(resp.StatusCode) {
-		return resp.Header.Get("Retry-After"), fmt.Errorf("OTLP collector returned retryable HTTP %d for %s", resp.StatusCode, signal)
+		return resp.Header.Get("Retry-After"), responseOutcome{}, fmt.Errorf("OTLP collector returned retryable HTTP %d for %s", resp.StatusCode, signal)
 	}
-	return "", &permanentExportError{message: fmt.Sprintf("OTLP collector returned non-retryable HTTP %d for %s", resp.StatusCode, signal)}
+	return "", responseOutcome{}, &permanentExportError{message: fmt.Sprintf("OTLP collector returned non-retryable HTTP %d for %s", resp.StatusCode, signal)}
 }
 
-func partialResponse(body []byte) bool {
-	if len(bytes.TrimSpace(body)) == 0 {
-		return false
-	}
+func parseSuccessResponse(body []byte, signal string) (responseOutcome, error) {
 	var response struct {
 		PartialSuccess json.RawMessage `json:"partialSuccess"`
 	}
-	return json.Unmarshal(body, &response) == nil && len(bytes.TrimSpace(response.PartialSuccess)) > 0 && string(bytes.TrimSpace(response.PartialSuccess)) != "null"
+	if err := json.Unmarshal(body, &response); err != nil {
+		return responseOutcome{}, &permanentExportError{message: "OTLP collector returned malformed JSON on success"}
+	}
+	raw := bytes.TrimSpace(response.PartialSuccess)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return responseOutcome{}, nil
+	}
+	var partial map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &partial); err != nil || partial == nil {
+		return responseOutcome{}, &permanentExportError{message: "OTLP collector returned malformed partialSuccess JSON"}
+	}
+	var rejectedField string
+	switch signal {
+	case "traces":
+		rejectedField = "rejectedSpans"
+	case "metrics":
+		rejectedField = "rejectedDataPoints"
+	default:
+		return responseOutcome{}, &permanentExportError{message: "unsupported OTLP signal response"}
+	}
+	for field := range partial {
+		if field != rejectedField && field != "errorMessage" {
+			return responseOutcome{}, &permanentExportError{message: "OTLP collector returned an unknown or cross-signal partialSuccess field"}
+		}
+	}
+	rejectedRaw := partial[rejectedField]
+	rejected, err := parseProtoInt64(rejectedRaw)
+	if err != nil || rejected < 0 {
+		return responseOutcome{}, &permanentExportError{message: "OTLP collector returned an invalid rejected item count"}
+	}
+	var errorMessage string
+	if messageRaw, present := partial["errorMessage"]; present {
+		if err := json.Unmarshal(messageRaw, &errorMessage); err != nil {
+			return responseOutcome{}, &permanentExportError{message: "OTLP collector returned an invalid partialSuccess error message"}
+		}
+	}
+	message := safeLabel(strings.TrimSpace(errorMessage))
+	if len(message) > 256 {
+		message = message[:256]
+	}
+	outcome := responseOutcome{RejectedItems: rejected, Message: message}
+	if rejected == 0 {
+		// The official signal protos define an empty partialSuccess as
+		// equivalent to it being absent. A zero count plus a message is a
+		// warning on a fully accepted request, not a rejection.
+		return outcome, nil
+	}
+	return outcome, &PartialRejectError{Signal: signal, RejectedItems: rejected, CollectorMessage: message}
+}
+
+func parseProtoInt64(raw json.RawMessage) (int64, error) {
+	raw = bytes.TrimSpace(raw)
+	if len(raw) == 0 || bytes.Equal(raw, []byte("null")) {
+		return 0, nil
+	}
+	var encoded string
+	if raw[0] == '"' {
+		if err := json.Unmarshal(raw, &encoded); err != nil {
+			return 0, err
+		}
+		return strconv.ParseInt(encoded, 10, 64)
+	}
+	return strconv.ParseInt(string(raw), 10, 64)
 }
 
 func retryableStatus(status int) bool {

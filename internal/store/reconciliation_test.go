@@ -90,12 +90,183 @@ func TestInvoiceImportReplayConflictImmutabilityAndReport(t *testing.T) {
 	}
 }
 
+func TestInvoiceImportReplayBindsEffectiveMapping(t *testing.T) {
+	body := "id,usage_start_time,cost_usd,model,alternate_id,alternate_time,alternate_cost,alternate_model\n" +
+		"original,2026-07-12T00:00:00Z,1,gpt,corrected,2026-07-13T00:00:00Z,2,gpt\n"
+	correctedMapping := map[string]string{
+		"line_id": "alternate_id", "occurred_at": "alternate_time", "billed_usd": "alternate_cost",
+	}
+	parse := func(t *testing.T, invoiceID string, mapping map[string]string) reconcile.Invoice {
+		t.Helper()
+		invoice, err := reconcile.ParseCSV(strings.NewReader(body), reconcile.CSVOptions{
+			Format: reconcile.FormatOpenAI, InvoiceID: invoiceID, Provider: "openai", Currency: "USD", Mapping: mapping,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return invoice
+	}
+
+	for _, test := range []struct {
+		name            string
+		first, replay   map[string]string
+		conflictMapping map[string]string
+	}{
+		{
+			name:            "changed interpretation",
+			conflictMapping: correctedMapping,
+		},
+		{
+			name:            "corrected mapping imported first",
+			first:           correctedMapping,
+			replay:          correctedMapping,
+			conflictMapping: nil,
+		},
+		{
+			name: "same normalized rows but different mapping",
+			conflictMapping: map[string]string{
+				"model": "alternate_model",
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			s, err := Open(t.TempDir() + "/ledger.db")
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+
+			firstInvoice := parse(t, "inv-mapping", test.first)
+			replayInvoice := parse(t, "inv-mapping", test.replay)
+			conflictingInvoice := parse(t, "inv-mapping", test.conflictMapping)
+			if firstInvoice.ContentHash != conflictingInvoice.ContentHash {
+				t.Fatal("mapping changed the raw content hash")
+			}
+			firstIdentity, err := reconcile.ImportIdentity(firstInvoice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conflictingIdentity, err := reconcile.ImportIdentity(conflictingInvoice)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if firstIdentity == conflictingIdentity {
+				t.Fatal("different effective mappings have the same import identity")
+			}
+
+			first, err := s.ImportInvoice(firstInvoice, time.Now().UTC())
+			if err != nil || first.Replayed {
+				t.Fatalf("first import = %+v, %v", first, err)
+			}
+			replay, err := s.ImportInvoice(replayInvoice, time.Now().UTC())
+			if err != nil || !replay.Replayed || replay.ImportID != first.ImportID {
+				t.Fatalf("exact replay = %+v, %v", replay, err)
+			}
+			mutatedInvoice := replayInvoice
+			mutatedInvoice.Lines = append([]reconcile.Line(nil), replayInvoice.Lines...)
+			mutatedInvoice.Lines[0].Model += "-mutated"
+			if _, err := s.ImportInvoice(mutatedInvoice, time.Now().UTC()); !errors.Is(err, ErrInvoiceConflict) {
+				t.Fatalf("mutated normalized replay error = %v", err)
+			}
+			if _, err := s.ImportInvoice(conflictingInvoice, time.Now().UTC()); !errors.Is(err, ErrInvoiceConflict) {
+				t.Fatalf("corrected mapping error = %v", err)
+			}
+
+			var storedContent, storedIdentity string
+			if err := s.db.QueryRow(`SELECT content_sha256,import_identity_sha256 FROM invoice_imports WHERE id=?`, first.ImportID).
+				Scan(&storedContent, &storedIdentity); err != nil {
+				t.Fatal(err)
+			}
+			if storedContent != firstInvoice.ContentHash || storedIdentity != firstIdentity {
+				t.Fatalf("stored content=%q identity=%q", storedContent, storedIdentity)
+			}
+		})
+	}
+}
+
+func TestInvoiceImportIdentityMigrationPreservesLegacyReplays(t *testing.T) {
+	body := "id,usage_start_time,cost_usd,actual_id,actual_time,actual_cost\n" +
+		"preset,2026-07-12T00:00:00Z,1,custom,2026-07-13T00:00:00Z,2\n"
+	customMapping := map[string]string{
+		"line_id": "actual_id", "occurred_at": "actual_time", "billed_usd": "actual_cost",
+	}
+	for _, test := range []struct {
+		name          string
+		mapping       map[string]string
+		conflicting   map[string]string
+		checkConflict bool
+	}{
+		{name: "preset mapping", conflicting: customMapping, checkConflict: true},
+		{name: "custom mapping", mapping: customMapping, checkConflict: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := t.TempDir() + "/ledger.db"
+			s, err := Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			parse := func(mapping map[string]string) reconcile.Invoice {
+				invoice, err := reconcile.ParseCSV(strings.NewReader(body), reconcile.CSVOptions{
+					Format: reconcile.FormatOpenAI, InvoiceID: "legacy", Provider: "openai", Currency: "USD", Mapping: mapping,
+				})
+				if err != nil {
+					t.Fatal(err)
+				}
+				return invoice
+			}
+			invoice := parse(test.mapping)
+			first, err := s.ImportInvoice(invoice, time.Now().UTC())
+			if err != nil {
+				t.Fatal(err)
+			}
+			// Removing the additive column reproduces a database written by the
+			// prior schema while retaining its immutable normalized invoice rows.
+			if _, err := s.db.Exec(`ALTER TABLE invoice_imports DROP COLUMN import_identity_sha256`); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.Close(); err != nil {
+				t.Fatal(err)
+			}
+
+			s, err = Open(path)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer s.Close()
+			var migratedIdentity string
+			if err := s.db.QueryRow(`SELECT import_identity_sha256 FROM invoice_imports WHERE id=?`, first.ImportID).
+				Scan(&migratedIdentity); err != nil {
+				t.Fatal(err)
+			}
+			if migratedIdentity != "" {
+				t.Fatalf("legacy identity was fabricated: %q", migratedIdentity)
+			}
+			replay, err := s.ImportInvoice(parse(test.mapping), time.Now().UTC())
+			if err != nil || !replay.Replayed || replay.ImportID != first.ImportID {
+				t.Fatalf("legacy replay = %+v, %v", replay, err)
+			}
+			if test.checkConflict {
+				if _, err := s.ImportInvoice(parse(test.conflicting), time.Now().UTC()); !errors.Is(err, ErrInvoiceConflict) {
+					t.Fatalf("changed legacy interpretation error = %v", err)
+				}
+			}
+		})
+	}
+}
+
 func TestConcurrentInvoiceReplayIsIdempotent(t *testing.T) {
-	s, err := Open(t.TempDir() + "/ledger.db")
+	path := t.TempDir() + "/ledger.db"
+	firstStore, err := Open(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer s.Close()
+	defer firstStore.Close()
+	secondStore, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer secondStore.Close()
+	stores := []*Store{firstStore, secondStore}
 	invoice := parsedInvoice(t, "inv-race", "line_id,occurred_at,billed_usd\nl,2026-07-12T00:00:00Z,1\n")
 	const workers = 16
 	var wg sync.WaitGroup
@@ -105,7 +276,7 @@ func TestConcurrentInvoiceReplayIsIdempotent(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			result, err := s.ImportInvoice(invoice, time.Date(2026, 7, 12, 0, 0, i, 0, time.UTC))
+			result, err := stores[i%len(stores)].ImportInvoice(invoice, time.Date(2026, 7, 12, 0, 0, i, 0, time.UTC))
 			results <- result
 			errs <- err
 		}(i)
@@ -135,10 +306,10 @@ func TestConcurrentInvoiceReplayIsIdempotent(t *testing.T) {
 		t.Fatalf("created imports = %d, want 1", created)
 	}
 	var imports, lines int
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM invoice_imports`).Scan(&imports); err != nil {
+	if err := firstStore.db.QueryRow(`SELECT COUNT(*) FROM invoice_imports`).Scan(&imports); err != nil {
 		t.Fatal(err)
 	}
-	if err := s.db.QueryRow(`SELECT COUNT(*) FROM invoice_lines`).Scan(&lines); err != nil {
+	if err := firstStore.db.QueryRow(`SELECT COUNT(*) FROM invoice_lines`).Scan(&lines); err != nil {
 		t.Fatal(err)
 	}
 	if imports != 1 || lines != 1 {

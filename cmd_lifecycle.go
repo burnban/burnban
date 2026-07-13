@@ -56,7 +56,11 @@ type lifecycleTelemetry struct {
 	State          string     `json:"state"`
 	AckedThrough   int64      `json:"acked_through"`
 	DroppedThrough int64      `json:"dropped_through"`
+	TracesThrough  int64      `json:"traces_through"`
+	MetricsThrough int64      `json:"metrics_through"`
 	DroppedRows    int64      `json:"dropped_rows"`
+	RejectedSpans  int64      `json:"rejected_spans"`
+	RejectedPoints int64      `json:"rejected_data_points"`
 	PendingRows    int64      `json:"pending_rows"`
 	LastSuccess    *time.Time `json:"last_success,omitempty"`
 	LastFailure    *time.Time `json:"last_failure,omitempty"`
@@ -289,6 +293,10 @@ func cmdStatusTo(args []string, out io.Writer) error {
 		if status.Telemetry != nil {
 			fmt.Fprintf(out, "otlp     %s · %d pending · %d dropped\n",
 				terminalText(status.Telemetry.State, 80), status.Telemetry.PendingRows, status.Telemetry.DroppedRows)
+			if status.Telemetry.RejectedSpans > 0 || status.Telemetry.RejectedPoints > 0 {
+				fmt.Fprintf(out, "         %d spans rejected · %d metric points rejected\n",
+					status.Telemetry.RejectedSpans, status.Telemetry.RejectedPoints)
+			}
 		}
 	}
 	if !result.Healthy {
