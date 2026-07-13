@@ -88,25 +88,14 @@ func ScanCursor(path string, since time.Time, emit func(Event)) (int, error) {
 func scanCursor(path string, since time.Time, limits ScanLimits, emit func(Event)) (ScanResult, error) {
 	limits = normalizeScanLimits(limits)
 	result := ScanResult{}
-	files, bytes, err := openCodeSourceSize(path)
-	if os.IsNotExist(err) {
-		return result, nil
-	}
+	stats, ready, err := preflightSQLiteSource(path, limits)
 	if err != nil {
 		return result, fmt.Errorf("cursor database: %w", err)
 	}
-	if files > limits.MaxFiles {
-		result.Stats.FilesSkipped = files
-		result.Stats.Warn("file scan limit reached")
+	result.Stats = stats
+	if !ready {
 		return result, nil
 	}
-	if bytes > limits.MaxBytes {
-		result.Stats.FilesSkipped = files
-		result.Stats.Warn("byte scan limit reached")
-		return result, nil
-	}
-	result.Stats.FilesScanned = files
-	result.Stats.BytesScanned = bytes
 
 	uri := (&url.URL{Scheme: "file", Path: filepath.ToSlash(path)}).String()
 	db, err := sql.Open("sqlite", uri+"?mode=ro&_pragma=query_only(1)&_pragma=busy_timeout(2000)")

@@ -25,6 +25,7 @@ import (
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/proxy"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/subsidy"
 	"github.com/burnban/burnban/internal/telemetry"
 	"github.com/burnban/burnban/internal/web"
 )
@@ -115,6 +116,8 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	otlpBatch := fs.Int("otlp-batch", 128, "maximum prompt-free ledger rows per asynchronous OTLP batch")
 	otlpMaxBacklog := fs.Int64("otlp-max-backlog", 10_000, "maximum pending OTLP ledger rows before oldest rows are recorded as dropped")
 	otlpInterval := fs.Duration("otlp-interval", 2*time.Second, "interval between asynchronous OTLP ledger polls")
+	localUsageMaxScanMB := fs.Int64("local-usage-max-scan-mb", 512, "maximum local log MiB scanned per source for the dashboard")
+	localUsageScanTimeout := fs.Duration("local-usage-scan-timeout", 10*time.Second, "maximum scan time per local source for the dashboard")
 	custom := upstreamFlags{}
 	fs.Var(custom, "upstream", "extra upstream as name=url (repeatable; OpenAI-shaped unless url is prefixed anthropic:/gemini:): groq, mistral, openrouter, ollama, vllm…")
 	fs.Parse(args)
@@ -127,6 +130,12 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	}
 	if *port < 0 || *port > 65535 {
 		return fmt.Errorf("--port must be between 0 and 65535")
+	}
+	if *localUsageMaxScanMB <= 0 || *localUsageScanTimeout <= 0 {
+		return fmt.Errorf("local usage scan limits must be greater than zero")
+	}
+	if *localUsageMaxScanMB > int64(^uint64(0)>>1)>>20 {
+		return fmt.Errorf("--local-usage-max-scan-mb is too large for this platform")
 	}
 	var telemetrySink *telemetry.HTTPExporter
 	if *otlpEndpoint != "" {
@@ -361,6 +370,10 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 		Exposure:          map[bool]string{true: "team/network", false: "localhost"}[exposed],
 		AuthRequired:      token != "",
 		DisableLocalUsage: exposed,
+		LocalUsageScanLimits: subsidy.ScanLimits{
+			MaxBytes:    *localUsageMaxScanMB << 20,
+			MaxDuration: *localUsageScanTimeout,
+		},
 		Health: func() web.HealthStatus {
 			h := p.Health()
 			return web.HealthStatus{

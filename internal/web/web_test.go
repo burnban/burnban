@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -18,6 +19,7 @@ import (
 	"github.com/burnban/burnban/internal/budget"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/subsidy"
 	"github.com/burnban/burnban/internal/web"
 )
 
@@ -694,6 +696,79 @@ func TestSubsidyAPIAutoDetectsLocalLogs(t *testing.T) {
 		t.Fatalf("status=%d data=%+v", resp.StatusCode, data)
 	}
 	if len(data.Providers) < 1 || data.Providers[0].Provider != "claude-code" || !data.Providers[0].Detected || data.Providers[0].Sessions != 1 {
+		t.Fatalf("providers=%+v", data.Providers)
+	}
+}
+
+func TestSubsidyAPIHonorsConfiguredScanLimits(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("USERPROFILE", home)
+	for _, name := range []string{
+		"APPDATA", "COPILOT_HOME", "GEMINI_CLI_HOME", "GOOSE_PATH_ROOT", "HERMES_HOME",
+		"LOCALAPPDATA", "OPENCLAW_STATE_DIR", "OPENCODE_DB", "XDG_CONFIG_HOME", "XDG_DATA_HOME",
+	} {
+		t.Setenv(name, "")
+	}
+	dir := filepath.Join(home, ".claude", "projects", "demo")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	line := fmt.Sprintf(`{"type":"assistant","requestId":"r","timestamp":%q,"message":{"id":"m","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":20}}}`+"\n", time.Now().Add(-time.Minute).UTC().Format(time.RFC3339Nano))
+	for i := 0; i < 2; i++ {
+		body := strings.ReplaceAll(line, `"requestId":"r"`, fmt.Sprintf(`"requestId":"r%d"`, i))
+		body = strings.ReplaceAll(body, `"id":"m"`, fmt.Sprintf(`"id":"m%d"`, i))
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("session-%d.jsonl", i)), []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s, err := store.Open(filepath.Join(t.TempDir(), "limits.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	prices, err := pricing.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	web.RegisterWithConfig(mux, s, web.Config{
+		Version: "test", Prices: prices, Exposure: "localhost",
+		LocalUsageScanLimits: subsidy.ScanLimits{
+			MaxFiles: 10, MaxBytes: int64(len(line)) + 16, MaxLineBytes: 1 << 20,
+			MaxRecords: 10, MaxDuration: time.Second,
+		},
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/api/subsidy?window=30d")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var data struct {
+		Calls     int64 `json:"calls"`
+		Partial   bool  `json:"partial"`
+		Providers []struct {
+			Provider string   `json:"provider"`
+			Partial  bool     `json:"partial"`
+			Warnings []string `json:"warnings"`
+		} `json:"providers"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		t.Fatal(err)
+	}
+	if resp.StatusCode != http.StatusOK || data.Calls != 1 || !data.Partial {
+		t.Fatalf("status=%d calls=%d partial=%t", resp.StatusCode, data.Calls, data.Partial)
+	}
+	claude := -1
+	for i := range data.Providers {
+		if data.Providers[i].Provider == "claude-code" {
+			claude = i
+			break
+		}
+	}
+	if claude < 0 || !data.Providers[claude].Partial || !slices.Contains(data.Providers[claude].Warnings, "byte scan limit reached") {
 		t.Fatalf("providers=%+v", data.Providers)
 	}
 }
