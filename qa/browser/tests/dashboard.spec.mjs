@@ -136,7 +136,12 @@ test("team dashboard authenticates by header or tab prompt, never by URL", async
   await promptPage.locator("#authToken").press("Enter");
   await wrongPromptResponse;
   await expect(promptPage.locator("#statusText")).toHaveText("AUTH REQUIRED");
-  expect(await promptPage.evaluate(() => sessionStorage.getItem("bb_token"))).toBeNull();
+  const wrongReloadResponse = promptPage.waitForResponse(response =>
+    response.url().endsWith("/api/summary") && response.status() === 401
+  );
+  await promptPage.reload();
+  expect((await wrongReloadResponse).request().headers()["x-burnban-token"]).toBeUndefined();
+  await expect(promptPage.locator("#statusText")).toHaveText("AUTH REQUIRED");
 
   await promptPage.locator("#authToken").fill(teamToken);
   const correctPromptResponse = promptPage.waitForResponse(response =>
@@ -148,7 +153,12 @@ test("team dashboard authenticates by header or tab prompt, never by URL", async
   await expect(promptPage.locator("#authPrompt")).toBeHidden();
   await expect(promptPage.locator("#localUsagePanel")).toBeHidden();
   expect(localUsageRequests).toEqual([]);
-  expect(await promptPage.evaluate(() => sessionStorage.getItem("bb_token"))).toBe(teamToken);
+  const correctReloadResponse = promptPage.waitForResponse(response =>
+    response.url().endsWith("/api/summary") && response.status() === 200
+  );
+  await promptPage.reload();
+  expect((await correctReloadResponse).request().headers()["x-burnban-token"]).toBe(teamToken);
+  await expect(promptPage.locator("#statusText")).toHaveText("LIVE");
   await promptContext.close();
 
   const legacyContext = await browser.newContext();
@@ -162,25 +172,17 @@ test("team dashboard authenticates by header or tab prompt, never by URL", async
   );
   await legacyPage.goto(`${teamBaseURL}/?token=${encodeURIComponent(teamToken)}&view=qa#meter`);
   await legacySummary;
-  const legacyState = await legacyPage.evaluate(() => ({
-    href: location.href,
-    query: location.search,
-    hash: location.hash,
-    history: JSON.stringify(history.state) || "",
-    stored: sessionStorage.getItem("bb_token"),
-    persistent: localStorage.getItem("bb_token"),
-    cookies: document.cookie
-  }));
-  expect(legacyState.href).not.toContain("token=");
-  expect(legacyState.query).toBe("?view=qa");
-  expect(legacyState.hash).toBe("#meter");
-  expect(legacyState.history).not.toContain(teamToken);
-  expect(legacyState.stored).toBeNull();
-  expect(legacyState.persistent).toBeNull();
-  expect(legacyState.cookies).not.toContain(teamToken);
+  await expect.poll(() => legacyPage.url()).toBe(`${teamBaseURL}/?view=qa#meter`);
   expect(summaryHeaders.length).toBeGreaterThan(0);
   expect(summaryHeaders.every(headers => !headers["x-burnban-token"])).toBe(true);
   await expect(legacyPage.locator("#statusText")).toHaveText("AUTH REQUIRED");
+  const legacyReloadResponse = legacyPage.waitForResponse(response =>
+    response.url().endsWith("/api/summary") && response.status() === 401
+  );
+  await legacyPage.reload();
+  expect((await legacyReloadResponse).request().headers()["x-burnban-token"]).toBeUndefined();
+  const legacyStorage = await legacyContext.storageState();
+  expect(JSON.stringify(legacyStorage)).not.toContain(teamToken);
   await legacyContext.close();
 });
 

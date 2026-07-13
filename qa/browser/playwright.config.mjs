@@ -5,6 +5,9 @@ export default defineConfig({
   timeout: 30_000,
   expect: { timeout: 7_500 },
   fullyParallel: false,
+  // Projects can still overlap when fullyParallel is false. Keep them serial:
+  // concurrent Firefox page evaluation across projects can wedge in CI.
+  workers: 1,
   forbidOnly: Boolean(process.env.CI),
   retries: process.env.CI ? 1 : 0,
   reporter: process.env.CI ? [["github"], ["list"]] : "list",
