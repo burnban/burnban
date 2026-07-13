@@ -182,6 +182,8 @@ jobs:
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install --no-install-recommends -y rpm
+          work=$(mktemp -d)
+          trap 'rm -rf "$work"' EXIT
           test "$(find package-dist -maxdepth 1 -name 'burnban_*.deb' | wc -l)" -eq 2
           test "$(find package-dist -maxdepth 1 -name 'burnban_*.rpm' | wc -l)" -eq 2
           docs=(
@@ -192,23 +194,29 @@ jobs:
           )
           for package in package-dist/burnban_*.deb; do
             dpkg-deb --info "$package" >/dev/null
-            dpkg-deb --contents "$package" | grep -Eq 'usr/bin/burnban$'
+            listing="$work/$(basename "$package").contents"
+            dpkg-deb --contents "$package" >"$listing"
+            grep -Eq 'usr/bin/burnban$' "$listing"
             for doc in "${docs[@]}"; do
-              dpkg-deb --contents "$package" | grep -Eq "usr/share/doc/burnban/${doc}$"
+              grep -Eq "usr/share/doc/burnban/${doc}$" "$listing"
             done
-            dpkg-deb --contents "$package" | grep -Eq 'usr/share/doc/burnban/third_party_licenses/.+/LICENSE'
-            if ar t "$package" | grep -qx _gpgorigin; then
+            grep -Eq 'usr/share/doc/burnban/third_party_licenses/.+/LICENSE' "$listing"
+            members="$work/$(basename "$package").members"
+            ar t "$package" >"$members"
+            if grep -qx _gpgorigin "$members"; then
               echo "ordinary CI unexpectedly created a signed Debian package" >&2
               exit 1
             fi
           done
           for package in package-dist/burnban_*.rpm; do
             rpm -qp --info "$package" >/dev/null
-            rpm -qp --list "$package" | grep -qx '/usr/bin/burnban'
+            listing="$work/$(basename "$package").contents"
+            rpm -qp --list "$package" >"$listing"
+            grep -qx '/usr/bin/burnban' "$listing"
             for doc in "${docs[@]}"; do
-              rpm -qp --list "$package" | grep -qx "/usr/share/doc/burnban/${doc}"
+              grep -qx "/usr/share/doc/burnban/${doc}" "$listing"
             done
-            rpm -qp --list "$package" | grep -Eq '/usr/share/doc/burnban/third_party_licenses/.+/LICENSE'
+            grep -Eq '/usr/share/doc/burnban/third_party_licenses/.+/LICENSE' "$listing"
             test "$(rpm -qp --queryformat '%{RSAHEADER}' "$package")" = "(none)"
           done
           (cd package-dist && sha256sum --check linux-package-checksums.txt)
@@ -247,8 +255,8 @@ jobs:
           expect_path_rejection "must have a .tar.gz filename" \
             package-dist package-dist/unsafe-repositories \
             package-dist/burnban-release-signing-key.asc
-          first=$(mktemp -d)
-          trap 'rm -rf "$first"' EXIT
+          first="$work/first"
+          mkdir "$first"
           cp package-dist/burnban_*.deb package-dist/burnban_*.rpm package-dist/linux-package-checksums.txt "$first/"
           goreleaser release --snapshot --clean --config .goreleaser-packages.yaml
           cmp "$first/linux-package-checksums.txt" package-dist/linux-package-checksums.txt
