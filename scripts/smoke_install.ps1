@@ -28,6 +28,14 @@ $ServeProcess = $null
 New-Item -ItemType Directory -Path $Install, $Desktop, $StartMenu, $LocalAppData, $DataDir -Force | Out-Null
 "keep" | Set-Content (Join-Path $Install "unrelated.keep") -Encoding ascii
 
+$InstallerSource = Get-Content (Join-Path $Root "install.ps1") -Raw
+if ($InstallerSource -match '\.burnban-install-') {
+    throw "Windows installer uses an elevation-prone staging filename"
+}
+if ($InstallerSource -notmatch '\.burnban-stage-') {
+    throw "Windows installer is missing the neutral staging filename"
+}
+
 try {
     $Architecture = $env:PROCESSOR_ARCHITECTURE
     if ($env:PROCESSOR_ARCHITEW6432) { $Architecture = $env:PROCESSOR_ARCHITEW6432 }

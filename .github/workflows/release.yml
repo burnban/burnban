@@ -108,6 +108,9 @@ jobs:
           for arch in amd64 arm64; do
             test -f "dist/burnban_windows_${arch}.zip"
           done
+          go run ./scripts/verify_windows_manifest.go \
+            dist/burnban_windows_amd64.zip \
+            dist/burnban_windows_arm64.zip
           test -f dist/checksums.txt
           compgen -G 'dist/*.sbom.spdx.json' >/dev/null
           (cd dist && sha256sum --check checksums.txt)

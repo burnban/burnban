@@ -99,6 +99,11 @@ Unsigned artifacts must never be described as signed or notarized.
 - Verify provenance with `gh attestation verify <artifact> --repo burnban/burnban`.
 - Run `scripts/smoke_install.sh` on Linux and both Apple architectures and
   `scripts/smoke_install.ps1` on supported Windows architectures.
+- On Windows 11 AMD64 and ARM64, run the public PowerShell installer from a
+  standard non-administrator account with UAC installer detection enabled.
+  Confirm that installation completes without an elevation request and that
+  `burnban version` exits successfully. GitHub-hosted Windows runners have UAC
+  disabled, so their installer smoke job does not replace this release check.
 - Confirm normal uninstall preserves unrelated files and user data, while an
   explicit purge removes only the marked `.burnban` data directory.
 - For a stable release, confirm `https://burnban.sh/install`, the raw
