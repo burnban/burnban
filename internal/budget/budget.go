@@ -1053,8 +1053,8 @@ func (g *Guard) checkLocked(now time.Time, agent string) (*Denial, admissionStat
 		return &Denial{
 			Type: "burnban_agent_cap_reached",
 			Message: fmt.Sprintf(
-				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent AGENT_NAME --daily %.2f`.",
-				agent, position.spent, agentCap, agentCap*2),
+				"daily cap for agent %q reached: $%.2f spent of $%.2f. Raise it: `burnban cap --agent %q --daily %.2f`.",
+				agent, position.spent, agentCap, agent, agentCap*2),
 		}, state, nil
 	}
 	if position.spent+position.reserved >= agentCap {

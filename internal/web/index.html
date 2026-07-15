@@ -1758,8 +1758,9 @@
       const extra = rule.name === "baseline"
         ? `<div class="sub-note">median ${fmt$(rule.baseline_median_usd)} × ${rule.baseline_multiplier} with configured minimum floor</div>` : "";
       const projected = rule.projected_time_to_limit ? ` · projects limit in ${esc(rule.projected_time_to_limit)}` : "";
+      const windowKind = rule.name === "baseline" ? `fixed ${esc(rule.window)} UTC slot` : `rolling ${esc(rule.window)}`;
       return `<div class="cap-row">
-        <div class="cap-head"><span class="label">${esc(rule.name)} · rolling ${esc(rule.window)}</span>
+        <div class="cap-head"><span class="label">${esc(rule.name)} · ${windowKind}</span>
         <span class="pos"><b>${fmt$(rule.spent_usd)}</b> of ${fmt$(rule.cap_usd)} · ${rule.pct.toFixed(0)}%${projected}</span></div>
         ${capBar(rule.pct)}${extra}</div>`;
     });

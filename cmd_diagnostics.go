@@ -31,6 +31,7 @@ type doctorResult struct {
 	ServerOK         bool                `json:"server_ok"`
 	LastRequestAt    string              `json:"last_request_at,omitempty"`
 	RoutingRecent    bool                `json:"routing_recent"`
+	AwaitingFirst    bool                `json:"awaiting_first_request"`
 	ProviderRoutesOK bool                `json:"provider_routes_ok"`
 	IdentityState    string              `json:"identity_state"`
 	IdentityKind     string              `json:"identity_kind,omitempty"`
@@ -129,7 +130,9 @@ func cmdDoctor(args []string) error {
 		} else if err != nil {
 			result.Issues = append(result.Issues, "ledger summary: "+err.Error())
 		} else {
-			result.Issues = append(result.Issues, "no proxied requests recorded yet")
+			// A fresh install with an empty ledger is healthy and waiting, so
+			// this state must not fail the checkup or its exit code.
+			result.AwaitingFirst = true
 		}
 	}
 
@@ -190,7 +193,8 @@ func cmdDoctor(args []string) error {
 		}
 	}
 
-	result.OK = result.DatabaseOK && result.PricingOK && result.ServerOK && result.RoutingRecent && result.ProviderRoutesOK && result.IdentityState != "untrusted"
+	routingOK := result.RoutingRecent || result.AwaitingFirst
+	result.OK = result.DatabaseOK && result.PricingOK && result.ServerOK && routingOK && result.ProviderRoutesOK && result.IdentityState != "untrusted"
 	if *jsonOut {
 		enc := json.NewEncoder(os.Stdout)
 		enc.SetIndent("", "  ")
@@ -331,6 +335,8 @@ func printDoctor(r doctorResult) {
 	fmt.Println()
 	if r.LastRequestAt != "" {
 		fmt.Printf("routing   %s · last request %s\n", state(r.RoutingRecent), r.LastRequestAt)
+	} else if r.AwaitingFirst {
+		fmt.Println("routing   waiting · no proxied requests yet; connect an agent and send one")
 	} else {
 		fmt.Printf("routing   %s\n", state(false))
 	}
@@ -355,6 +361,8 @@ func printDoctor(r doctorResult) {
 		for _, issue := range r.Issues {
 			fmt.Println("· " + terminalText(issue, 240))
 		}
+	} else if r.AwaitingFirst {
+		fmt.Println("\nAll checks passed; the meter is healthy and waiting for its first proxied request.")
 	} else {
 		fmt.Println("\nAll checks passed; recent agent traffic is reaching the meter.")
 	}
@@ -364,6 +372,7 @@ func cmdPricing(args []string) error {
 	fs := flag.NewFlagSet("pricing", flag.ContinueOnError)
 	model := fs.String("model", "", "show the effective price for one model ID")
 	jsonOut := fs.Bool("json", false, "emit machine-readable JSON")
+	_ = fs.String("db", defaultDBPath(), "accepted for command-line consistency; pricing reads no database")
 	if help, err := parseCommandFlags(fs, args); err != nil {
 		return err
 	} else if help {
@@ -383,15 +392,24 @@ func cmdPricing(args []string) error {
 			return fmt.Errorf("model %q is not in the effective pricing table", *model)
 		}
 		if *jsonOut {
-			return json.NewEncoder(os.Stdout).Encode(map[string]any{"model": *model, "price": price, "diagnostics": diagnostics})
+			out := map[string]any{"model": *model, "price": price, "diagnostics": diagnostics}
+			if strings.HasPrefix(strings.ToLower(*model), "claude") {
+				out["notes"] = []string{"cache_write_mult prices 5-minute cache writes; Anthropic 1-hour cache writes bill at 2x input, applied by the meter and repricer separately"}
+			}
+			return json.NewEncoder(os.Stdout).Encode(out)
 		}
 		fmt.Printf("%s  input $%.4g/M · output $%.4g/M · cache read %.4gx · cache write %.4gx\n", terminalText(*model, 100), price.InputPerMTok, price.OutputPerMTok, price.CacheReadMult, price.CacheWriteMult)
+		if strings.HasPrefix(strings.ToLower(*model), "claude") {
+			fmt.Println("note: the cache-write multiplier prices 5-minute cache writes; Anthropic 1-hour cache writes bill at 2x input, which the meter and repricer apply separately")
+		}
 		return nil
 	}
+	cacheWriteNote := "cache_write_mult prices 5-minute cache writes; Anthropic 1-hour cache writes bill at 2x input, applied by the meter and repricer separately"
 	if *jsonOut {
-		return json.NewEncoder(os.Stdout).Encode(map[string]any{"diagnostics": diagnostics, "models": table.Models})
+		return json.NewEncoder(os.Stdout).Encode(map[string]any{"diagnostics": diagnostics, "models": table.Models, "notes": []string{cacheWriteNote}})
 	}
 	fmt.Printf("Pricing snapshot %s · effective %s · verified %s · %d models\n", diagnostics.Version, diagnostics.EffectiveDate, diagnostics.VerifiedDate, diagnostics.ModelCount)
+	fmt.Println("Note: " + cacheWriteNote + ".")
 	if len(diagnostics.OverrideModels) > 0 {
 		fmt.Printf("Overrides: %s (%s)\n", safeJoined(diagnostics.OverrideModels), terminalText(diagnostics.OverrideFile, 120))
 	}

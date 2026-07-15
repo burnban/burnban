@@ -1006,7 +1006,7 @@ func buildGuardrails(s guardrailsReader, cfg Config, now time.Time) (*guardrails
 			BaselineMultiplier: rule.BaselineMultiplier,
 		}
 		if rule.ProjectedTimeToLimit > 0 {
-			out.ProjectedToLimit = budget.FormatFuseDuration(rule.ProjectedTimeToLimit)
+			out.ProjectedToLimit = budget.FormatFuseDuration(max(rule.ProjectedTimeToLimit.Round(time.Second), time.Second))
 		}
 		resp.Fuse.Rules = append(resp.Fuse.Rules, out)
 	}

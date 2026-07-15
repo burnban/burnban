@@ -338,11 +338,15 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 			name, base, name, redactURL(upstreams[name].URL), shape)
 	}
 
+	routesHeading := "point your agents here:"
+	if demoMode {
+		routesHeading = "demo routes (fixture data only; provider traffic is never forwarded):"
+	}
 	fmt.Printf(`burnban %s — the meter is running
 
    dashboard   %s
 
-   point your agents here:
+   %s
      anthropic   ANTHROPIC_BASE_URL=%s/anthropic
      openai      OPENAI_BASE_URL=%s/openai/v1
      gemini      GOOGLE_GEMINI_BASE_URL=%s/gemini
@@ -364,7 +368,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 %s
    watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, panelState, telemetryState, banState)
+`, version, base, routesHeading, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, panelState, telemetryState, banState)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())

@@ -178,7 +178,10 @@ operator to upload separately.
 Prometheus metrics, dashboard APIs, exports, and MCP tools expose ledger-derived
 metadata. On a network deployment they are protected by the same Burnban token,
 but operators must also secure metric collectors, reverse proxies, exports, and
-backups.
+backups. A gateway started with `--allow-remote-admin` additionally lets any
+token holder change guardrail settings (caps, fuses, ban/lift, alerts) from the
+dashboard; leave it off when the token is shared more widely than that
+authority.
 
 The optional `burnban mcp --allow-budget-requests` capability sends only a
 meter-scoped window, requested USD increase, operator-visible reason/ticket,

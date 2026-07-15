@@ -354,28 +354,28 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	// custom-upstream escape hatch around every cap and fuse.
 	if r.Method != http.MethodPost {
 		w.Header().Set("Allow", http.MethodPost)
-		http.Error(w, "burnban provider routes accept POST inference requests only", http.StatusMethodNotAllowed)
+		p.writeProxyError(w, provider, http.StatusMethodNotAllowed, "burnban_method_not_allowed", "burnban provider routes accept POST inference requests only")
 		return
 	}
 	for _, header := range []string{"X-HTTP-Method-Override", "X-Method-Override", "X-HTTP-Method"} {
 		if len(r.Header.Values(header)) != 0 {
-			http.Error(w, "HTTP method override headers are not allowed on burnban provider routes", http.StatusBadRequest)
+			p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", "HTTP method override headers are not allowed on burnban provider routes")
 			return
 		}
 	}
 	route, err := canonicalRequestRoute(r.URL)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", err.Error())
 		return
 	}
 	start := time.Now()
 	agent, session, modelClass, err := requestAttribution(r)
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", err.Error())
 		return
 	}
 	if err := p.ensurePersistence(); err != nil {
-		http.Error(w, err.Error(), http.StatusServiceUnavailable)
+		p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", err.Error())
 		return
 	}
 
@@ -385,33 +385,33 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		// we couldn't hold intact must be refused, never forwarded corrupt.
 		b, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 		if err != nil {
-			http.Error(w, "reading request body: "+err.Error(), http.StatusBadGateway)
+			p.writeProxyError(w, provider, http.StatusBadGateway, "burnban_bad_gateway", "reading request body: "+err.Error())
 			return
 		}
 		if len(b) > maxBodyBytes {
-			http.Error(w, fmt.Sprintf("request body exceeds burnban's %dMB buffer", maxBodyBytes>>20),
-				http.StatusRequestEntityTooLarge)
+			p.writeProxyError(w, provider, http.StatusRequestEntityTooLarge, "burnban_request_too_large",
+				fmt.Sprintf("request body exceeds burnban's %dMB buffer", maxBodyBytes>>20))
 			return
 		}
 		reqBody = b
 	}
 	if err := validateAdmissionJSON(reqBody, r.Header.Get("Content-Type")); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", err.Error())
 		return
 	}
 
 	requestInfo := p.estimateRequestAt(r.URL.Path, reqBody, provider, start)
 	if requestInfo.parseErr != nil {
-		http.Error(w, "request contains malformed model, output-bound, tier, geo, or tool admission metadata", http.StatusBadRequest)
+		p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", "request contains malformed model, output-bound, tier, geo, or tool admission metadata")
 		return
 	}
 	if err := validatePolicyAdmissionMetadata(provider, route, requestInfo); err != nil {
-		http.Error(w, err.Error(), http.StatusBadRequest)
+		p.writeProxyError(w, provider, http.StatusBadRequest, "burnban_invalid_request", err.Error())
 		return
 	}
 	attribution, identityStatus, err := p.requestPolicyAttribution(r, provider, route, reqBody, start)
 	if err != nil {
-		http.Error(w, err.Error(), identityStatus)
+		p.writeProxyError(w, provider, identityStatus, "burnban_identity_rejected", err.Error())
 		return
 	}
 	policyReservation, policyDecision, err := p.Policy.Prepare(start,
@@ -420,7 +420,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		if probeErr := p.Store.Probe(); probeErr != nil {
 			p.markPersistenceFailure(probeErr)
 		}
-		http.Error(w, "policy admission unavailable; proxy is fail-closed: "+err.Error(), http.StatusServiceUnavailable)
+		p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "policy admission unavailable; proxy is fail-closed: "+err.Error())
 		return
 	}
 	if policyDecision.Denied() {
@@ -432,7 +432,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
 			p.markPersistenceFailure(cancelErr)
 		}
-		http.Error(w, "downshift routing unavailable; proxy is fail-closed: "+err.Error(), http.StatusServiceUnavailable)
+		p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "downshift routing unavailable; proxy is fail-closed: "+err.Error())
 		return
 	}
 	if plan.decision.Action != downshift.ActionNone {
@@ -447,7 +447,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 			if probeErr := p.Store.Probe(); probeErr != nil {
 				p.markPersistenceFailure(probeErr)
 			}
-			http.Error(w, "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error(), http.StatusServiceUnavailable)
+			p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error())
 			return
 		}
 		policyReservation, policyDecision = targetReservation, targetDecision
@@ -473,7 +473,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 					if probeErr := p.Store.Probe(); probeErr != nil {
 						p.markPersistenceFailure(probeErr)
 					}
-					http.Error(w, "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error(), http.StatusServiceUnavailable)
+					p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "downshift target policy admission unavailable; proxy is fail-closed: "+targetErr.Error())
 					return
 				}
 				policyReservation, policyDecision = targetReservation, targetDecision
@@ -490,7 +490,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 	if err != nil {
 		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
 			p.markPersistenceFailure(cancelErr)
-			http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "policy decision persistence unavailable; proxy is fail-closed")
 			return
 		}
 		// Distinguish an invalid cap/configuration value from an unavailable
@@ -498,10 +498,10 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		// explicitly fail-closed before any upstream request is sent.
 		if probeErr := p.Store.Probe(); probeErr != nil {
 			p.markPersistenceFailure(probeErr)
-			http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "ledger persistence unavailable; proxy is fail-closed")
 			return
 		}
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+		p.writeProxyError(w, provider, http.StatusInternalServerError, "burnban_internal", err.Error())
 		return
 	}
 	if denial != nil {
@@ -509,17 +509,17 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		setDownshiftHeaders(w.Header(), plan)
 		if cancelErr := policyReservation.Cancel(); cancelErr != nil {
 			p.markPersistenceFailure(cancelErr)
-			http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "policy decision persistence unavailable; proxy is fail-closed")
 			return
 		}
 		p.alertCapReached(denial)
-		writeDenial(w, denial)
+		p.writeProxyError(w, provider, http.StatusPaymentRequired, denial.Type, denial.Message)
 		return
 	}
 	defer reservation.Release()
 	if err := policyReservation.Commit(); err != nil {
 		p.markPersistenceFailure(err)
-		http.Error(w, "policy decision persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+		p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "policy decision persistence unavailable; proxy is fail-closed")
 		return
 	}
 	defer policyReservation.Release()
@@ -548,7 +548,7 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 
 	out, err := http.NewRequestWithContext(r.Context(), r.Method, outURL.String(), bytes.NewReader(reqBody))
 	if err != nil {
-		http.Error(w, err.Error(), http.StatusBadGateway)
+		p.writeProxyError(w, provider, http.StatusBadGateway, "burnban_bad_gateway", err.Error())
 		return
 	}
 	copyHeaders(out.Header, r.Header)
@@ -591,11 +591,11 @@ func (p *Proxy) forward(w http.ResponseWriter, r *http.Request, provider string)
 		if insertErr := reservation.Settle(rec); insertErr != nil {
 			p.markPersistenceFailure(insertErr)
 			p.Logf("burnban: store after upstream transport failure: %v", insertErr)
-			http.Error(w, "ledger persistence unavailable; proxy is fail-closed", http.StatusServiceUnavailable)
+			p.writeProxyError(w, provider, http.StatusServiceUnavailable, "burnban_unavailable", "ledger persistence unavailable; proxy is fail-closed")
 			return
 		}
 		p.Logf("burnban: upstream %s://%s transport failed: %s", up.Scheme, up.Host, transportErrorDetail(err))
-		http.Error(w, "upstream request failed", http.StatusBadGateway)
+		p.writeProxyError(w, provider, http.StatusBadGateway, "burnban_bad_gateway", "upstream request failed")
 		return
 	}
 	defer resp.Body.Close()
@@ -1609,12 +1609,28 @@ func redactEndpoint(raw string) string {
 	return u.Scheme + "://" + u.Host + "/<redacted>"
 }
 
-func writeDenial(w http.ResponseWriter, d *budget.Denial) {
+// writeProxyError refuses a provider-route request in that route's native
+// error dialect, so agent SDKs surface the message instead of a parse
+// failure: Anthropic clients get the top-level type:"error" envelope, Gemini
+// clients get code/message/status, and everything else gets the
+// OpenAI-compatible object.
+func (p *Proxy) writeProxyError(w http.ResponseWriter, provider string, status int, errType, message string) {
+	shape := ""
+	if up, ok := p.upstreams[provider]; ok {
+		shape = up.shape
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusPaymentRequired)
-	_ = json.NewEncoder(w).Encode(map[string]any{
-		"error": map[string]string{"type": d.Type, "message": d.Message},
-	})
+	w.WriteHeader(status)
+	var envelope any
+	switch shape {
+	case "anthropic":
+		envelope = map[string]any{"type": "error", "error": map[string]string{"type": errType, "message": message}}
+	case "gemini":
+		envelope = map[string]any{"error": map[string]any{"code": status, "message": message, "status": errType}}
+	default:
+		envelope = map[string]any{"error": map[string]string{"type": errType, "message": message}}
+	}
+	_ = json.NewEncoder(w).Encode(envelope)
 }
 
 func envOr(key, def string) string {

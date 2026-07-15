@@ -223,14 +223,18 @@ func printFuseStatus(s *store.Store) error {
 		fmt.Println("no velocity fuse set. Arm one: burnban fuse --hourly 20 --burst 5m:4 --fanout 1m:120")
 	} else {
 		for _, rule := range snapshot.Rules {
-			fmt.Printf("%-8s $%.4f of $%.2f in rolling %s (%.0f%%, $%.4f remaining)\n",
-				rule.Name, rule.SpentUSD, rule.CapUSD, budget.FormatFuseDuration(rule.Window), rule.Pct(), rule.Remaining)
+			windowKind := "rolling " + budget.FormatFuseDuration(rule.Window)
+			if rule.Name == "baseline" {
+				windowKind = "the current fixed " + budget.FormatFuseDuration(rule.Window) + " UTC slot"
+			}
+			fmt.Printf("%-8s $%.4f of $%.2f in %s (%.0f%%, $%.4f remaining)\n",
+				rule.Name, rule.SpentUSD, rule.CapUSD, windowKind, rule.Pct(), rule.Remaining)
 			if rule.Name == "baseline" {
 				fmt.Printf("         median $%.4f × %.2f, with configured minimum floor\n",
 					rule.BaselineMedianUSD, rule.BaselineMultiplier)
 			}
 			if rule.ProjectedTimeToLimit > 0 {
-				fmt.Printf("         current rate projects limit in %s\n", budget.FormatFuseDuration(rule.ProjectedTimeToLimit))
+				fmt.Printf("         current rate projects limit in %s\n", budget.FormatFuseDuration(max(rule.ProjectedTimeToLimit.Round(time.Second), time.Second)))
 			}
 		}
 		if snapshot.Fanout != nil {

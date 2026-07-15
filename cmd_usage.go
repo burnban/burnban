@@ -258,6 +258,7 @@ func cmdUsage(args []string) error {
 		fmt.Println("\n  PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
 		fmt.Println("  Newest logs are scanned first, so anything dropped is the oldest history. Scan more with --max-scan-mb and --scan-timeout.")
 	}
+	printSourceOutcomes(report)
 	printPricingDiagnostics(prices)
 	fmt.Println("\n  source logs are read-only · no traffic or usage leaves this machine")
 	fmt.Println("  API-key agents routed through `burnban serve` appear separately as live spend.")
@@ -299,6 +300,11 @@ func renderUsageShareCard(card localusage.ShareCard, color bool) string {
 	b.WriteString(row("$"+formatShareUSD(card.APIEquivalentUSD)+" API-EQUIVALENT", shareEmber+shareBold))
 	b.WriteString(row(fmt.Sprintf("%.1f× a %s/mo plan", card.Multiplier, plan), shareBold))
 	b.WriteString(row("", ""))
+	if card.Partial {
+		b.WriteString(row("Partial: a source hit a scan limit; run", cDim))
+		b.WriteString(row("burnban usage for the per-source detail.", cDim))
+		b.WriteString(row("", ""))
+	}
 	b.WriteString(row("Reproduce your number:", cDim))
 	b.WriteString(row(card.InstallCommand, ""))
 	b.WriteString(row(card.Website, shareEmber))
@@ -317,6 +323,32 @@ func formatShareUSD(value float64) string {
 		whole = whole[:i] + "," + whole[i:]
 	}
 	return sign + whole + "." + parts[1]
+}
+
+// printSourceOutcomes names every source the scan checked and how it ended,
+// so the text report carries the same per-source accounting the JSON does.
+func printSourceOutcomes(report localusage.Report) {
+	found, missing, partial := []string{}, []string{}, []string{}
+	for _, provider := range report.Providers {
+		title := usageSourceTitle(provider.Provider)
+		switch {
+		case provider.Error != "" || provider.Partial || len(provider.Warnings) > 0:
+			partial = append(partial, title)
+		case provider.Detected:
+			found = append(found, title)
+		default:
+			missing = append(missing, title)
+		}
+	}
+	line := func(label string, names []string) {
+		if len(names) > 0 {
+			fmt.Printf("  %-10s %s\n", label, safeNames(names))
+		}
+	}
+	fmt.Println("\n  SOURCES CHECKED")
+	line("found", found)
+	line("partial", partial)
+	line("not found", missing)
 }
 
 func printPricingDiagnostics(prices *pricing.Table) {
