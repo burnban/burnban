@@ -968,7 +968,9 @@
     return "overview";
   })();
   const tabLoaded = {};
-  function showTab(name, focusButton) {
+  // updateHash only on explicit tab navigation. The boot call must leave an
+  // unknown fragment (a legacy deep link like #meter) exactly as it arrived.
+  function showTab(name, focusButton, updateHash) {
     if (!TAB_NAMES.includes(name)) name = "overview";
     activeTab = name;
     TAB_NAMES.forEach(tab => { $("tab-" + tab).hidden = tab !== name; });
@@ -979,18 +981,18 @@
       if (selected && focusButton) button.focus();
     });
     try { localStorage.setItem("bb_tab", name); } catch (_) {}
-    if (location.hash !== "#" + name) history.replaceState(history.state, "", "#" + name);
+    if (updateHash && location.hash !== "#" + name) history.replaceState(history.state, "", "#" + name);
     const loader = tabLoaders[name];
     if (loader && !tabLoaded[name]) { tabLoaded[name] = true; loader(); }
     syncActivityTimer();
   }
   tabButtons.forEach((button, index) => {
-    button.addEventListener("click", () => showTab(button.dataset.tab));
+    button.addEventListener("click", () => showTab(button.dataset.tab, false, true));
     button.addEventListener("keydown", event => {
       if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
       event.preventDefault();
       const next = (index + (event.key === "ArrowRight" ? 1 : tabButtons.length - 1)) % tabButtons.length;
-      showTab(tabButtons[next].dataset.tab, true);
+      showTab(tabButtons[next].dataset.tab, true, true);
     });
   });
   window.addEventListener("hashchange", () => {
