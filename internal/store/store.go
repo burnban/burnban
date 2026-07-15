@@ -1213,31 +1213,39 @@ func (s *Store) TokenTotals(t time.Time) (*Totals, error) {
 // StreamExport visits raw request rows for finance/audit tooling, oldest first.
 // The callback runs while the SQLite read cursor is open; returning an error
 // stops the scan immediately. Memory use is bounded by one Request.
+// exportSelectColumns is the full request-row projection shared by the
+// audit-grade export stream and the dashboard's recent-request feed, so the
+// two surfaces can never disagree about what a ledger row contains.
+const exportSelectColumns = `SELECT r.ts, r.provider, r.model, r.agent, r.session,
+	in_tokens, out_tokens, cache_read_tokens, cache_write_tokens,
+	cache_write_1h_tokens, cost_usd, latency_ms, status, streamed, estimated, priced, body_hash,
+	usage_state, pricing_state, incomplete, enforcement_unsafe, route,
+	service_tier, inference_geo, server_tool_calls, fee_unpriced,
+	cost_source,cost_source_ref,cost_effective_from,cost_valid_through,cost_confidence,
+	r.policy_decision_id, r.identity_tenant, r.identity_device, r.principal,
+	r.service_account, r.project, r.cost_center, r.identity_confidence,
+	r.requested_provider, r.requested_model, r.requested_route, r.downshift_action,
+	r.downshift_rule, r.downshift_trigger, r.downshift_reason, r.downshift_config_digest,
+	r.downshift_features, r.downshift_source_estimated_usd, r.downshift_target_estimated_usd,
+	COALESCE(d.policy_digest,''), COALESCE(d.policy_revision,0), COALESCE(d.policy_name,''),
+	COALESCE(d.policy_namespace,''), COALESCE(d.mode,''), COALESCE(d.outcome,''), COALESCE(d.admitted,0), COALESCE(d.confidence,''),
+	COALESCE(d.context_json,''), COALESCE(d.explanation_json,'')
+	FROM requests r LEFT JOIN policy_decisions d ON d.id = r.policy_decision_id`
+
 func (s *Store) StreamExport(since time.Time, visit func(Request) error) error {
 	if visit == nil {
 		return fmt.Errorf("export visitor must not be nil")
 	}
-	rows, err := s.db.Query(`SELECT r.ts, r.provider, r.model, r.agent, r.session,
-		in_tokens, out_tokens, cache_read_tokens, cache_write_tokens,
-		cache_write_1h_tokens, cost_usd, latency_ms, status, streamed, estimated, priced, body_hash,
-		usage_state, pricing_state, incomplete, enforcement_unsafe, route,
-		service_tier, inference_geo, server_tool_calls, fee_unpriced,
-		cost_source,cost_source_ref,cost_effective_from,cost_valid_through,cost_confidence,
-		r.policy_decision_id, r.identity_tenant, r.identity_device, r.principal,
-		r.service_account, r.project, r.cost_center, r.identity_confidence,
-		r.requested_provider, r.requested_model, r.requested_route, r.downshift_action,
-		r.downshift_rule, r.downshift_trigger, r.downshift_reason, r.downshift_config_digest,
-		r.downshift_features, r.downshift_source_estimated_usd, r.downshift_target_estimated_usd,
-		COALESCE(d.policy_digest,''), COALESCE(d.policy_revision,0), COALESCE(d.policy_name,''),
-		COALESCE(d.policy_namespace,''), COALESCE(d.mode,''), COALESCE(d.outcome,''), COALESCE(d.admitted,0), COALESCE(d.confidence,''),
-		COALESCE(d.context_json,''), COALESCE(d.explanation_json,'')
-		FROM requests r LEFT JOIN policy_decisions d ON d.id = r.policy_decision_id
-		WHERE r.ts >= ? ORDER BY r.ts, r.id`,
+	rows, err := s.db.Query(exportSelectColumns+` WHERE r.ts >= ? ORDER BY r.ts, r.id`,
 		since.UTC().Format(time.RFC3339))
 	if err != nil {
 		return err
 	}
 	defer rows.Close()
+	return scanExportRows(rows, visit)
+}
+
+func scanExportRows(rows *sql.Rows, visit func(Request) error) error {
 	for rows.Next() {
 		var r Request
 		var ts string
@@ -1278,6 +1286,26 @@ func (s *Store) StreamExport(since time.Time, visit func(Request) error) error {
 		}
 	}
 	return rows.Err()
+}
+
+// RecentRequests returns the newest ledger rows, newest first, for the
+// dashboard's live activity feed. It shares the export projection so a row
+// shown live carries exactly the fields a later audit export would.
+func (s *Store) RecentRequests(limit int) ([]Request, error) {
+	if limit <= 0 {
+		return nil, fmt.Errorf("recent request limit must be greater than zero")
+	}
+	rows, err := s.db.Query(exportSelectColumns+` ORDER BY r.ts DESC, r.id DESC LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make([]Request, 0, limit)
+	err = scanExportRows(rows, func(r Request) error {
+		out = append(out, r)
+		return nil
+	})
+	return out, err
 }
 
 // Export returns raw request rows for compatibility with callers that need a

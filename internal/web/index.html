@@ -45,7 +45,9 @@
     position: fixed; inset: 0; pointer-events: none; z-index: 0; opacity: .22;
     background: repeating-linear-gradient(0deg, rgba(0,0,0,.22) 0 1px, transparent 1px 3px);
   }
-  main { position: relative; z-index: 1; width: 100%; max-width: 1060px; margin: 0 auto; padding: 28px 22px 48px; }
+  main { position: relative; z-index: 1; width: 100%; max-width: 1100px; margin: 0 auto; padding: 26px 22px 48px; }
+  [hidden] { display: none !important; }
+  .hidden { display: none !important; }
 
   .label {
     font-family: var(--cond);
@@ -56,7 +58,7 @@
   /* ── header: equipment nameplate ─────────────────────────── */
   header {
     display: flex; justify-content: space-between; align-items: baseline; gap: 16px;
-    padding-bottom: 14px; border-bottom: 1px solid var(--line);
+    padding-bottom: 12px; border-bottom: 1px solid var(--line);
   }
   .brand { font-family: var(--cond); font-size: 20px; letter-spacing: .22em; font-weight: 700; }
   .brand em { font-style: normal; color: var(--ember); }
@@ -68,16 +70,41 @@
   .dot.wait { background: var(--warn); box-shadow: 0 0 8px var(--warn); }
   @keyframes pulse { 50% { opacity: .35; } }
 
+  /* ── channel selector (tabs) ─────────────────────────────── */
+  .tabs {
+    display: flex; gap: 0; margin-top: 14px; border: 1px solid var(--line);
+    background: #100c08; overflow-x: auto; scrollbar-width: none;
+  }
+  .tabs::-webkit-scrollbar { display: none; }
+  .tabs button {
+    appearance: none; border: 0; border-right: 1px solid var(--line);
+    background: transparent; color: var(--dim); cursor: pointer;
+    padding: 11px 16px; min-height: 44px; flex: 1; white-space: nowrap;
+    font: 700 11px var(--cond); letter-spacing: .16em; text-transform: uppercase;
+    position: relative;
+  }
+  .tabs button:last-child { border-right: 0; }
+  .tabs button:hover { color: var(--ember-hi); }
+  .tabs button[aria-selected="true"] {
+    color: var(--ember-hi); background: rgba(255, 122, 47, .1);
+    box-shadow: inset 0 -2px 0 var(--ember);
+  }
+  .action-line {
+    margin-top: 10px; font-size: 12px; color: var(--faint); min-height: 18px;
+    overflow-wrap: anywhere;
+  }
+  .action-line.ok { color: var(--ok); }
+  .action-line.err { color: var(--hot); }
+
   /* ── lockout banner ──────────────────────────────────────── */
   .ban {
-    margin-top: 18px; padding: 13px 18px;
+    margin-top: 14px; padding: 13px 18px;
     font-family: var(--cond); letter-spacing: .16em; font-weight: 700; font-size: 13px;
     color: #ff8a7a; text-transform: uppercase;
     border: 1px solid rgba(255, 77, 61, .45);
     background: repeating-linear-gradient(-45deg, rgba(255,77,61,.14) 0 16px, rgba(255,77,61,.03) 16px 32px);
   }
   .ban .dim { color: #b06a5c; letter-spacing: .1em; font-weight: 400; text-transform: none; margin-left: 10px; }
-  .hidden { display: none; }
   .error-box { margin-top: 10px; padding: 10px 12px; color: var(--warn); border: 1px solid rgba(240,179,78,.35); background: rgba(240,179,78,.06); font-size: 12px; }
   .error-box button { margin-left: 10px; }
   .auth-prompt { margin-top: 14px; padding-bottom: 16px; }
@@ -87,7 +114,7 @@
   /* ── hero readout ────────────────────────────────────────── */
   .hero {
     display: flex; justify-content: space-between; align-items: flex-end; gap: 28px;
-    padding: 34px 0 30px; flex-wrap: wrap;
+    padding: 30px 0 28px; flex-wrap: wrap;
   }
   .big {
     font-size: clamp(64px, 12vw, 132px); font-weight: 700; line-height: .95;
@@ -120,6 +147,7 @@
   .fill.warm { background: linear-gradient(90deg, #8a6420, var(--warn)); }
   .fill.hot  { background: linear-gradient(90deg, #8a2318, var(--hot)); animation: heat 1.2s ease-in-out infinite; }
   @keyframes heat { 50% { filter: brightness(1.25); } }
+  .track.slim { height: 12px; }
 
   /* ── analog burn gauge (hero alternate view) ─────────────── */
   .label-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
@@ -147,15 +175,18 @@
   .chartp { margin-top: 26px; }
   .chartp svg { width: 100%; height: 120px; display: block; margin-top: 10px; }
   .grid { display: grid; grid-template-columns: minmax(0, 1.4fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
-  @media (max-width: 780px) { .grid { grid-template-columns: 1fr; } .hero { align-items: flex-start; flex-direction: column; } }
-  .panel { min-width: 0; background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 10px; }
+  .grid2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; margin-top: 14px; }
+  @media (max-width: 820px) { .grid, .grid2 { grid-template-columns: 1fr; } .hero { align-items: flex-start; flex-direction: column; } }
+  .panel { min-width: 0; background: var(--panel); border: 1px solid var(--line); padding: 16px 18px 12px; }
   /* Stale state is announced in text; ancestor opacity would make otherwise
      accessible text fail contrast in offline/auth states. */
   .last-update { margin-top: 6px; color: var(--faint); font-size: 11px; }
   .panel h2 {
     font-family: var(--cond); font-size: 11px; letter-spacing: .18em; font-weight: 700;
     color: var(--dim); padding-bottom: 10px; border-bottom: 1px solid var(--line-soft);
+    display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline;
   }
+  .panel h2 .cli { color: var(--faint); letter-spacing: .06em; font-family: var(--mono); font-weight: 400; text-transform: none; font-size: 11px; }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   .table-scroll table { min-width: 640px; }
   th {
@@ -165,13 +196,16 @@
   th:first-child, td:first-child { text-align: left; padding-left: 0; }
   td { padding: 7px 0 7px 12px; text-align: right; border-top: 1px solid var(--line-soft); font-size: 13px; }
   td.cost { color: var(--ember); font-weight: 700; }
-  td.name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; }
+  td.name { color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 260px; text-align: left; }
+  td.left { text-align: left; }
   tr.empty td { color: var(--faint); text-align: left; padding: 14px 0; border-top: none; }
+  tr.other td { color: var(--dim); }
+  .chip { display: inline-block; padding: 1px 6px; border: 1px solid var(--line-soft); color: var(--dim); font-size: 10px; letter-spacing: .08em; }
+  .chip.ok { color: var(--ok); border-color: rgba(157,199,108,.3); }
+  .chip.warn { color: var(--warn); border-color: rgba(240,179,78,.35); }
+  .chip.hot { color: var(--hot); border-color: rgba(255,77,61,.4); }
 
-  /* ── local subscription / agent-log usage ────────────────── */
-  .local-usage { margin-top: 22px; padding: 18px; }
-  .local-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
-  .local-title { font-family: var(--cond); font-size: 22px; letter-spacing: .08em; margin-top: 2px; }
+  /* ── window chips / small controls ───────────────────────── */
   .windows { display: flex; border: 1px solid var(--line); }
   .windows button {
     appearance: none; border: 0; border-right: 1px solid var(--line); background: #100c08;
@@ -180,6 +214,29 @@
   }
   .windows button:last-child { border-right: 0; }
   .windows button.active { color: var(--ember-hi); background: rgba(255,122,47,.12); }
+  .toolbar { display: flex; align-items: center; justify-content: space-between; gap: 12px; flex-wrap: wrap; margin: 18px 0 0; }
+  .toolbar .group { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+  select {
+    appearance: none; border: 1px solid var(--line); background: #100c08; color: var(--text);
+    min-height: 36px; padding: 6px 26px 6px 10px; font: 13px var(--mono); cursor: pointer;
+    background-image: linear-gradient(45deg, transparent 50%, var(--dim) 50%), linear-gradient(135deg, var(--dim) 50%, transparent 50%);
+    background-position: calc(100% - 14px) 55%, calc(100% - 9px) 55%; background-size: 5px 5px; background-repeat: no-repeat;
+  }
+  input[type="text"], input[type="number"], input[type="url"], input[type="password"] {
+    border: 1px solid var(--line); background: #0c0906; color: var(--text);
+    min-height: 36px; padding: 6px 10px; font: 13px var(--mono);
+  }
+  input:disabled, select:disabled, button:disabled { opacity: .45; cursor: not-allowed; }
+  .num { width: 96px; }
+  .totals-band { display: grid; grid-template-columns: repeat(auto-fit, minmax(110px, 1fr)); gap: 10px; margin-top: 14px; }
+  .totals-band .cell { border-left: 1px solid var(--line); padding-left: 11px; }
+  .totals-band .cell .val { margin-top: 3px; font-size: 19px; font-weight: 700; font-variant-numeric: tabular-nums; }
+  .totals-band .cell .val.money { color: var(--ember); }
+
+  /* ── local subscription / agent-log usage ────────────────── */
+  .local-usage { margin-top: 22px; padding: 18px; }
+  .local-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 18px; }
+  .local-title { font-family: var(--cond); font-size: 22px; letter-spacing: .08em; margin-top: 2px; }
   .sub-hero { display: flex; justify-content: space-between; align-items: flex-end; gap: 24px; margin: 22px 0 16px; flex-wrap: wrap; }
   .sub-cost { color: var(--ember); font-size: clamp(38px, 7vw, 62px); font-weight: 700; line-height: 1; }
   .token-grid { display: grid; grid-template-columns: repeat(5, minmax(82px, 1fr)); gap: 8px; flex: 1; min-width: min(100%, 520px); }
@@ -193,7 +250,7 @@
   .table-scroll { width: 100%; max-width: 100%; min-width: 0; overflow-x: auto; overscroll-behavior-inline: contain; }
   .source-name { color: var(--dim); }
   .model-indent { padding-left: 10px; }
-  .section-kicker { margin-top: 28px; display: flex; align-items: center; gap: 10px; color: var(--faint); }
+  .section-kicker { margin-top: 26px; display: flex; align-items: center; gap: 10px; color: var(--faint); }
   .section-kicker::after { content: ""; height: 1px; flex: 1; background: var(--line); }
   .connect { margin-top: 12px; padding: 0; }
   .connect summary {
@@ -208,11 +265,17 @@
   .route-value { display: flex; gap: 8px; align-items: center; min-width: 0; }
   .route code { min-width: 0; color: var(--ember-hi); overflow-wrap: anywhere; user-select: all; flex: 1; }
   button { font-family: var(--mono); }
-  .copy, .retry {
+  .copy, .retry, .btn {
     appearance: none; border: 1px solid var(--line); background: #100c08; color: var(--text);
-    min-height: 36px; padding: 7px 10px; cursor: pointer; white-space: nowrap;
+    min-height: 36px; padding: 7px 12px; cursor: pointer; white-space: nowrap; font-size: 13px;
   }
-  .copy:hover, .retry:hover { border-color: var(--ember); color: var(--ember-hi); }
+  .copy:hover, .retry:hover, .btn:hover { border-color: var(--ember); color: var(--ember-hi); }
+  .btn.primary { border-color: rgba(255,122,47,.5); color: var(--ember-hi); background: rgba(255,122,47,.1); }
+  .btn.primary:hover { background: rgba(255,122,47,.18); }
+  .btn.danger { border-color: rgba(255,77,61,.5); color: #ff8a7a; background: rgba(255,77,61,.08); }
+  .btn.danger:hover { background: rgba(255,77,61,.16); border-color: var(--hot); color: #ffb0a0; }
+  .btn.armed { background: var(--hot); border-color: var(--hot); color: #1a0503; font-weight: 700; animation: heat 1s ease-in-out infinite; }
+  .btn.ghost { border-color: var(--line-soft); color: var(--dim); background: transparent; }
   :focus-visible { outline: 3px solid var(--ember-hi); outline-offset: 3px; }
   .platforms { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; flex-wrap: wrap; }
   .platforms button[aria-pressed="true"] { color: var(--ember-hi); border-color: var(--ember); background: rgba(255,122,47,.12); }
@@ -242,6 +305,27 @@
   .receipt li em { color: var(--ember); font-style: normal; font-weight: 700; }
   .receipt li.clean { color: var(--ok); }
   .receipt li.clean::before { color: var(--ok); }
+
+  /* ── control room (guardrails) ───────────────────────────── */
+  .control-note { margin-top: 14px; }
+  .form-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin: 10px 0; }
+  .form-row .label { min-width: 88px; }
+  .cap-row { padding: 12px 0 10px; border-top: 1px solid var(--line-soft); }
+  .cap-row:first-of-type { border-top: 0; }
+  .cap-head { display: flex; justify-content: space-between; gap: 10px; flex-wrap: wrap; align-items: baseline; margin-bottom: 7px; }
+  .cap-head .pos { font-variant-numeric: tabular-nums; }
+  .cap-head .pos b { color: var(--ember); }
+  .kv { display: grid; grid-template-columns: 170px minmax(0,1fr); gap: 4px 14px; font-size: 13px; margin-top: 10px; }
+  .kv dt { color: var(--faint); }
+  .kv dd { overflow-wrap: anywhere; font-variant-numeric: tabular-nums; }
+  .doc-block { margin-top: 10px; }
+  .doc-block summary { cursor: pointer; color: var(--dim); font-size: 12px; padding: 6px 0; }
+  .doc-block pre {
+    margin-top: 6px; padding: 12px; border: 1px solid var(--line-soft); background: #0c0906;
+    color: var(--dim); font-size: 11.5px; line-height: 1.45; overflow: auto; max-height: 340px; white-space: pre-wrap; word-break: break-word;
+  }
+  .status-strip { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 12px; }
+  .row-actions { display: flex; gap: 6px; justify-content: flex-end; }
 
   footer { margin-top: 26px; color: var(--faint); font-size: 12px; text-align: center; letter-spacing: .04em; }
 
@@ -276,6 +360,16 @@
     <div class="status" role="status" aria-live="polite"><span id="dot" class="dot wait"></span><span id="statusText">LOADING</span>&nbsp;·&nbsp;<span id="clock">—</span></div>
   </header>
 
+  <nav class="tabs reveal" role="tablist" aria-label="Dashboard sections">
+    <button type="button" role="tab" data-tab="overview" aria-selected="true">Overview</button>
+    <button type="button" role="tab" data-tab="report" aria-selected="false">Report</button>
+    <button type="button" role="tab" data-tab="activity" aria-selected="false">Activity</button>
+    <button type="button" role="tab" data-tab="controls" aria-selected="false">Controls</button>
+    <button type="button" role="tab" data-tab="optimize" aria-selected="false">Optimize</button>
+    <button type="button" role="tab" data-tab="system" aria-selected="false">System</button>
+  </nav>
+  <div id="actionLine" class="action-line" role="status" aria-live="polite"></div>
+
   <section id="banBanner" class="ban hidden" role="alert" aria-live="assertive"><span id="banText">Burn ban in effect — all agent spend paused</span><span id="banHint" class="dim">lift with: burnban lift</span></section>
 
   <section id="authPrompt" class="panel auth-prompt hidden" aria-labelledby="authTitle">
@@ -288,6 +382,9 @@
     </div>
     <div id="authError" class="sub-note" role="alert" aria-live="polite"></div>
   </section>
+
+  <!-- ════════ OVERVIEW ════════ -->
+  <div id="tab-overview" role="tabpanel" aria-label="Overview">
 
   <section id="localUsagePanel" class="panel local-usage reveal d1 hidden">
     <div class="local-head">
@@ -433,6 +530,268 @@
 
   <div id="lastUpdate" class="last-update" role="status" aria-live="polite">Waiting for the first meter update…</div>
   </div>
+  </div>
+
+  <!-- ════════ REPORT ════════ -->
+  <div id="tab-report" role="tabpanel" aria-label="Report" hidden>
+    <div class="toolbar">
+      <div class="group">
+        <span class="label">Window</span>
+        <div class="windows" id="reportWindows" aria-label="Report window">
+          <button type="button" data-rwindow="today" class="active">today</button>
+          <button type="button" data-rwindow="24h">24h</button>
+          <button type="button" data-rwindow="7d">7 days</button>
+          <button type="button" data-rwindow="30d">30 days</button>
+        </div>
+      </div>
+      <div class="group">
+        <button id="exportCSV" class="btn" type="button">Export CSV</button>
+        <button id="exportJSON" class="btn" type="button">Export JSON</button>
+      </div>
+    </div>
+    <section class="panel reveal" style="margin-top:14px">
+      <h2>Proxy ledger — <span id="reportLabel">today</span><span class="cli">CLI: burnban report --since 7d</span></h2>
+      <div class="totals-band">
+        <div class="cell"><div class="label">Total</div><div id="repTotal" class="val money">—</div></div>
+        <div class="cell"><div class="label">Requests</div><div id="repReqs" class="val">—</div></div>
+        <div class="cell"><div class="label">Input</div><div id="repIn" class="val">—</div></div>
+        <div class="cell"><div class="label">Output</div><div id="repOut" class="val">—</div></div>
+        <div class="cell"><div class="label">Cache r/w</div><div id="repCache" class="val">—</div></div>
+        <div class="cell"><div class="label">Cache hit</div><div id="repHit" class="val">—</div></div>
+        <div class="cell"><div class="label">Last hour</div><div id="repHour" class="val money">—</div></div>
+      </div>
+      <div id="reportNotes" class="sub-note"></div>
+    </section>
+    <section class="grid reveal d1">
+      <div class="panel">
+        <h2>By model</h2>
+        <div class="table-scroll" role="region" aria-label="Window spend by model" tabindex="0"><table>
+          <thead><tr><th>model</th><th>req</th><th>in</th><th>out</th><th>cache r/w</th><th>cost</th></tr></thead>
+          <tbody id="repModels"><tr class="empty"><td colspan="6">loading…</td></tr></tbody>
+        </table></div>
+      </div>
+      <div class="panel">
+        <h2>By agent</h2>
+        <div class="table-scroll" role="region" aria-label="Window spend by agent" tabindex="0"><table>
+          <thead><tr><th>agent</th><th>req</th><th>cost</th></tr></thead>
+          <tbody id="repAgents"><tr class="empty"><td colspan="3">loading…</td></tr></tbody>
+        </table></div>
+      </div>
+    </section>
+    <section class="receipt reveal d2">
+      <h2>Waste receipts — window<span>keep them</span></h2>
+      <ul id="repReceipts"><li class="clean">loading…</li></ul>
+    </section>
+    <section class="panel reveal d3" style="margin-top:14px">
+      <h2>What-if — same tokens on one model<span class="cli">CLI: burnban whatif --since 7d</span></h2>
+      <div id="whatifSummary" class="sub-note">loading…</div>
+      <div class="table-scroll" role="region" aria-label="What-if repricing" tabindex="0"><table>
+        <thead><tr><th>model</th><th>would cost</th><th>vs actual</th></tr></thead>
+        <tbody id="whatifRows"></tbody>
+      </table></div>
+      <div class="form-row"><button id="whatifMore" class="btn ghost hidden" type="button">Show all models</button></div>
+      <div class="sub-note">Each request is repriced separately, including target long-context tiers. Tokenizers and model verbosity differ, so this is an estimate, not a quote.</div>
+    </section>
+  </div>
+
+  <!-- ════════ ACTIVITY ════════ -->
+  <div id="tab-activity" role="tabpanel" aria-label="Activity" hidden>
+    <div class="toolbar">
+      <div class="group">
+        <span class="label">Rows</span>
+        <select id="actLimit" aria-label="Number of requests shown">
+          <option>25</option><option selected>50</option><option>100</option><option>200</option>
+        </select>
+        <button id="actRefresh" class="btn" type="button">Refresh</button>
+      </div>
+      <div class="group">
+        <label class="label" for="actAuto">Auto-refresh 5s</label>
+        <input type="checkbox" id="actAuto" checked>
+      </div>
+    </div>
+    <section class="panel reveal" style="margin-top:14px">
+      <h2>Recent proxied requests — newest first<span class="cli">CLI: burnban top · burnban export</span></h2>
+      <div class="table-scroll" role="region" aria-label="Recent requests" tabindex="0"><table style="min-width:820px">
+        <thead><tr><th>time</th><th>model</th><th>agent</th><th>status</th><th>in</th><th>out</th><th>cache r/w</th><th>ms</th><th>cost</th></tr></thead>
+        <tbody id="actRows"><tr class="empty"><td colspan="9">loading…</td></tr></tbody>
+      </table></div>
+      <div class="sub-note">Full audit fields (session, route, policy decisions, downshift, cost provenance) are in the CSV/JSON export on the Report tab.</div>
+    </section>
+  </div>
+
+  <!-- ════════ CONTROLS ════════ -->
+  <div id="tab-controls" role="tabpanel" aria-label="Controls" hidden>
+    <div id="adminReadOnly" class="error-box control-note hidden">
+      This gateway's dashboard is read-only. Controls are always available on the machine running burnban (localhost dashboard or CLI); a team gateway enables them with <code>burnban serve --allow-remote-admin</code>.
+    </div>
+
+    <section class="panel reveal" style="margin-top:14px">
+      <h2>Emergency stop<span class="cli">CLI: burnban ban · burnban lift</span></h2>
+      <div class="status-strip" id="banStatusStrip"></div>
+      <div class="form-row">
+        <button id="ctlBan" class="btn danger" type="button" data-armed-label="CONFIRM — PAUSE ALL SPEND">Engage burn ban</button>
+        <button id="ctlLift" class="btn primary" type="button">Lift burn ban</button>
+        <button id="ctlLiftToday" class="btn" type="button" data-armed-label="CONFIRM — CAPS OFF UNTIL MIDNIGHT">Lift + override caps today</button>
+      </div>
+      <div class="sub-note">Ban pauses every request through the proxy immediately. Lift + override additionally suspends all local caps until midnight; setting any cap re-arms them.</div>
+    </section>
+
+    <section class="grid2 reveal d1">
+      <div class="panel">
+        <h2>Calendar caps<span class="cli">CLI: burnban cap --daily 10</span></h2>
+        <div id="capRows"></div>
+        <div class="form-row" style="border-top:1px solid var(--line-soft); padding-top:12px">
+          <span class="label">Warn at</span>
+          <input id="warnPct" class="num" type="number" min="0" max="100" step="1" inputmode="decimal" aria-label="Warning threshold percent">
+          <span class="sub-note" style="margin:0">% of any cap</span>
+          <button id="warnSet" class="btn" type="button">Set</button>
+          <span id="warnState" class="sub-note" style="margin:0"></span>
+        </div>
+        <div class="form-row">
+          <button id="capsAllOff" class="btn ghost" type="button" data-armed-label="CONFIRM — REMOVE ALL GLOBAL CAPS">Remove all global caps</button>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Per-agent daily caps<span class="cli">CLI: burnban cap --agent NAME --daily 5</span></h2>
+        <div class="table-scroll"><table>
+          <thead><tr><th>agent</th><th>spent today</th><th>cap</th><th>left</th><th></th></tr></thead>
+          <tbody id="agentCapRows"><tr class="empty"><td colspan="5">no per-agent caps set</td></tr></tbody>
+        </table></div>
+        <div class="form-row">
+          <input id="agentCapName" type="text" placeholder="agent name (as shown in reports)" style="flex:1;min-width:150px" aria-label="Agent name">
+          <span aria-hidden="true">$</span><input id="agentCapUSD" class="num" type="number" min="0.01" step="0.01" inputmode="decimal" aria-label="Agent daily cap in dollars">
+          <button id="agentCapSet" class="btn" type="button">Set cap</button>
+        </div>
+        <div class="sub-note">Attribution uses the client name or the <code>x-burnban-agent</code> header. Agent caps are daily and reset at midnight.</div>
+      </div>
+    </section>
+
+    <section class="panel reveal d2" style="margin-top:14px">
+      <h2>Velocity fuses — stop runaway loops<span class="cli">CLI: burnban fuse --burst 5m:4</span></h2>
+      <div id="fuseTripBox" class="error-box hidden"></div>
+      <div id="fuseRows"></div>
+      <div class="grid2" style="margin-top:4px">
+        <div>
+          <div class="form-row"><span class="label">Hourly</span><span aria-hidden="true">$</span><input id="fuseHourly" class="num" type="number" min="0" step="0.01" inputmode="decimal" aria-label="Hourly fuse dollars"><button class="btn" id="fuseHourlySet" type="button">Arm</button><button class="btn ghost" id="fuseHourlyOff" type="button">Remove</button></div>
+          <div class="form-row"><span class="label">Burst</span>
+            <select id="fuseBurstWin" aria-label="Burst window"><option>1m</option><option selected>5m</option><option>10m</option><option>30m</option><option>1h</option></select>
+            <span aria-hidden="true">$</span><input id="fuseBurstUSD" class="num" type="number" min="0.01" step="0.01" inputmode="decimal" aria-label="Burst fuse dollars">
+            <button class="btn" id="fuseBurstSet" type="button">Arm</button><button class="btn ghost" id="fuseBurstOff" type="button">Remove</button>
+          </div>
+          <div class="form-row"><span class="label">Fan-out</span>
+            <select id="fuseFanWin" aria-label="Fan-out window"><option selected>1m</option><option>5m</option><option>10m</option><option>1h</option></select>
+            <input id="fuseFanReq" class="num" type="number" min="1" step="1" inputmode="numeric" aria-label="Fan-out request limit"><span class="sub-note" style="margin:0">requests</span>
+            <button class="btn" id="fuseFanSet" type="button">Arm</button><button class="btn ghost" id="fuseFanOff" type="button">Remove</button>
+          </div>
+        </div>
+        <div>
+          <div class="form-row"><span class="label">Baseline</span>
+            <input id="fuseBaseMult" class="num" type="number" min="1.1" max="100" step="0.1" value="3" inputmode="decimal" aria-label="Baseline multiplier"><span class="sub-note" style="margin:0">× median of</span>
+            <select id="fuseBaseDays" aria-label="Baseline lookback days"><option>7</option><option selected>14</option><option>30</option></select><span class="sub-note" style="margin:0">days, per</span>
+            <select id="fuseBaseWin" aria-label="Baseline slot"><option>30m</option><option selected>1h</option><option>2h</option><option>4h</option></select>
+            <button class="btn" id="fuseBaseSet" type="button">Arm</button><button class="btn ghost" id="fuseBaseOff" type="button">Remove</button>
+          </div>
+          <div class="form-row"><span class="label">Cooldown</span>
+            <select id="fuseCooldown" aria-label="Cooldown after a trip"><option>5m</option><option selected>15m</option><option>30m</option><option>1h</option><option>6h</option><option>24h</option></select>
+            <button class="btn" id="fuseCooldownSet" type="button">Set</button>
+            <span id="fuseCooldownState" class="sub-note" style="margin:0"></span>
+          </div>
+          <div class="form-row">
+            <button id="fuseReset" class="btn primary" type="button">Reset cooldown</button>
+            <button id="fuseAllOff" class="btn ghost" type="button" data-armed-label="CONFIRM — REMOVE ALL FUSES">Remove all fuses</button>
+          </div>
+        </div>
+      </div>
+      <div class="sub-note">Fuses use rolling windows and persist a cooldown when tripped, so a runaway loop cannot resume by restarting the proxy. Baseline compares the current UTC slot against the median of the same slot on previous days.</div>
+    </section>
+
+    <section class="panel reveal d3" style="margin-top:14px">
+      <h2>Alerts<span class="cli">CLI: burnban alert --webhook URL</span></h2>
+      <div class="form-row">
+        <input id="webhookURL" type="url" placeholder="https://hooks.slack.com/services/…" style="flex:1;min-width:220px" aria-label="Webhook URL">
+        <button id="webhookSet" class="btn" type="button">Set webhook</button>
+        <button id="webhookOff" class="btn ghost" type="button">Remove</button>
+      </div>
+      <div id="webhookState" class="sub-note">no webhook set</div>
+      <div class="sub-note">Burnban POSTs a Slack-compatible payload for early warnings, cap trips, and each velocity-fuse incident.</div>
+    </section>
+
+    <section class="panel reveal d4" style="margin-top:14px">
+      <h2>External policy</h2>
+      <div id="extPolicyBox" class="sub-note">none — this meter is fully locally controlled</div>
+    </section>
+  </div>
+
+  <!-- ════════ OPTIMIZE ════════ -->
+  <div id="tab-optimize" role="tabpanel" aria-label="Optimize" hidden>
+    <div class="toolbar">
+      <div class="group">
+        <span class="label">Cache window</span>
+        <div class="windows" id="optWindows" aria-label="Optimize window">
+          <button type="button" data-owindow="7d">7 days</button>
+          <button type="button" data-owindow="30d" class="active">30 days</button>
+          <button type="button" data-owindow="90d">90 days</button>
+        </div>
+      </div>
+      <div class="group">
+        <span class="label">Allocate by</span>
+        <select id="optDimension" aria-label="Allocation dimension"><option selected>agent</option><option>project</option><option>meter</option><option>team</option></select>
+        <button id="optRefresh" class="btn" type="button">Refresh</button>
+      </div>
+    </div>
+    <section class="panel reveal" style="margin-top:14px">
+      <h2>Cache shaping — repeated large contexts with low reuse<span class="cli">CLI: burnban optimize cache</span></h2>
+      <div id="optCacheMeta" class="sub-note">loading…</div>
+      <div class="table-scroll" role="region" aria-label="Cache recommendations" tabindex="0"><table>
+        <thead><tr><th>scope</th><th>provider / model</th><th>large calls</th><th>cache reuse</th><th>confidence</th></tr></thead>
+        <tbody id="optCacheRows"></tbody>
+      </table></div>
+      <div class="sub-note">Where provider/model caching is documented, put reusable instructions and tool definitions before request-specific context, configure the documented TTL, then measure again. Burnban stores token metadata, not prompt bodies.</div>
+    </section>
+    <section class="panel reveal d1" style="margin-top:14px">
+      <h2>Budget allocation proposals<span class="cli">CLI: burnban optimize allocation</span></h2>
+      <div id="optAllocMeta" class="sub-note">loading…</div>
+      <div class="table-scroll" role="region" aria-label="Allocation proposals" tabindex="0"><table style="min-width:720px">
+        <thead><tr><th>scope</th><th>weight</th><th>daily proposal</th><th>recent/day</th><th>sim blocked</th><th>confidence</th><th></th></tr></thead>
+        <tbody id="optAllocRows"></tbody>
+      </table></div>
+    </section>
+    <section class="panel reveal d2" style="margin-top:14px">
+      <h2>Downshift routing<span class="cli">CLI: burnban downshift show</span></h2>
+      <div id="downshiftBox" class="sub-note">loading…</div>
+    </section>
+  </div>
+
+  <!-- ════════ SYSTEM ════════ -->
+  <div id="tab-system" role="tabpanel" aria-label="System" hidden>
+    <section class="grid2 reveal" style="margin-top:14px">
+      <div class="panel">
+        <h2>Meter health<span class="cli">CLI: burnban doctor · burnban status</span></h2>
+        <dl class="kv" id="sysHealth"><dt>state</dt><dd>loading…</dd></dl>
+      </div>
+      <div class="panel">
+        <h2>Lifetime ledger</h2>
+        <dl class="kv" id="sysLedger"><dt>requests</dt><dd>loading…</dd></dl>
+      </div>
+    </section>
+    <section class="panel reveal d1" style="margin-top:14px">
+      <h2>Pricing table<span class="cli">CLI: burnban pricing</span></h2>
+      <div id="pricingMeta" class="sub-note">loading…</div>
+      <div class="form-row"><input id="pricingSearch" type="text" placeholder="filter models…" style="flex:1;min-width:200px" aria-label="Filter pricing table"></div>
+      <div class="table-scroll" role="region" aria-label="Model pricing" tabindex="0"><table style="min-width:680px">
+        <thead><tr><th>model</th><th>in $/MTok</th><th>out $/MTok</th><th>cache r×</th><th>cache w×</th><th>notes</th></tr></thead>
+        <tbody id="pricingRows"></tbody>
+      </table></div>
+    </section>
+    <section class="panel reveal d2" style="margin-top:14px">
+      <h2>Admission policy<span class="cli">CLI: burnban policy show · coverage</span></h2>
+      <div id="policyBox" class="sub-note">loading…</div>
+    </section>
+    <section class="panel reveal d3" style="margin-top:14px">
+      <h2>Invoice reconciliation — last 30 days<span class="cli">CLI: burnban reconcile report</span></h2>
+      <div id="reconcileBox" class="sub-note">loading…</div>
+    </section>
+  </div>
 
   <footer class="reveal d5"><span id="exposure">local listener</span> · no additional telemetry · <span id="trafficMode">provider-bound traffic passes through</span> · keys never stored · <span id="ver">burnban</span></footer>
 </main>
@@ -467,6 +826,7 @@
   };
   const exactTok = value => Number(value || 0).toLocaleString();
   const esc = value => String(value ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  const micros$ = value => fmt$(Number(value || 0) / 1e6);
   const requestOptions = signal => ({
     signal, cache: "no-store", credentials: "same-origin",
     headers: TOKEN ? { "x-burnban-token": TOKEN } : {}
@@ -480,6 +840,12 @@
       void el.offsetWidth;
       el.classList.add("flash");
     }
+  }
+
+  function actionLine(message, kind) {
+    const el = $("actionLine");
+    el.textContent = message ? "· " + message : "";
+    el.className = "action-line" + (kind ? " " + kind : "");
   }
 
   function connection(state, detail = "") {
@@ -500,6 +866,112 @@
     }
   }
 
+  // ── tab plumbing ─────────────────────────────────────────────
+  const TAB_NAMES = ["overview", "report", "activity", "controls", "optimize", "system"];
+  const tabButtons = Array.from(document.querySelectorAll(".tabs [data-tab]"));
+  let activeTab = (() => {
+    const fromHash = (location.hash || "").replace("#", "");
+    if (TAB_NAMES.includes(fromHash)) return fromHash;
+    try { const stored = localStorage.getItem("bb_tab"); if (TAB_NAMES.includes(stored)) return stored; } catch (_) {}
+    return "overview";
+  })();
+  const tabLoaded = {};
+  function showTab(name, focusButton) {
+    if (!TAB_NAMES.includes(name)) name = "overview";
+    activeTab = name;
+    TAB_NAMES.forEach(tab => { $("tab-" + tab).hidden = tab !== name; });
+    tabButtons.forEach(button => {
+      const selected = button.dataset.tab === name;
+      button.setAttribute("aria-selected", String(selected));
+      button.tabIndex = selected ? 0 : -1;
+      if (selected && focusButton) button.focus();
+    });
+    try { localStorage.setItem("bb_tab", name); } catch (_) {}
+    if (location.hash !== "#" + name) history.replaceState(history.state, "", "#" + name);
+    const loader = tabLoaders[name];
+    if (loader && !tabLoaded[name]) { tabLoaded[name] = true; loader(); }
+    syncActivityTimer();
+  }
+  tabButtons.forEach((button, index) => {
+    button.addEventListener("click", () => showTab(button.dataset.tab));
+    button.addEventListener("keydown", event => {
+      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
+      event.preventDefault();
+      const next = (index + (event.key === "ArrowRight" ? 1 : tabButtons.length - 1)) % tabButtons.length;
+      showTab(tabButtons[next].dataset.tab, true);
+    });
+  });
+  window.addEventListener("hashchange", () => {
+    const name = (location.hash || "").replace("#", "");
+    if (TAB_NAMES.includes(name) && name !== activeTab) showTab(name);
+  });
+
+  async function getJSON(path) {
+    const response = await fetch(path, requestOptions());
+    if (!response.ok) {
+      const text = (await response.text().catch(() => "")).trim();
+      const error = new Error(text || `HTTP ${response.status}`);
+      error.status = response.status;
+      throw error;
+    }
+    return response.json();
+  }
+
+  let allowAdmin = false;
+  async function postAdmin(path, body) {
+    const response = await fetch(path, {
+      method: "POST", cache: "no-store", credentials: "same-origin",
+      headers: Object.assign({ "Content-Type": "application/json" }, TOKEN ? { "x-burnban-token": TOKEN } : {}),
+      body: JSON.stringify(body || {})
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      if (response.status === 401) handleUnauthorized();
+      throw new Error(text.trim() || `HTTP ${response.status}`);
+    }
+    return JSON.parse(text);
+  }
+
+  // Destructive controls arm on first press and fire on the second, so one
+  // stray click can never pause a team's spend or drop its caps.
+  const armedTimers = new WeakMap();
+  function armed(button) {
+    if (button.classList.contains("armed")) {
+      clearTimeout(armedTimers.get(button));
+      button.classList.remove("armed");
+      button.textContent = button.dataset.restLabel;
+      return true;
+    }
+    button.dataset.restLabel = button.textContent;
+    button.classList.add("armed");
+    button.textContent = button.dataset.armedLabel || "CONFIRM";
+    armedTimers.set(button, setTimeout(() => {
+      button.classList.remove("armed");
+      button.textContent = button.dataset.restLabel;
+    }, 4000));
+    return false;
+  }
+
+  async function runAdmin(path, body, refresh) {
+    try {
+      const result = await postAdmin(path, body);
+      actionLine(result.message || "done", "ok");
+      if (result.guardrails) renderGuardrails(result.guardrails);
+      tick();
+      if (refresh) refresh();
+    } catch (error) {
+      actionLine(error.message, "err");
+    }
+  }
+
+  // ── auth ─────────────────────────────────────────────────────
+  function handleUnauthorized() {
+    TOKEN = "";
+    authRequired = true;
+    try { sessionStorage.removeItem("bb_token"); } catch (_) {}
+    renderRoutes();
+    connection("auth", "Enter the Burnban token configured by the gateway operator.");
+  }
   $("authSubmit").addEventListener("click", () => {
     const value = $("authToken").value.trim();
     if (!value) {
@@ -511,23 +983,26 @@
     $("authToken").value = "";
     $("authError").textContent = "";
     connection("loading");
+    Object.keys(tabLoaded).forEach(key => { delete tabLoaded[key]; });
     tick();
     series();
     subscription();
+    tabLoaded[activeTab] = true;
+    if (tabLoaders[activeTab]) tabLoaders[activeTab]();
   });
   $("authToken").addEventListener("keydown", event => {
     if (event.key === "Enter") $("authSubmit").click();
   });
 
+  // ── overview: models/agents/receipts ─────────────────────────
+  function modelRowsHTML(models, columns) {
+    return models.map(m =>
+      `<tr${m.is_other ? ' class="other"' : ""}><td class="name">${esc(m.model)}</td><td>${Number(m.requests || 0)}</td><td>${fmtTok(m.in_tokens)}</td><td>${fmtTok(m.out_tokens)}</td><td>${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td><td class="cost">${fmt$(m.cost_usd)}</td></tr>`
+    ).join("") || `<tr class="empty"><td colspan="${columns}">no proxied API-key traffic yet</td></tr>`;
+  }
+
   function renderModels(models = []) {
-    const tb = $("models");
-    if (!models.length) {
-      tb.innerHTML = '<tr class="empty"><td colspan="6">no proxied API-key traffic yet</td></tr>';
-      return;
-    }
-    tb.innerHTML = models.map(m =>
-      `<tr><td class="name">${esc(m.model)}</td><td>${Number(m.requests || 0)}</td><td>${fmtTok(m.in_tokens)}</td><td>${fmtTok(m.out_tokens)}</td><td>${fmtTok(m.cache_read_tokens)}/${fmtTok(m.cache_write_tokens)}</td><td class="cost">${fmt$(m.cost_usd)}</td></tr>`
-    ).join("");
+    $("models").innerHTML = modelRowsHTML(models, 6);
   }
 
   function renderAgents(agents = []) {
@@ -539,11 +1014,11 @@
     tb.innerHTML = agents.map(a => {
       const cap = Number(a.cap_usd || 0);
       const capText = cap > 0 ? `${fmt$(cap)} / ${fmt$(a.remaining_usd)} left` : "—";
-      return `<tr><td class="name">${esc(a.agent)}</td><td>${Number(a.requests || 0)}</td><td class="cost">${fmt$(a.cost_usd)}</td><td>${capText}</td></tr>`;
+      return `<tr${a.is_other ? ' class="other"' : ""}><td class="name">${esc(a.agent)}</td><td>${Number(a.requests || 0)}</td><td class="cost">${fmt$(a.cost_usd)}</td><td>${capText}</td></tr>`;
     }).join("");
   }
 
-  function renderReceipts(d) {
+  function receiptItems(d) {
     const items = [];
     if (d.health && !d.health.ok)
       items.push(`meter is fail-closed: ${esc(d.health.detail || d.health.state || "health check failed")} — run burnban doctor`);
@@ -552,7 +1027,7 @@
     if (d.has_traffic && d.cache_hit_pct < 50 && d.requests >= 20)
       items.push(`cache hit rate ${Number(d.cache_hit_pct).toFixed(0)}% — stable prompt prefixes may qualify for provider/model-specific cache discounts`);
     if ((d.unknown_pricing || d.unpriced || 0) > 0)
-      items.push(`${d.unknown_pricing || d.unpriced} request(s) carried usage for unknown-price models — inspect with burnban pricing`);
+      items.push(`${d.unknown_pricing || d.unpriced} request(s) carried usage for unknown-price models — inspect on the System tab`);
     if ((d.unmetered || 0) > 0)
       items.push(`${d.unmetered} response(s) had no usable accounting; active caps fail safe until health is restored`);
     if ((d.incomplete || 0) > 0)
@@ -563,11 +1038,17 @@
       items.push(`${d.enforcement_gaps} enforcement-safety event(s) need attention — run burnban doctor`);
     if ((d.fee_unpriced || 0) > 0)
       items.push(`${d.fee_unpriced} call(s) used provider-hosted fee dimensions that are tracked but not priced`);
+    return items;
+  }
+
+  function renderReceipts(d) {
+    const items = receiptItems(d);
     $("receipts").innerHTML = items.length
       ? items.map(item => `<li>${item}</li>`).join("")
       : '<li class="clean">no issues detected by the current checks</li>';
   }
 
+  // ── local usage panel ────────────────────────────────────────
   const sourceNames = {
     "claude-code": "Claude Code", codex: "Codex", "gemini-cli": "Gemini CLI", "github-copilot-cli": "GitHub Copilot CLI", cursor: "Cursor", opencode: "OpenCode", hermes: "Hermes Agent", openclaw: "OpenClaw", goose: "Goose"
   };
@@ -708,6 +1189,7 @@
   }));
   $("subRetry").addEventListener("click", () => subscription(true));
 
+  // ── connect panel ────────────────────────────────────────────
   let platform = "posix";
   let authRequired = false;
   const routes = [
@@ -770,6 +1252,7 @@
   });
   renderRoutes();
 
+  // ── budget bar + gauge ───────────────────────────────────────
   function legacyBudgets(d) {
     const budgets = [];
     if (d.cap_daily_usd > 0) budgets.push({ name: "daily", spent_usd: d.cap_daily_cost, cap_usd: d.cap_daily_usd, pct: d.cap_daily_cost / d.cap_daily_usd * 100, reset: "at midnight" });
@@ -801,7 +1284,7 @@
       $("fuseLabel").textContent = "Budget guardrail";
       fill.style.width = "0%";
       fill.className = "fill ok";
-      text.textContent = "no guardrail set — burnban cap --daily 10 or burnban fuse --burst 5m:4";
+      text.textContent = "no guardrail set — use the Controls tab, or: burnban cap --daily 10";
       $("windows").textContent = "";
       big.classList.remove("hot");
       track.setAttribute("aria-valuenow", "0");
@@ -845,6 +1328,7 @@
   }));
   applyMeterView();
 
+  // ── summary tick ─────────────────────────────────────────────
   let tickRunning = false;
   let lastSuccess = null;
   async function tick() {
@@ -870,6 +1354,8 @@
       $("lastUpdate").textContent = "Last successful update " + lastSuccess.toLocaleTimeString();
       $("ver").textContent = "burnban " + d.version;
       authRequired = Boolean(d.auth_required);
+      allowAdmin = Boolean(d.allow_admin);
+      $("adminReadOnly").classList.toggle("hidden", allowAdmin);
       renderRoutes();
       $("exposure").textContent = d.exposure === "team/network" ? (d.auth_required ? "team/network listener · token protected" : "team/network listener") : "localhost listener";
       $("demoBadge").classList.toggle("hidden", !d.demo);
@@ -886,7 +1372,7 @@
       const fuseProjection = Number(d.fuse_request_limit || 0) > 0 && Number(d.fuse_projected_requests || 0) > 0
         ? `${d.fuse_projected_requests} / ${d.fuse_request_limit} requests`
         : `${fmt$(d.fuse_projected_usd)} / ${fmt$(d.fuse_limit_usd)}`;
-      $("banHint").textContent = d.external_ban ? "external policy · contact the policy owner" : (d.ban_active ? "lift with: burnban lift" : `${d.fuse_rule} projected ${fuseProjection} · cooldown until ${new Date(d.fuse_until).toLocaleTimeString()} · inspect/reset with: burnban fuse`);
+      $("banHint").textContent = d.external_ban ? "external policy · contact the policy owner" : (d.ban_active ? "lift from the Controls tab or: burnban lift" : `${d.fuse_rule} projected ${fuseProjection} · cooldown until ${new Date(d.fuse_until).toLocaleTimeString()} · reset from the Controls tab`);
       if (d.last_request_at) {
         $("routeVerify").textContent = "Routing verified · last proxied request " + new Date(d.last_request_at).toLocaleString() + ".";
       } else {
@@ -907,11 +1393,7 @@
         $("subError").classList.remove("hidden");
       }
       if (error.status === 401) {
-        TOKEN = "";
-        authRequired = true;
-        try { sessionStorage.removeItem("bb_token"); } catch (_) { /* tab storage can be disabled */ }
-        renderRoutes();
-        connection("auth", "Enter the Burnban token configured by the gateway operator.");
+        handleUnauthorized();
       }
       else if (error.status >= 500) connection("server", error.message);
       else connection("offline", error.message);
@@ -957,9 +1439,504 @@
     }
   }
 
+  // ── report tab ───────────────────────────────────────────────
+  let reportWindow = "today";
+  let whatifData = null;
+  let whatifExpanded = false;
+
+  document.querySelectorAll("[data-rwindow]").forEach(button => button.addEventListener("click", () => {
+    reportWindow = button.dataset.rwindow;
+    document.querySelectorAll("[data-rwindow]").forEach(other => other.classList.toggle("active", other === button));
+    loadReport();
+  }));
+
+  function renderReportReceipts(d) {
+    const items = receiptItems(d);
+    $("repReceipts").innerHTML = items.length
+      ? items.map(item => `<li>${item}</li>`).join("")
+      : '<li class="clean">no issues detected by the current checks</li>';
+  }
+
+  function deltaPct(cost, actual) {
+    if (!(actual > 0)) return "–";
+    const d = (cost - actual) / actual * 100;
+    if (d < 0) return "−" + Math.abs(d).toFixed(0) + "%";
+    if (d > 0) return "+" + d.toFixed(0) + "%";
+    return "±0%";
+  }
+
+  function renderWhatif() {
+    if (!whatifData) return;
+    const d = whatifData;
+    if (!d.priced_requests) {
+      $("whatifSummary").textContent = "no priced traffic in " + d.window + " — nothing to reprice";
+      $("whatifRows").innerHTML = "";
+      $("whatifMore").classList.add("hidden");
+      return;
+    }
+    const rows = Array.isArray(d.rows) ? d.rows : [];
+    const cheapest = rows.length && rows[0].cost_usd < d.actual_cost_usd
+      ? ` · cheapest: ${esc(rows[0].model)} would have cut ${fmt$(d.actual_cost_usd - rows[0].cost_usd)}`
+      : "";
+    $("whatifSummary").innerHTML = `your actual mix <b class="flash">${fmt$(d.actual_cost_usd)}</b> (${d.priced_requests} priced requests, ${esc(d.window)})${cheapest}`;
+    const visible = whatifExpanded ? rows : rows.slice(0, 15);
+    $("whatifRows").innerHTML = visible.map((row, index) =>
+      `<tr${index === 0 ? ' style="color:var(--ok)"' : ""}><td class="name">${esc(row.model)}</td><td class="cost">${fmt$(row.cost_usd)}</td><td>${deltaPct(row.cost_usd, d.actual_cost_usd)}</td></tr>`
+    ).join("") || '<tr class="empty"><td colspan="3">no priced candidates</td></tr>';
+    $("whatifMore").classList.toggle("hidden", rows.length <= 15);
+    $("whatifMore").textContent = whatifExpanded ? "Show fewer models" : `Show all ${rows.length} models`;
+  }
+  $("whatifMore").addEventListener("click", () => { whatifExpanded = !whatifExpanded; renderWhatif(); });
+
+  async function loadReport() {
+    $("repModels").innerHTML = '<tr class="empty"><td colspan="6">loading…</td></tr>';
+    $("repAgents").innerHTML = '<tr class="empty"><td colspan="3">loading…</td></tr>';
+    $("whatifSummary").textContent = "loading…";
+    try {
+      const d = await getJSON("/api/report?window=" + encodeURIComponent(reportWindow));
+      $("reportLabel").textContent = d.window;
+      setText("repTotal", fmt$(d.total_cost));
+      setText("repReqs", exactTok(d.requests));
+      setText("repIn", fmtTok(d.in_tokens));
+      setText("repOut", fmtTok(d.out_tokens));
+      setText("repCache", fmtTok(d.cache_read_tokens) + "/" + fmtTok(d.cache_write_tokens));
+      setText("repHit", d.has_traffic ? Number(d.cache_hit_pct).toFixed(0) + "%" : "–");
+      setText("repHour", fmt$(d.last_hour_cost));
+      const notes = [];
+      if (d.estimated > 0) notes.push(d.estimated + " responses used estimated token counts");
+      if (d.unknown_pricing > 0) notes.push(d.unknown_pricing + " requests hit unknown-price models");
+      if (d.unmetered > 0) notes.push(d.unmetered + " responses had no usable accounting");
+      if (d.incomplete > 0) notes.push(d.incomplete + " responses were partial or cancelled");
+      $("reportNotes").textContent = notes.join(" · ");
+      $("repModels").innerHTML = modelRowsHTML(d.models || [], 6);
+      $("repAgents").innerHTML = (d.agents || []).map(a =>
+        `<tr${a.is_other ? ' class="other"' : ""}><td class="name">${esc(a.agent)}</td><td>${Number(a.requests || 0)}</td><td class="cost">${fmt$(a.cost_usd)}</td></tr>`
+      ).join("") || '<tr class="empty"><td colspan="3">no attributed agents in this window</td></tr>';
+      renderReportReceipts(d);
+    } catch (error) {
+      $("reportNotes").textContent = "report failed: " + error.message;
+    }
+    try {
+      whatifExpanded = false;
+      whatifData = await getJSON("/api/whatif?window=" + encodeURIComponent(reportWindow === "today" ? "today" : reportWindow));
+      renderWhatif();
+    } catch (error) {
+      $("whatifSummary").textContent = "what-if failed: " + error.message;
+    }
+  }
+
+  async function downloadExport(format) {
+    actionLine("preparing " + format.toUpperCase() + " export…");
+    try {
+      const response = await fetch("/api/export?window=" + encodeURIComponent(reportWindow) + "&format=" + format, requestOptions());
+      if (!response.ok) throw new Error("export returned HTTP " + response.status);
+      const blob = await response.blob();
+      const disposition = response.headers.get("Content-Disposition") || "";
+      const match = disposition.match(/filename="([^"]+)"/);
+      const anchor = document.createElement("a");
+      anchor.href = URL.createObjectURL(blob);
+      anchor.download = match ? match[1] : "burnban-export." + format;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      setTimeout(() => URL.revokeObjectURL(anchor.href), 4000);
+      actionLine("export downloaded (" + reportWindow + ", " + format.toUpperCase() + ")", "ok");
+    } catch (error) {
+      actionLine("export failed: " + error.message, "err");
+    }
+  }
+  $("exportCSV").addEventListener("click", () => downloadExport("csv"));
+  $("exportJSON").addEventListener("click", () => downloadExport("json"));
+
+  // ── activity tab ─────────────────────────────────────────────
+  let activityTimer = null;
+  function syncActivityTimer() {
+    const wanted = activeTab === "activity" && $("actAuto").checked;
+    if (wanted && !activityTimer) activityTimer = setInterval(() => { if (!document.hidden) loadActivity(); }, 5000);
+    if (!wanted && activityTimer) { clearInterval(activityTimer); activityTimer = null; }
+  }
+  $("actAuto").addEventListener("change", syncActivityTimer);
+  $("actRefresh").addEventListener("click", () => loadActivity());
+  $("actLimit").addEventListener("change", () => loadActivity());
+
+  function statusChip(request) {
+    const status = Number(request.status || 0);
+    if (status === 402) return '<span class="chip hot">402 capped</span>';
+    if (status >= 200 && status < 300) {
+      return request.incomplete ? '<span class="chip warn">' + status + ' partial</span>' : '<span class="chip ok">' + status + "</span>";
+    }
+    if (status >= 400) return '<span class="chip warn">' + status + "</span>";
+    return '<span class="chip">' + (status || "—") + "</span>";
+  }
+
+  async function loadActivity() {
+    try {
+      const d = await getJSON("/api/requests?limit=" + encodeURIComponent($("actLimit").value));
+      const rows = Array.isArray(d.requests) ? d.requests : [];
+      $("actRows").innerHTML = rows.map(request => {
+        const t = new Date(request.ts);
+        const downshifted = request.downshift_action === "reroute" ? ' <span class="chip">downshift</span>' : "";
+        return `<tr><td class="left" title="${esc(request.ts)}">${t.toLocaleTimeString()}</td>` +
+          `<td class="name" title="${esc(request.provider)}">${esc(request.model || "—")}${downshifted}</td>` +
+          `<td class="name">${esc(request.agent || "—")}</td>` +
+          `<td>${statusChip(request)}</td>` +
+          `<td>${fmtTok(request.in_tokens)}</td><td>${fmtTok(request.out_tokens)}</td>` +
+          `<td>${fmtTok(request.cache_read_tokens)}/${fmtTok(request.cache_write_tokens)}</td>` +
+          `<td>${Number(request.latency_ms || 0)}</td>` +
+          `<td class="cost">${fmt$(request.cost_usd)}</td></tr>`;
+      }).join("") || '<tr class="empty"><td colspan="9">no proxied requests recorded yet — connect an agent from the Overview tab</td></tr>';
+    } catch (error) {
+      $("actRows").innerHTML = `<tr class="empty"><td colspan="9">activity failed: ${esc(error.message)}</td></tr>`;
+    }
+  }
+
+  // ── controls tab ─────────────────────────────────────────────
+  const windowLabels = { daily: "Daily", weekly: "Weekly", monthly: "Monthly" };
+
+  function capBar(pct) {
+    const frac = Math.min(1, Math.max(0, pct / 100));
+    const cls = frac >= .9 ? "hot" : frac >= .6 ? "warm" : "ok";
+    return `<div class="track slim"><div class="fill ${cls}" style="width:${(frac * 100).toFixed(1)}%"></div></div>`;
+  }
+
+  function renderGuardrails(g) {
+    if (!g) return;
+    allowAdmin = Boolean(g.allow_admin);
+    $("adminReadOnly").classList.toggle("hidden", allowAdmin);
+    document.querySelectorAll("#tab-controls input, #tab-controls select, #tab-controls .btn").forEach(el => {
+      el.disabled = !allowAdmin;
+    });
+
+    // emergency strip
+    const strip = [];
+    strip.push(g.ban_active
+      ? (g.external_ban ? '<span class="chip hot">EXTERNAL BAN ACTIVE</span>' : '<span class="chip hot">BURN BAN ACTIVE</span>')
+      : '<span class="chip ok">SPEND FLOWING</span>');
+    if (g.override_today) strip.push('<span class="chip warn">CAPS OVERRIDDEN UNTIL MIDNIGHT</span>');
+    if (g.fuse.tripped) strip.push(`<span class="chip hot">FUSE TRIPPED · ${esc(g.fuse.trip_rule || "")} · until ${new Date(g.fuse.tripped_until).toLocaleTimeString()}</span>`);
+    $("banStatusStrip").innerHTML = strip.join(" ");
+
+    // calendar caps
+    $("capRows").innerHTML = (g.windows || []).map(w => {
+      const name = windowLabels[w.name] || w.name;
+      const pos = w.set
+        ? `<span class="pos"><b>${fmt$(w.spent_usd)}</b> of ${fmt$(w.cap_usd)} · ${w.pct.toFixed(0)}% · ${fmt$(w.remaining_usd)} left · ${esc(w.source)} · resets ${esc(w.reset)}</span>`
+        : `<span class="pos" style="color:var(--faint)">no cap · resets ${esc(w.reset)}</span>`;
+      const external = w.external_cap_usd > 0 ? `<div class="sub-note">external allocation ${fmt$(w.external_cap_usd)} (UTC window)</div>` : "";
+      return `<div class="cap-row">
+        <div class="cap-head"><span class="label">${name}</span>${pos}</div>
+        ${w.set ? capBar(w.pct) : ""}
+        <div class="form-row">
+          <span aria-hidden="true">$</span><input class="num" type="number" min="0.01" step="0.01" inputmode="decimal" id="capInput-${w.name}" value="${w.local_cap_usd > 0 ? w.local_cap_usd : ""}" placeholder="10" aria-label="${name} cap in dollars" ${allowAdmin ? "" : "disabled"}>
+          <button class="btn" type="button" data-cap-set="${w.name}" ${allowAdmin ? "" : "disabled"}>Set</button>
+          <button class="btn ghost" type="button" data-cap-clear="${w.name}" ${w.local_cap_usd > 0 && allowAdmin ? "" : "disabled"}>Clear</button>
+        </div>${external}</div>`;
+    }).join("");
+    document.querySelectorAll("[data-cap-set]").forEach(button => button.addEventListener("click", () => {
+      const window = button.dataset.capSet;
+      const value = parseFloat($("capInput-" + window).value);
+      if (!(value > 0)) { actionLine("enter a cap amount above $0.01", "err"); return; }
+      runAdmin("/api/admin/cap", { window, cap_usd: value });
+    }));
+    document.querySelectorAll("[data-cap-clear]").forEach(button => button.addEventListener("click", () => {
+      runAdmin("/api/admin/cap", { window: button.dataset.capClear, cap_usd: 0 });
+    }));
+
+    // warn threshold
+    $("warnState").textContent = g.warn_pct === 0 ? "warnings disabled" : `currently ${g.warn_pct}%` + (g.warn_configured ? "" : " (default)");
+    if (document.activeElement !== $("warnPct")) $("warnPct").value = g.warn_pct;
+
+    // agent caps
+    const agentRows = (g.agent_caps || []).map(a =>
+      `<tr><td class="name">${esc(a.agent)}</td><td class="cost">${fmt$(a.spent_usd)}</td><td>${fmt$(a.cap_usd)}</td><td>${fmt$(a.remaining_usd)}</td>` +
+      `<td class="row-actions"><button class="btn ghost" type="button" data-agent-clear="${esc(a.agent)}" ${allowAdmin ? "" : "disabled"}>Remove</button></td></tr>`
+    ).join("");
+    $("agentCapRows").innerHTML = agentRows || '<tr class="empty"><td colspan="5">no per-agent caps set</td></tr>';
+    document.querySelectorAll("[data-agent-clear]").forEach(button => button.addEventListener("click", () => {
+      runAdmin("/api/admin/cap", { agent: button.dataset.agentClear, cap_usd: 0 });
+    }));
+
+    // fuses
+    const fuseRows = (g.fuse.rules || []).map(rule => {
+      const extra = rule.name === "baseline"
+        ? `<div class="sub-note">median ${fmt$(rule.baseline_median_usd)} × ${rule.baseline_multiplier} with configured minimum floor</div>` : "";
+      const projected = rule.projected_time_to_limit ? ` · projects limit in ${esc(rule.projected_time_to_limit)}` : "";
+      return `<div class="cap-row">
+        <div class="cap-head"><span class="label">${esc(rule.name)} · rolling ${esc(rule.window)}</span>
+        <span class="pos"><b>${fmt$(rule.spent_usd)}</b> of ${fmt$(rule.cap_usd)} · ${rule.pct.toFixed(0)}%${projected}</span></div>
+        ${capBar(rule.pct)}${extra}</div>`;
+    });
+    if (g.fuse.fanout) {
+      const f = g.fuse.fanout;
+      const pct = f.limit_requests > 0 ? f.requests / f.limit_requests * 100 : 0;
+      fuseRows.push(`<div class="cap-row"><div class="cap-head"><span class="label">fan-out · rolling ${esc(f.window)}</span>
+        <span class="pos"><b>${f.requests}</b> of ${f.limit_requests} requests · ${f.remaining_requests} left</span></div>${capBar(pct)}</div>`);
+    }
+    $("fuseRows").innerHTML = fuseRows.join("") || '<div class="sub-note" style="padding:8px 0">no velocity fuses armed — a runaway loop only stops when a calendar cap is hit</div>';
+    const trip = $("fuseTripBox");
+    if (g.fuse.tripped) {
+      trip.textContent = g.fuse.denial_message || "fuse tripped";
+      trip.classList.remove("hidden");
+    } else {
+      trip.classList.add("hidden");
+    }
+    $("fuseCooldownState").textContent = "current: " + g.fuse.cooldown;
+    $("fuseReset").disabled = !allowAdmin || !g.fuse.tripped;
+
+    // alerts
+    $("webhookState").textContent = g.webhook_set ? "webhook: " + g.webhook : "no webhook set";
+
+    // external policy
+    if (g.external_policy) {
+      $("extPolicyBox").innerHTML = `An external policy sidecar manages part of this meter.<dl class="kv">` +
+        (g.external_policy.source ? `<dt>source</dt><dd>${esc(g.external_policy.source)}</dd>` : "") +
+        (g.external_policy.version ? `<dt>version</dt><dd>${esc(g.external_policy.version)}</dd>` : "") +
+        (g.external_policy.updated_at ? `<dt>updated</dt><dd>${esc(g.external_policy.updated_at)}</dd>` : "") + `</dl>`;
+    } else {
+      $("extPolicyBox").textContent = "none — this meter is fully locally controlled";
+    }
+  }
+
+  async function loadGuardrails() {
+    try {
+      renderGuardrails(await getJSON("/api/guardrails"));
+    } catch (error) {
+      actionLine("guardrails failed to load: " + error.message, "err");
+    }
+  }
+
+  $("ctlBan").addEventListener("click", event => { if (armed(event.currentTarget)) runAdmin("/api/admin/ban", {}); });
+  $("ctlLift").addEventListener("click", () => runAdmin("/api/admin/lift", { today: false }));
+  $("ctlLiftToday").addEventListener("click", event => { if (armed(event.currentTarget)) runAdmin("/api/admin/lift", { today: true }); });
+  $("capsAllOff").addEventListener("click", event => { if (armed(event.currentTarget)) runAdmin("/api/admin/cap", { window: "all", cap_usd: 0 }); });
+  $("warnSet").addEventListener("click", () => {
+    const pct = parseFloat($("warnPct").value);
+    if (Number.isNaN(pct) || pct < 0 || pct > 100) { actionLine("warn threshold must be 0-100", "err"); return; }
+    runAdmin("/api/admin/warn", { pct });
+  });
+  $("agentCapSet").addEventListener("click", () => {
+    const agent = $("agentCapName").value.trim();
+    const value = parseFloat($("agentCapUSD").value);
+    if (!agent) { actionLine("enter the agent name shown in reports", "err"); return; }
+    if (!(value > 0)) { actionLine("enter a daily cap above $0.01", "err"); return; }
+    runAdmin("/api/admin/cap", { agent, cap_usd: value });
+    $("agentCapName").value = ""; $("agentCapUSD").value = "";
+  });
+  $("fuseHourlySet").addEventListener("click", () => {
+    const value = parseFloat($("fuseHourly").value);
+    if (!(value > 0)) { actionLine("enter an hourly limit above $0.01", "err"); return; }
+    runAdmin("/api/admin/fuse", { action: "set", hourly_usd: value });
+  });
+  $("fuseHourlyOff").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "set", hourly_usd: 0 }));
+  $("fuseBurstSet").addEventListener("click", () => {
+    const value = parseFloat($("fuseBurstUSD").value);
+    if (!(value > 0)) { actionLine("enter a burst limit above $0.01", "err"); return; }
+    runAdmin("/api/admin/fuse", { action: "set", burst: $("fuseBurstWin").value + ":" + value });
+  });
+  $("fuseBurstOff").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "set", burst: "off" }));
+  $("fuseFanSet").addEventListener("click", () => {
+    const value = parseInt($("fuseFanReq").value, 10);
+    if (!(value >= 1)) { actionLine("enter a request limit of at least 1", "err"); return; }
+    runAdmin("/api/admin/fuse", { action: "set", fanout: $("fuseFanWin").value + ":" + value });
+  });
+  $("fuseFanOff").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "set", fanout: "off" }));
+  $("fuseBaseSet").addEventListener("click", () => {
+    const multiplier = parseFloat($("fuseBaseMult").value);
+    if (!(multiplier >= 1.1)) { actionLine("baseline multiplier must be at least 1.1", "err"); return; }
+    runAdmin("/api/admin/fuse", { action: "set", baseline: {
+      multiplier, window: $("fuseBaseWin").value, lookback_days: parseInt($("fuseBaseDays").value, 10)
+    }});
+  });
+  $("fuseBaseOff").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "set", baseline: { off: true } }));
+  $("fuseCooldownSet").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "set", cooldown: $("fuseCooldown").value }));
+  $("fuseReset").addEventListener("click", () => runAdmin("/api/admin/fuse", { action: "reset" }));
+  $("fuseAllOff").addEventListener("click", event => { if (armed(event.currentTarget)) runAdmin("/api/admin/fuse", { action: "off" }); });
+  $("webhookSet").addEventListener("click", () => {
+    const url = $("webhookURL").value.trim();
+    if (!url) { actionLine("enter a webhook URL", "err"); return; }
+    runAdmin("/api/admin/webhook", { url });
+    $("webhookURL").value = "";
+  });
+  $("webhookOff").addEventListener("click", () => runAdmin("/api/admin/webhook", { off: true }));
+
+  // ── optimize tab ─────────────────────────────────────────────
+  let optWindow = "30d";
+  document.querySelectorAll("[data-owindow]").forEach(button => button.addEventListener("click", () => {
+    optWindow = button.dataset.owindow;
+    document.querySelectorAll("[data-owindow]").forEach(other => other.classList.toggle("active", other === button));
+    loadOptimize();
+  }));
+  $("optRefresh").addEventListener("click", () => loadOptimize());
+  $("optDimension").addEventListener("change", () => loadOptimize());
+
+  async function loadOptimize() {
+    $("optCacheMeta").textContent = "analyzing ledger…";
+    $("optAllocMeta").textContent = "analyzing ledger…";
+    try {
+      const days = optWindow === "7d" ? 7 : optWindow === "90d" ? 90 : 30;
+      const d = await getJSON("/api/optimize?window=" + encodeURIComponent(optWindow) + "&days=" + days + "&dimension=" + encodeURIComponent($("optDimension").value));
+      const cache = d.cache || {};
+      $("optCacheMeta").textContent = `${cache.sampled_rows || 0} metadata rows inspected` + (cache.truncated ? " (row bound reached — narrow the window for complete evidence)" : "");
+      const receipts = Array.isArray(cache.receipts) ? cache.receipts : [];
+      $("optCacheRows").innerHTML = receipts.map(receipt =>
+        `<tr><td class="name">${esc(receipt.scope_type)}:${esc(receipt.scope)}</td>` +
+        `<td class="name">${esc(receipt.provider)} / ${esc(receipt.model)}</td>` +
+        `<td>${receipt.large_context_calls}</td><td>${(receipt.cache_reuse_ratio * 100).toFixed(1)}%</td>` +
+        `<td><span class="chip">${esc(receipt.confidence)}</span></td></tr>`
+      ).join("") || '<tr class="empty"><td colspan="5">no repeated large-context, low-cache-reuse pattern met the evidence threshold</td></tr>';
+      const alloc = d.allocation || {};
+      $("optAllocMeta").textContent = `${alloc.historical_days || 0} complete UTC days by ${esc(alloc.dimension || "agent")} · ${alloc.sampled_rows || 0} rows` + (alloc.truncated ? " (row bound reached — proposals withheld)" : "");
+      const recommendations = Array.isArray(alloc.recommendations) ? alloc.recommendations : [];
+      $("optAllocRows").innerHTML = recommendations.map(rec => {
+        const blocked = `${rec.simulated_blocked_calls}/${rec.priced_calls} (${(rec.simulated_blocked_call_rate * 100).toFixed(1)}%)`;
+        const apply = allowAdmin && (alloc.dimension || "agent") === "agent"
+          ? `<button class="btn ghost" type="button" data-apply-alloc="${esc(rec.scope)}" data-apply-usd="${(rec.proposed_daily_budget_micros / 1e6).toFixed(2)}">Apply cap</button>` : "";
+        return `<tr><td class="name">${esc(rec.scope)}</td><td>${(rec.proposed_weight * 100).toFixed(1)}%</td>` +
+          `<td class="cost">${micros$(rec.proposed_daily_budget_micros)}</td><td>${micros$(rec.recent_velocity_daily_micros)}</td>` +
+          `<td>${blocked}</td><td><span class="chip">${esc(rec.confidence)}</span></td><td class="row-actions">${apply}</td></tr>`;
+      }).join("") || '<tr class="empty"><td colspan="7">no priced, attributed scope had enough spend to propose an allocation</td></tr>';
+      document.querySelectorAll("[data-apply-alloc]").forEach(button => button.addEventListener("click", () => {
+        runAdmin("/api/admin/cap", { agent: button.dataset.applyAlloc, cap_usd: parseFloat(button.dataset.applyUsd) }, loadGuardrails);
+      }));
+    } catch (error) {
+      $("optCacheMeta").textContent = "optimize failed: " + error.message;
+      $("optAllocMeta").textContent = "";
+    }
+    try {
+      const d = await getJSON("/api/downshift");
+      if (!d.active) {
+        $("downshiftBox").innerHTML = 'no downshift config active — traffic is never rerouted implicitly. Validate, simulate, and apply one with <code>burnban downshift</code>.';
+      } else {
+        const sim = d.simulation
+          ? `<dt>last simulation</dt><dd>${d.simulation.matched_requests}/${d.simulation.total_requests} matched · eligible impact ${fmt$(d.simulation.source_cost_usd)} → ${fmt$(d.simulation.target_cost_usd)}</dd>` : "";
+        $("downshiftBox").innerHTML = `<dl class="kv">
+          <dt>state</dt><dd><span class="chip ok">ACTIVE</span>${d.forced ? ' <span class="chip warn">forced</span>' : ""}</dd>
+          <dt>revision</dt><dd>${Number(d.revision)}</dd>
+          <dt>mode</dt><dd>${esc(d.mode)}</dd>
+          <dt>applied</dt><dd>${new Date(d.applied_at).toLocaleString()}</dd>
+          <dt>digest</dt><dd>${esc(String(d.digest).slice(0, 24))}…</dd>${sim}</dl>` +
+          (d.document ? `<details class="doc-block"><summary>active config document</summary><pre>${esc(JSON.stringify(d.document, null, 2))}</pre></details>` : "") +
+          `<div class="sub-note">Manage with <code>burnban downshift simulate|apply|disable</code>; changes are recorded in the immutable audit.</div>`;
+      }
+    } catch (error) {
+      $("downshiftBox").textContent = "downshift status failed: " + error.message;
+    }
+  }
+
+  // ── system tab ───────────────────────────────────────────────
+  let pricingModels = [];
+  function renderPricingRows() {
+    const filter = $("pricingSearch").value.trim().toLowerCase();
+    const rows = pricingModels.filter(m => !filter || m.model.toLowerCase().includes(filter));
+    $("pricingRows").innerHTML = rows.slice(0, 200).map(m => {
+      const notes = [];
+      if (m.free) notes.push('<span class="chip ok">free</span>');
+      if (m.override) notes.push('<span class="chip warn">override</span>');
+      if (m.long_context_threshold) notes.push(`<span class="chip">long ctx ${fmtTok(m.long_context_threshold)}</span>`);
+      return `<tr><td class="name">${esc(m.model)}</td><td>${Number(m.input_per_mtok).toFixed(2)}</td><td>${Number(m.output_per_mtok).toFixed(2)}</td>` +
+        `<td>${Number(m.cache_read_mult).toFixed(2)}×</td><td>${Number(m.cache_write_mult).toFixed(2)}×</td><td class="left">${notes.join(" ")}</td></tr>`;
+    }).join("") || '<tr class="empty"><td colspan="6">no models match</td></tr>';
+  }
+  $("pricingSearch").addEventListener("input", renderPricingRows);
+
+  async function loadSystem() {
+    try {
+      const d = await getJSON("/api/diagnostics");
+      const h = d.health || {};
+      const healthChip = h.ok ? '<span class="chip ok">HEALTHY</span>' : `<span class="chip hot">${esc(h.state || "FAIL-CLOSED")}</span>`;
+      $("sysHealth").innerHTML =
+        `<dt>proxy health</dt><dd>${healthChip}${h.detail ? " " + esc(h.detail) : ""}</dd>` +
+        `<dt>database</dt><dd>${d.db_ok ? '<span class="chip ok">WRITABLE</span>' : `<span class="chip hot">PROBE FAILED</span> ${esc(d.db_error || "")}`}</dd>` +
+        `<dt>persistence</dt><dd>${h.persistence_ok === false ? '<span class="chip hot">LATCHED FAIL-CLOSED</span>' : '<span class="chip ok">OK</span>'}</dd>` +
+        `<dt>in flight</dt><dd>${Number(h.in_flight || 0)} request(s) · ${fmt$(h.reserved_usd)} reserved</dd>` +
+        `<dt>version</dt><dd>burnban ${esc(d.version)}</dd>` +
+        `<dt>listener</dt><dd>${esc(d.exposure)} · ${d.auth_required ? "token required" : "open (localhost)"} · controls ${d.admin_enabled ? "enabled" : "read-only"}</dd>` +
+        `<dt>local usage scan</dt><dd>${d.local_usage_enabled ? "enabled" : "disabled (team gateway)"}</dd>`;
+      const l = d.ledger || {};
+      $("sysLedger").innerHTML =
+        `<dt>requests</dt><dd>${exactTok(l.requests)}</dd>` +
+        `<dt>metered spend</dt><dd>${fmt$(l.cost_usd)}</dd>` +
+        `<dt>last request</dt><dd>${l.last_request_at ? new Date(l.last_request_at).toLocaleString() : "none yet"}</dd>` +
+        `<dt>unknown pricing</dt><dd>${exactTok(l.unknown_pricing)}</dd>` +
+        `<dt>unmetered</dt><dd>${exactTok(l.unmetered)}</dd>` +
+        `<dt>incomplete</dt><dd>${exactTok(l.incomplete)}</dd>` +
+        `<dt>enforcement gaps</dt><dd>${exactTok(l.enforcement_gaps)}</dd>` +
+        `<dt>retention</dt><dd>prune old rows with <code>burnban prune --older-than 90d --yes</code></dd>`;
+      const p = d.pricing || {};
+      const age = typeof d.pricing_age_days === "number" ? ` · verified ${d.pricing_age_days} day(s) ago` + (d.pricing_stale ? ' <span class="chip warn">stale — update burnban or override</span>' : "") : "";
+      $("pricingMeta").innerHTML = `snapshot ${esc(p.version || "?")} · effective ${esc(p.effective_date || "?")} · ${p.model_count || 0} models${age}` +
+        (p.override_file ? ` · overrides from ${esc(p.override_file)} (${(p.override_models || []).length} model(s))` : " · no local overrides (~/.burnban/pricing.json)");
+    } catch (error) {
+      $("sysHealth").innerHTML = `<dt>error</dt><dd>${esc(error.message)}</dd>`;
+    }
+    try {
+      const d = await getJSON("/api/pricing");
+      pricingModels = Array.isArray(d.models) ? d.models : [];
+      renderPricingRows();
+    } catch (error) {
+      $("pricingRows").innerHTML = `<tr class="empty"><td colspan="6">pricing failed: ${esc(error.message)}</td></tr>`;
+    }
+    try {
+      const d = await getJSON("/api/policy");
+      const coverage = d.coverage || {};
+      const decisions = d.decisions || {};
+      const evaluatedPct = coverage.routed_requests > 0 ? (coverage.evaluated_requests / coverage.routed_requests * 100).toFixed(1) + "%" : "–";
+      const head = d.active
+        ? `<dl class="kv"><dt>state</dt><dd><span class="chip ok">ACTIVE</span></dd>
+           <dt>policy</dt><dd>${esc(d.namespace)}/${esc(d.name)} · revision ${Number(d.revision)}</dd>
+           <dt>source</dt><dd>${esc(d.source)}</dd>
+           <dt>applied</dt><dd>${new Date(d.applied_at).toLocaleString()}</dd>
+           <dt>digest</dt><dd>${esc(String(d.digest).slice(0, 24))}…</dd></dl>`
+        : `<div class="sub-note">no active v2 policy — existing caps, fuses, and burn bans still apply. Apply one with <code>burnban policy apply POLICY.json</code> (templates: <code>burnban policy templates --list</code>).</div>`;
+      const stats = `<dl class="kv">
+        <dt>coverage (${esc(d.window)})</dt><dd>${evaluatedPct} of ${exactTok(coverage.routed_requests)} routed requests evaluated</dd>
+        <dt>decisions</dt><dd>${exactTok(decisions.total)} total · ${exactTok(decisions.allowed)} allowed · ${exactTok(decisions.denied)} denied · ${exactTok(decisions.enforce_mode)} enforcing</dd>
+        <dt>identity</dt><dd>${exactTok(coverage.trusted_identity_requests)} trusted · ${exactTok(coverage.self_reported_identity_requests)} self-reported · ${exactTok(coverage.unverified_identity_requests)} unverified</dd></dl>`;
+      const events = (Array.isArray(d.events) ? d.events : []).slice(0, 8).map(event =>
+        `<li>${new Date(event.ts).toLocaleString()} · ${esc(event.action)} by ${esc(event.actor)}${event.reason ? " — " + esc(event.reason) : ""}</li>`
+      ).join("");
+      const doc = d.document ? `<details class="doc-block"><summary>active policy document</summary><pre>${esc(JSON.stringify(d.document, null, 2))}</pre></details>` : "";
+      $("policyBox").innerHTML = head + stats + (events ? `<div class="label" style="margin-top:10px">Lineage events</div><ul class="receipt-list" style="list-style:none;margin-top:6px;font-size:12px;color:var(--dim)">${events}</ul>` : "") + doc;
+    } catch (error) {
+      $("policyBox").textContent = "policy status failed: " + error.message;
+    }
+    try {
+      const d = await getJSON("/api/reconcile?window=30d");
+      const report = d.report || {};
+      if (!report.provider_billed_micros && !report.matches?.length && !report.last_reconciled_at) {
+        $("reconcileBox").innerHTML = 'no provider invoice evidence imported yet. Import one with <code>burnban reconcile import --file invoice.csv --provider openai --invoice INV-123</code>, then compare it here against the ledger estimate.';
+      } else {
+        const matches = (report.matches || []).slice(0, 12).map(match =>
+          `<tr><td class="left">${esc(match.day)}</td><td class="name">${esc(match.provider)} / ${esc(match.model)}</td>` +
+          `<td>${micros$(match.estimate_micros)}</td><td>${micros$(match.billed_micros)}</td>` +
+          `<td>${micros$(match.variance_micros)}</td><td>${match.matched ? '<span class="chip ok">matched</span>' : '<span class="chip warn">unmatched</span>'}</td></tr>`
+        ).join("");
+        $("reconcileBox").innerHTML = `<dl class="kv">
+          <dt>ledger estimate</dt><dd>${micros$(report.ledger_estimate_micros)}</dd>
+          <dt>provider billed</dt><dd>${micros$(report.provider_billed_micros)}</dd>
+          <dt>variance</dt><dd>${micros$(report.variance_micros)}</dd>
+          <dt>unmatched</dt><dd>${exactTok(report.unmatched_ledger_rows)} ledger row(s) · ${exactTok(report.unmatched_provider_lines)} invoice line(s)</dd>
+          <dt>confidence</dt><dd><span class="chip">${esc(report.confidence || "unknown")}</span></dd>
+          <dt>last reconciled</dt><dd>${report.last_reconciled_at ? new Date(report.last_reconciled_at).toLocaleString() : "never"}</dd></dl>` +
+          (matches ? `<div class="table-scroll" style="margin-top:10px"><table style="min-width:620px"><thead><tr><th>day</th><th>provider / model</th><th>estimate</th><th>billed</th><th>variance</th><th></th></tr></thead><tbody>${matches}</tbody></table></div>` : "");
+      }
+    } catch (error) {
+      $("reconcileBox").textContent = "reconciliation failed: " + error.message;
+    }
+  }
+
+  const tabLoaders = {
+    report: loadReport,
+    activity: loadActivity,
+    controls: loadGuardrails,
+    optimize: loadOptimize,
+    system: loadSystem
+  };
+
   connection("loading");
   tick();
   series();
+  showTab(activeTab);
   setInterval(() => { if (!document.hidden) tick(); }, 2000);
   setInterval(() => { if (!document.hidden) series(); }, 15000);
   setInterval(() => { if (!document.hidden) subscription(); }, 30000);

@@ -7,6 +7,7 @@ import (
 
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/whatif"
 )
 
 func TestRepriceRequestsAppliesLongContextPerRequest(t *testing.T) {
@@ -19,11 +20,11 @@ func TestRepriceRequestsAppliesLongContextPerRequest(t *testing.T) {
 		{In: 60, PricingState: store.PricingPriced},
 		{In: 1000, PricingState: store.PricingUnknown},
 	}
-	if got, want := repriceRequests("target", p, shortRows), 120.0/1e6; math.Abs(got-want) > 1e-12 {
+	if got, want := whatif.Reprice("target", p, shortRows), 120.0/1e6; math.Abs(got-want) > 1e-12 {
 		t.Fatalf("separate short requests incorrectly triggered long tier: got %v want %v", got, want)
 	}
 	longRows := []store.TokenRow{{In: 120, Out: 10, PricingState: store.PricingPriced}}
-	if got, want := repriceRequests("target", p, longRows), (120.0*2+10.0*2*1.5)/1e6; math.Abs(got-want) > 1e-12 {
+	if got, want := whatif.Reprice("target", p, longRows), (120.0*2+10.0*2*1.5)/1e6; math.Abs(got-want) > 1e-12 {
 		t.Fatalf("long request omitted tier: got %v want %v", got, want)
 	}
 }
@@ -45,7 +46,7 @@ func TestTokenTotalsFromRowsUsesSameSnapshotAsRepricing(t *testing.T) {
 		{In: 100, PricingState: store.PricingUnknown, FeeUnpriced: true},
 		{PricingState: store.PricingUnmetered},
 	}
-	totals := tokenTotalsFromRows(rows)
+	totals := whatif.Totals(rows)
 	if totals.Requests != 1 || totals.In != 10 || totals.CostUSD != 1.25 || totals.Unpriced != 1 ||
 		totals.Unmetered != 1 || totals.Incomplete != 1 || totals.FeeUnpriced != 1 {
 		t.Fatalf("totals = %+v", totals)

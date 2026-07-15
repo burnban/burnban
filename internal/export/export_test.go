@@ -1,4 +1,4 @@
-package main
+package export
 
 import (
 	"bytes"
@@ -33,14 +33,14 @@ func TestStreamingExportProducesSafeCSVAndJSON(t *testing.T) {
 	}
 
 	var csvOutput bytes.Buffer
-	if err := writeCSVExport(&csvOutput, s, from); err != nil {
+	if err := WriteCSV(&csvOutput, s, from); err != nil {
 		t.Fatal(err)
 	}
 	records, err := csv.NewReader(strings.NewReader(csvOutput.String())).ReadAll()
 	if err != nil {
 		t.Fatalf("read CSV: %v; output=%q", err, csvOutput.String())
 	}
-	if len(records) != 2 || len(records[0]) != len(exportCSVHeader) || len(records[1]) != len(exportCSVHeader) {
+	if len(records) != 2 || len(records[0]) != len(CSVHeader) || len(records[1]) != len(CSVHeader) {
 		t.Fatalf("CSV shape = %#v", records)
 	}
 	fields := make(map[string]string, len(records[0]))
@@ -57,7 +57,7 @@ func TestStreamingExportProducesSafeCSVAndJSON(t *testing.T) {
 	}
 
 	var jsonOutput bytes.Buffer
-	if err := writeJSONExport(&jsonOutput, s, from); err != nil {
+	if err := WriteJSON(&jsonOutput, s, from); err != nil {
 		t.Fatal(err)
 	}
 	if !json.Valid(jsonOutput.Bytes()) || strings.Contains(jsonOutput.String(), "\x1b") || strings.Contains(jsonOutput.String(), "private-fingerprint") {
@@ -78,7 +78,7 @@ func TestStreamingExportProducesSafeCSVAndJSON(t *testing.T) {
 func TestJSONExportClosesArrayAfterStreamFailure(t *testing.T) {
 	wantErr := errors.New("database iteration failed")
 	var out bytes.Buffer
-	err := writeJSONRequestStream(&out, func(visit func(store.Request) error) error {
+	err := WriteJSONRequestStream(&out, func(visit func(store.Request) error) error {
 		if err := visit(store.Request{Ts: time.Unix(1, 0).UTC(), Provider: "openai"}); err != nil {
 			return err
 		}
@@ -98,7 +98,7 @@ func TestJSONExportClosesArrayAfterStreamFailure(t *testing.T) {
 
 func TestEmptyJSONExportIsValidArray(t *testing.T) {
 	var out bytes.Buffer
-	if err := writeJSONRequestStream(&out, func(func(store.Request) error) error { return nil }); err != nil {
+	if err := WriteJSONRequestStream(&out, func(func(store.Request) error) error { return nil }); err != nil {
 		t.Fatal(err)
 	}
 	if got := out.String(); got != "[]\n" {

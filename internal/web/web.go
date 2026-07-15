@@ -46,6 +46,12 @@ type Config struct {
 	// DisableLocalUsage prevents the server from reading host-user agent logs.
 	// Network/team exposure always forces this true below, regardless of input.
 	DisableLocalUsage bool
+	// AllowAdmin enables the dashboard's mutating control endpoints under
+	// /api/admin/ (caps, fuses, ban/lift, alerts). Serve enables it on
+	// loopback listeners, where reaching the dashboard already implies the
+	// authority to run the CLI; team gateways keep it off unless the operator
+	// opts in, mirroring the MCP server's read-only-by-default posture.
+	AllowAdmin bool
 	// LocalUsageScanLimits optionally overrides the bounded scanner envelope
 	// used by the localhost dashboard. Zero values retain the safe defaults.
 	LocalUsageScanLimits localusage.ScanLimits
@@ -78,6 +84,7 @@ func RegisterWithConfig(mux *http.ServeMux, s *store.Store, cfg Config) {
 	summaries := newSummaryFeed(s, cfg)
 	metrics := newMetricsFeed(s)
 	registerQualityAPI(mux, s)
+	registerParityAPI(mux, s, cfg)
 	mux.HandleFunc("GET /{$}", func(w http.ResponseWriter, r *http.Request) {
 		secureHeaders(w)
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
@@ -656,6 +663,7 @@ type summaryJSON struct {
 	Demo                  bool          `json:"demo"`
 	Exposure              string        `json:"exposure"`
 	AuthRequired          bool          `json:"auth_required"`
+	AllowAdmin            bool          `json:"allow_admin"`
 	LocalUsage            bool          `json:"local_usage_enabled"`
 	Health                *HealthStatus `json:"health,omitempty"`
 	LastRequestAt         string        `json:"last_request_at,omitempty"`
@@ -741,6 +749,7 @@ func buildSnapshot(s summaryReader, cfg Config, now time.Time) (*summaryJSON, er
 		Demo:            cfg.Demo,
 		Exposure:        cfg.Exposure,
 		AuthRequired:    cfg.AuthRequired,
+		AllowAdmin:      cfg.AllowAdmin,
 		LocalUsage:      !cfg.DisableLocalUsage,
 		TotalCost:       sum.Cost,
 		Requests:        sum.Requests,

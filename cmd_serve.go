@@ -118,6 +118,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	otlpInterval := fs.Duration("otlp-interval", 2*time.Second, "interval between asynchronous OTLP ledger polls")
 	localUsageMaxScanMB := fs.Int64("local-usage-max-scan-mb", 512, "maximum local log MiB scanned per source for the dashboard")
 	localUsageScanTimeout := fs.Duration("local-usage-scan-timeout", 10*time.Second, "maximum scan time per local source for the dashboard")
+	allowRemoteAdmin := fs.Bool("allow-remote-admin", false, "enable dashboard control actions (caps, fuses, ban/lift, alerts) on a team/network gateway; loopback listeners always have them")
 	custom := upstreamFlags{}
 	fs.Var(custom, "upstream", "extra upstream as name=url (repeatable; OpenAI-shaped unless url is prefixed anthropic:/gemini:): groq, mistral, openrouter, ollama, vllm…")
 	fs.Parse(args)
@@ -268,6 +269,10 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 	if token != "" {
 		authState = "token required (BURNBAN_TOKEN)"
 	}
+	panelState := "full controls (caps, fuses, ban/lift, alerts)"
+	if exposed && !*allowRemoteAdmin {
+		panelState = "read-only on this gateway (--allow-remote-admin enables controls)"
+	}
 	telemetryState := "off (no outbound telemetry)"
 	if telemetryWorker != nil {
 		telemetryState = "OTLP metadata export enabled (content-free, asynchronous)"
@@ -354,11 +359,12 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
    db    %s
    cap   %s
    auth  %s
+   panel %s
    otlp  %s
 %s
    watch it live:  burnban top  (or open the dashboard)
 
-`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, telemetryState, banState)
+`, version, base, base, base, base, base, base, base, base, base, base, base, customLines, *dbPath, capState, authState, panelState, telemetryState, banState)
 
 	mux := http.NewServeMux()
 	mux.Handle("/", p.Handler())
@@ -369,6 +375,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 		Version: version, Prices: prices, Demo: demoMode,
 		Exposure:          map[bool]string{true: "team/network", false: "localhost"}[exposed],
 		AuthRequired:      token != "",
+		AllowAdmin:        !exposed || *allowRemoteAdmin,
 		DisableLocalUsage: exposed,
 		LocalUsageScanLimits: localusage.ScanLimits{
 			MaxBytes:    *localUsageMaxScanMB << 20,

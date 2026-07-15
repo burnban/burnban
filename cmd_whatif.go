@@ -13,6 +13,7 @@ import (
 	"github.com/burnban/burnban/internal/optimize"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/whatif"
 )
 
 type whatifRow struct {
@@ -75,7 +76,7 @@ func cmdWhatif(args []string) error {
 	if err != nil {
 		return err
 	}
-	tot := tokenTotalsFromRows(requests)
+	tot := whatif.Totals(requests)
 	if tot.Requests == 0 {
 		fmt.Print(noPricedTrafficMessage(label, tot))
 		return nil
@@ -85,17 +86,13 @@ func cmdWhatif(args []string) error {
 		return err
 	}
 
-	var rows []whatifRow
-	if *model != "" {
-		p, ok := prices.Lookup(*model)
-		if !ok {
-			return fmt.Errorf("no pricing for %q — add it to ~/.burnban/pricing.json", *model)
-		}
-		rows = append(rows, whatifRow{model: *model, cost: repriceRequests(*model, p, requests)})
-	} else {
-		for name, p := range prices.Models {
-			rows = append(rows, whatifRow{model: name, cost: repriceRequests(name, p, requests)})
-		}
+	priced, ok := whatif.Rows(prices, requests, *model)
+	if !ok {
+		return fmt.Errorf("no pricing for %q — add it to ~/.burnban/pricing.json", *model)
+	}
+	rows := make([]whatifRow, 0, len(priced))
+	for _, row := range priced {
+		rows = append(rows, whatifRow{model: row.Model, cost: row.CostUSD})
 	}
 	qualityExcluded := 0
 	if qualityConstraint != nil {
@@ -234,56 +231,6 @@ func noPricedTrafficMessage(label string, totals *store.Totals) string {
 		fmt.Fprintf(&message, "%d call(s) had unpriced provider-hosted fee dimensions.\n", totals.FeeUnpriced)
 	}
 	return message.String()
-}
-
-func repriceRequests(model string, p pricing.Price, requests []store.TokenRow) float64 {
-	var total float64
-	claude := strings.HasPrefix(strings.ToLower(model), "claude")
-	for _, request := range requests {
-		if request.PricingState != store.PricingPriced {
-			continue
-		}
-		cost := pricing.RepriceRequest(p, request.In, request.Out, request.CacheRead, request.CacheWrite)
-		oneHour := min(max(request.CacheWrite1h, 0), max(request.CacheWrite, 0))
-		if oneHour > 0 && claude {
-			// Anthropic's 1-hour cache tier is 2x input. RepriceRequest has
-			// already applied the ordinary cache-write multiplier to this subset.
-			writeMult := p.CacheWriteMult
-			if writeMult <= 0 {
-				writeMult = 1
-			}
-			cost += float64(oneHour) * p.InputPerMTok * (2 - writeMult) / 1e6
-		}
-		total += max(0, cost)
-	}
-	return max(0, total)
-}
-
-func tokenTotalsFromRows(requests []store.TokenRow) *store.Totals {
-	totals := &store.Totals{}
-	for _, request := range requests {
-		if request.Incomplete {
-			totals.Incomplete++
-		}
-		if request.FeeUnpriced {
-			totals.FeeUnpriced++
-		}
-		switch request.PricingState {
-		case store.PricingPriced:
-			totals.Requests++
-			totals.In += request.In
-			totals.Out += request.Out
-			totals.CacheRead += request.CacheRead
-			totals.CacheWrite += request.CacheWrite
-			totals.CacheWrite1h += request.CacheWrite1h
-			totals.CostUSD += request.CostUSD
-		case store.PricingUnknown:
-			totals.Unpriced++
-		case store.PricingUnmetered:
-			totals.Unmetered++
-		}
-	}
-	return totals
 }
 
 func deltaPct(cost, actual float64) string {

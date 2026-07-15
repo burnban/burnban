@@ -6,6 +6,7 @@ import (
 
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
+	"github.com/burnban/burnban/internal/whatif"
 )
 
 var benchmarkWhatifCost float64
@@ -39,7 +40,7 @@ func BenchmarkWhatif100KRowsAcross30Models(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		var total float64
 		for _, model := range models {
-			total += repriceRequests(model.name, model.price, rows)
+			total += whatif.Reprice(model.name, model.price, rows)
 		}
 		benchmarkWhatifCost = total
 	}
