@@ -48,6 +48,90 @@ test("loads isolated demo data without external requests", async ({ page }) => {
   expect(consoleErrors).toEqual([]);
 });
 
+test("retries a transient local log scan disconnect without exposing the browser error", async ({ page }) => {
+  let localUsageRequests = 0;
+  await page.route("**/api/local-usage?*", async route => {
+    localUsageRequests++;
+    if (localUsageRequests === 1) {
+      await route.abort("connectionreset");
+      return;
+    }
+    await route.continue();
+  });
+
+  await waitForLiveDashboard(page);
+  expect(localUsageRequests).toBe(2);
+  await expect(page.locator("#subError")).toBeHidden();
+  await expect(page.locator("#subErrorText")).not.toContainText("Failed to fetch");
+});
+
+test("coalesces background refreshes while a local scan is already running", async ({ page }) => {
+  let localUsageRequests = 0;
+  let releaseScan;
+  const scanHeld = new Promise(resolve => { releaseScan = resolve; });
+  await page.route("**/api/local-usage?*", async route => {
+    localUsageRequests++;
+    await scanHeld;
+    await route.continue();
+  });
+
+  await page.goto("/");
+  await expect(page.locator("#statusText")).toHaveText("LIVE");
+  await expect.poll(() => localUsageRequests).toBe(1);
+  try {
+    await page.evaluate(() => { subscription(); subscription(); });
+    await page.waitForTimeout(100);
+    expect(localUsageRequests).toBe(1);
+  } finally {
+    releaseScan();
+  }
+  await expect(page.locator("#subContent")).toBeVisible();
+});
+
+test("keeps persistent scan disconnects actionable and hides raw browser errors", async ({ page }) => {
+  await page.route("**/api/local-usage?*", route => route.abort("connectionreset"));
+
+  await page.goto("/");
+  await expect(page.locator("#statusText")).toHaveText("LIVE");
+  await expect(page.locator("#subError")).toBeVisible();
+  await expect(page.locator("#subErrorText")).toHaveText(
+    "Local meter connection was interrupted. Log scanning will retry automatically."
+  );
+  await expect(page.locator("#subErrorText")).not.toContainText("Failed to fetch");
+  await expect(page.locator("#subRetry")).toBeVisible();
+});
+
+test("pauses local scanning with the meter offline and resumes after reconnect", async ({ page }) => {
+  let summaryOffline = false;
+  let localUsageRequests = 0;
+  await page.route("**/api/summary", async route => {
+    if (summaryOffline) {
+      await route.abort("connectionreset");
+      return;
+    }
+    await route.continue();
+  });
+  page.on("request", request => {
+    if (request.url().includes("/api/local-usage?")) localUsageRequests++;
+  });
+
+  await waitForLiveDashboard(page);
+  expect(localUsageRequests).toBe(1);
+
+  summaryOffline = true;
+  await page.evaluate(() => tick());
+  await expect(page.locator("#statusText")).toHaveText("METER OFFLINE");
+  await expect(page.locator("#subErrorText")).toHaveText(
+    "Local log scanning is paused. It will resume when the dashboard reconnects."
+  );
+
+  summaryOffline = false;
+  await page.evaluate(() => tick());
+  await expect(page.locator("#statusText")).toHaveText("LIVE");
+  await expect(page.locator("#subError")).toBeHidden();
+  await expect.poll(() => localUsageRequests).toBe(2);
+});
+
 test("demo rejects provider traffic without forwarding", async ({ page }) => {
   const externalRequests = [];
   page.on("request", request => {
