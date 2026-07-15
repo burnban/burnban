@@ -121,6 +121,28 @@
   .fill.hot  { background: linear-gradient(90deg, #8a2318, var(--hot)); animation: heat 1.2s ease-in-out infinite; }
   @keyframes heat { 50% { filter: brightness(1.25); } }
 
+  /* ── analog burn gauge (hero alternate view) ─────────────── */
+  .label-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+  .meter-views button { min-height: 34px; padding: 6px 10px; }
+  .gauge-view { max-width: 400px; }
+  .gauge-view svg { display: block; width: 100%; height: auto; }
+  .gauge-band { fill: none; stroke-width: 25; opacity: .9; }
+  .gauge-tickring { fill: none; stroke: rgba(232, 223, 208, .25); stroke-width: 7; stroke-dasharray: 1.5 17.05; }
+  .gauge-view .g-label { font-family: var(--cond); font-size: 11px; letter-spacing: .12em; font-weight: 600; fill: var(--dim); }
+  .gauge-capline { stroke: var(--hot); stroke-width: 1.5; stroke-dasharray: 3 4; opacity: .8; }
+  .gauge-captext { font-family: var(--cond); font-size: 10px; letter-spacing: .1em; font-weight: 700; fill: var(--hot); }
+  .gauge-needle {
+    transform-box: view-box; transform-origin: 260px 264px; transform: rotate(-78deg);
+    transition: transform .8s cubic-bezier(.3, .7, .25, 1);
+  }
+  .gauge-needle path { fill: var(--text); }
+  .gauge-needle .tail { fill: var(--faint); }
+  .gauge-hub-outer { fill: #0c0906; stroke: rgba(232, 223, 208, .35); stroke-width: 2; }
+  .gauge-hub-inner { fill: var(--ember); }
+  .gauge-view.hot .gauge-hub-inner { fill: var(--hot); }
+  .gauge-view.hot svg { filter: drop-shadow(0 0 14px rgba(255, 77, 61, .3)); }
+  .gauge-text { margin-top: 8px; font-variant-numeric: tabular-nums; }
+
   /* ── panels ──────────────────────────────────────────────── */
   .chartp { margin-top: 26px; }
   .chartp svg { width: 100%; height: 120px; display: block; margin-top: 10px; }
@@ -336,8 +358,38 @@
   <div id="proxyData" aria-busy="true">
   <section class="hero reveal d1">
     <div>
-      <div class="label">Billed API-key spend today</div>
+      <div class="label-row">
+        <div class="label">Billed API-key spend today</div>
+        <div class="windows meter-views" aria-label="Meter display style">
+          <button type="button" data-meter-view="digits" class="active" aria-pressed="true">digits</button>
+          <button type="button" data-meter-view="gauge" aria-pressed="false">gauge</button>
+        </div>
+      </div>
       <div id="total" class="big" aria-live="polite">$0.0000</div>
+      <div id="gaugeWrap" class="gauge-view hidden" role="img" aria-label="Burn gauge">
+        <svg viewBox="0 0 520 300" aria-hidden="true">
+          <path class="gauge-band" style="stroke:#9dc76c" d="M 64.1 257.2 A 196 196 0 0 1 97.5 154.4"/>
+          <path class="gauge-band" style="stroke:#c9c05a" d="M 105.5 143.3 A 196 196 0 0 1 193 79.8"/>
+          <path class="gauge-band" style="stroke:#f0b34e" d="M 206 75.6 A 196 196 0 0 1 314 75.6"/>
+          <path class="gauge-band" style="stroke:#ff7a2f" d="M 327 79.8 A 196 196 0 0 1 414.4 143.3"/>
+          <path class="gauge-band" style="stroke:#ff4d3d" d="M 422.5 154.4 A 196 196 0 0 1 455.9 257.2"/>
+          <path class="gauge-tickring" d="M 98 264 A 162 162 0 0 1 422 264"/>
+          <text class="g-label" x="52" y="286" text-anchor="middle">LOW</text>
+          <text class="g-label" x="112" y="74" text-anchor="middle">GUARDED</text>
+          <text class="g-label" x="260" y="44" text-anchor="middle">ELEVATED</text>
+          <text class="g-label" x="408" y="74" text-anchor="middle">HIGH</text>
+          <text class="g-label" x="468" y="286" text-anchor="middle">EXTREME</text>
+          <line class="gauge-capline" x1="443" y1="197" x2="475" y2="185"/>
+          <text class="gauge-captext" x="447" y="176">CAP</text>
+          <g id="gaugeNeedle" class="gauge-needle">
+            <path d="M 256.8 264 L 258.6 96 L 261.4 96 L 263.2 264 Z"/>
+            <path class="tail" d="M 254 264 L 266 264 L 262 292 L 258 292 Z"/>
+          </g>
+          <circle class="gauge-hub-outer" cx="260" cy="264" r="14"/>
+          <circle class="gauge-hub-inner" cx="260" cy="264" r="5.5"/>
+        </svg>
+        <div id="gaugeText" class="label gauge-text">waiting for the meter</div>
+      </div>
     </div>
     <div class="stats">
       <div class="stat"><div class="label">Last hour</div><div id="rate" class="val">$0.0000</div></div>
@@ -689,6 +741,22 @@
     return budgets;
   }
 
+  // The analog gauge mirrors the fuse bar: needle position is the tightest
+  // active window, and a ban or tripped fuse pins it at the cap marker.
+  function updateGauge(d, fuse, pct) {
+    const banActive = Boolean(d.ban_active || d.fuse_tripped || d.external_ban);
+    let frac = fuse ? Math.min(1, Math.max(0, pct / 100)) : 0;
+    if (banActive) frac = 1;
+    $("gaugeNeedle").style.transform = "rotate(" + (-78 + frac * 151.5).toFixed(1) + "deg)";
+    $("gaugeWrap").classList.toggle("hot", banActive || frac >= .9);
+    const state = banActive ? "burn ban in effect"
+      : fuse ? fuse.name + " " + Math.min(100, pct).toFixed(0) + "% · " + fmt$(fuse.spent_usd) + " / " + fmt$(fuse.cap_usd)
+      : "no guardrail set";
+    const readout = fmt$(d.total_cost) + " today · " + state;
+    setText("gaugeText", readout);
+    $("gaugeWrap").setAttribute("aria-label", "Burn gauge: " + readout);
+  }
+
   function renderBudgets(d) {
     const budgets = Array.isArray(d.budgets) && d.budgets.length ? d.budgets : legacyBudgets(d);
     const fill = $("fill"), text = $("fuseText"), big = $("total"), track = $("budgetTrack");
@@ -701,6 +769,7 @@
       big.classList.remove("hot");
       track.setAttribute("aria-valuenow", "0");
       track.setAttribute("aria-valuetext", "No spend guardrail configured");
+      updateGauge(d, null, 0);
       return;
     }
     const fuse = budgets.reduce((tightest, item) => Number(item.pct || 0) > Number(tightest.pct || 0) ? item : tightest);
@@ -714,7 +783,30 @@
     track.setAttribute("aria-valuenow", Math.min(100, pct).toFixed(1));
     track.setAttribute("aria-valuetext", `${fuse.name} budget ${pct.toFixed(1)} percent used; ${fmt$(fuse.remaining_usd)} remaining`);
     $("windows").textContent = budgets.map(item => `${item.name} ${fmt$(item.spent_usd)} / ${fmt$(item.cap_usd)} · ${Number(item.pct || 0).toFixed(0)}% · ${item.kind === "fuse" ? item.reset : "resets " + item.reset}`).join("   |   ");
+    updateGauge(d, fuse, pct);
   }
+
+  // Digits and gauge show the same meter; the choice is cosmetic and stays on
+  // this browser only, so plain localStorage is the whole persistence story.
+  const meterViewButtons = document.querySelectorAll("[data-meter-view]");
+  let meterView = (() => {
+    try { return localStorage.getItem("bb_meter_view") === "gauge" ? "gauge" : "digits"; } catch (_) { return "digits"; }
+  })();
+  function applyMeterView() {
+    $("total").classList.toggle("hidden", meterView === "gauge");
+    $("gaugeWrap").classList.toggle("hidden", meterView !== "gauge");
+    meterViewButtons.forEach(button => {
+      const selected = button.dataset.meterView === meterView;
+      button.classList.toggle("active", selected);
+      button.setAttribute("aria-pressed", String(selected));
+    });
+  }
+  meterViewButtons.forEach(button => button.addEventListener("click", () => {
+    meterView = button.dataset.meterView;
+    try { localStorage.setItem("bb_meter_view", meterView); } catch (_) { /* private windows may block storage */ }
+    applyMeterView();
+  }));
+  applyMeterView();
 
   let tickRunning = false;
   let lastSuccess = null;
