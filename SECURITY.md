@@ -43,6 +43,15 @@ to the upstream selected by the operator and are never persisted; request and
 response bodies are not stored. Local-agent usage scans read supported usage
 logs in place and never upload or modify them.
 
+The dashboard reads ledger-derived JSON from `/api/` routes and mirrors the
+CLI's guardrail commands (cap, warn, fuse, ban, lift, webhook) as mutating
+endpoints under `/api/admin/`. Those control endpoints are enabled on loopback
+listeners, where reaching the dashboard already implies the authority to run
+the CLI. A team/network gateway refuses them with 403 unless the operator
+starts it with `burnban serve --allow-remote-admin`; the shared gateway token
+still guards every route either way, and the listener's local-origin safety
+checks reject cross-origin browser requests before any handler runs.
+
 Source adapters are compiled in, validated as read-only/offline, and emit
 metadata-only events; the binary does not download or execute plugins. An
 operator can explicitly add a webhook, configure metadata-only OTLP export to

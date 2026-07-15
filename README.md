@@ -88,7 +88,7 @@ open http://localhost:4141
 
 Or launch **Burnban** from the desktop/application menu (`burnban desktop`). The installer adds the launcher and starts the same local meter at login without Electron, an account, or a cloud service. The dashboard keeps subscription-log usage separate from proxy-billed traffic, so a `$0` proxy ledger never hides the work your plans performed.
 
-Set hard local guardrails:
+Set hard local guardrails, in the terminal or on the dashboard's Controls tab:
 
 ```sh
 burnban cap --daily 10 --weekly 40 --monthly 120
@@ -126,6 +126,25 @@ Which door is yours?
 - **Flat-rate or agent-managed plan** — run `burnban usage` with no proxy to price supported local logs.
 - **Per-token keys** — run `burnban serve` to meter and cap spend in the request path.
 
+## Dashboard
+
+The meter (`burnban serve`, or the desktop launcher) serves the dashboard at `http://localhost:4141`: one embedded HTML file, six tabs, and the CLI's functions in the browser. Every panel header names its terminal twin (for example `CLI: burnban fuse --burst 5m:4`), and both surfaces call the same internal functions against the same ledger, so the browser and the terminal can never disagree.
+
+| tab | what it does | CLI twin |
+|---|---|---|
+| **Overview** | live meter (digits or gauge), 24h burn chart, budget bars, today's per-model/per-agent tables, waste receipts, local agent usage, copyable connect commands | `top`, `usage` |
+| **Report** | spend report for any window, what-if repricing, CSV/JSON export downloads | `report`, `whatif`, `export` |
+| **Activity** | live feed of recent proxied requests: model, agent, status, tokens, latency, cost | `top`, `export` |
+| **Controls** | calendar caps, per-agent daily caps, velocity fuses, warn threshold, webhook alerts, burn ban and lift | `cap`, `fuse`, `alert`, `ban`, `lift` |
+| **Optimize** | cache shaping receipts, budget allocation proposals, downshift routing status | `optimize`, `downshift` |
+| **System** | meter health, lifetime ledger, pricing table, admission policy status, invoice reconciliation | `doctor`, `status`, `pricing`, `policy`, `reconcile` |
+
+Every read is a plain JSON endpoint you can also script: `/api/report`, `/api/requests`, `/api/guardrails`, `/api/whatif`, `/api/optimize`, `/api/downshift`, `/api/policy`, `/api/reconcile`, `/api/diagnostics`, `/api/pricing`, and `/api/export?format=csv|json`. Control actions POST to `/api/admin/` with the exact CLI semantics and validation bounds. Destructive actions (ban, remove all caps, remove all fuses, lift with a cap override) take two clicks: arm, then confirm.
+
+Controls are always enabled on a loopback listener, where reaching the dashboard already implies the authority to run the CLI. A team/network gateway serves a read-only dashboard; start it with `burnban serve --allow-remote-admin` to enable the control panels for token holders. The shared `BURNBAN_TOKEN` guards every route in both cases. Document and lifecycle workflows (`policy apply`, `downshift apply`, `reconcile import`, `prune`, `stop`) stay in the CLI.
+
+The DAY MODE toggle in the header switches the panel lighting between the night default and a warm paper day palette. The choice is cosmetic and stays in your browser.
+
 ## Trust, by construction
 
 - **Local meter and ledger** — usage accounting and policy state stay on your machine in SQLite.
@@ -137,19 +156,19 @@ What it sees: request metadata and provider usage frames needed to meter live tr
 
 ## What you get
 
-- **Local + live dashboard** at `http://localhost:4141` — auto-detected subscription/agent logs with dollar and token breakdowns, plus live proxy burn, calendar/fuse guardrail bars, per-model/per-agent tables, and waste receipts. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet.
+- **Local + live dashboard** at `http://localhost:4141` — six tabs covering the CLI's functions in the browser: live burn and local agent usage, windowed reports with CSV/JSON export, a live request feed, cap/fuse/ban/alert controls, optimization receipts, and meter health, with a day/night panel theme. One embedded HTML file served from the binary: no CDNs, no build step, nothing loads from the internet. See [Dashboard](#dashboard).
 - **`burnban top`** — the same live view in your terminal: per-model and per-agent spend, cache hit rate, last-hour spend, and every budget window. Redirected output is plain text; `--once` prints one snapshot.
-- **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste.
-- **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page.
-- **`burnban reconcile`** — import bounded, immutable provider invoice evidence and compare billed amounts, credits, batch adjustments, unmatched traffic, variance, confidence, and last reconciliation time without rewriting the observed ledger. See [RECONCILIATION.md](RECONCILIATION.md).
+- **`burnban report`** — spend for any window, plus heuristic receipts for potential duplicate calls and low cache reuse. Findings are deliberately labeled as signals, not proof of waste. (dashboard: Report tab)
+- **`burnban whatif`** — reprice a window's actual traffic onto any model in the table, cache economics included. "Your week on haiku: $9.22 (−82%)" — from your own ledger, not a pricing page. (dashboard: Report tab)
+- **`burnban reconcile`** — import bounded, immutable provider invoice evidence and compare billed amounts, credits, batch adjustments, unmatched traffic, variance, confidence, and last reconciliation time without rewriting the observed ledger. (dashboard: System tab) See [RECONCILIATION.md](RECONCILIATION.md).
 - **OpenTelemetry + warehouse export** — opt-in, content-free OTLP/HTTP traces and GenAI metrics with bounded asynchronous delivery, plus atomic date/hour-partitioned NDJSON batches, SHA-256 manifests, a typed schema, and dbt staging contract. See [TELEMETRY.md](TELEMETRY.md).
 - **Local policy engine v2** — typed/versioned provider, model, route, tier, and geo allow/deny rules; rolling/fixed request and token windows; concurrency and maximum-call-cost bounds; observe/warn/enforce rollout; durable explanations, historical simulation, six workload templates, and metadata-only enforcement/identity/bypass coverage health. See [POLICY_ENGINE.md](POLICY_ENGINE.md).
 - **Explicit budget-aware downshift** — after Policy v2, exact operator-allowlisted equivalent model families can warn and then move compatible bounded requests to a cheaper provider or local Ollama/vLLM route. Dialect, tool schema, modality, context, structured-output, identity, and actual target-price gates fail closed; historical dry-run or an audited force reason is required before activation. See [DOWNSHIFT_ROUTING.md](DOWNSHIFT_ROUTING.md).
-- **`burnban usage`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model usage confidence and API-equivalent prices.
+- **`burnban usage`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model usage confidence and API-equivalent prices. (dashboard: Overview tab)
 - **Bounded local scans** — the dashboard applies a 512 MiB per-source preflight envelope and 10-second scan deadline by default, labeling oversized, growing, or otherwise incomplete sources `partial`; operators with larger local histories can raise those bounds explicitly with `burnban serve --local-usage-max-scan-mb 2048 --local-usage-scan-timeout 30s`.
-- **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst spend, same-slot historical-baseline, and request fan-out fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
+- **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst spend, same-slot historical-baseline, and request fan-out fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch. (dashboard: Controls tab)
 - **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active dollar guardrails fail safe around accounting gaps.
-- **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state.
+- **Operations built in** — `burnban doctor`, `status`, `stop`, `pricing`, and explicit `prune` commands; `/health` reports persistence and in-flight reservation state. (dashboard: System tab)
 
 ## How it works
 
@@ -349,7 +368,11 @@ Three deployment shapes:
    routes because provider routes need `Authorization` for the provider key.
    The public dashboard shell prompts for the token and holds it in tab-scoped
    session storage; URL/query tokens are rejected and legacy `?token=` values
-   are removed without being consumed. Spend is attributed per agent and per
+   are removed without being consumed. The gateway dashboard is read-only by
+   default: token holders can view every tab, and starting the gateway with
+   `--allow-remote-admin` additionally enables its control actions (caps,
+   fuses, ban/lift, alerts). Loopback listeners always have them. Spend is
+   attributed per agent and per
    `x-burnban-session`; those attribution headers also stay local. Team clients
    that cannot send a custom Burnban header are not compatible with team mode.
    Host-local Claude/Codex/etc. log scanning is disabled on a team/network
