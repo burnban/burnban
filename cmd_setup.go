@@ -13,9 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/burnban/burnban/internal/localusage"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
-	"github.com/burnban/burnban/internal/subsidy"
 )
 
 // burnbanConfig persists the one-time onboarding choice so bare `burnban`
@@ -91,7 +91,7 @@ func cmdSetup(args []string) error {
 	printSetupWelcome(color)
 
 	// Instant value: reprice the last 24h of local subscription traffic.
-	if card, err := scanSubsidyCard("24h"); err != nil {
+	if card, err := scanUsageCard("24h"); err != nil {
 		fmt.Println("  Could not scan your agent logs just now. That's fine, burnban still works.")
 	} else if !card.HasUsage {
 		fmt.Println("  No agent traffic found yet. Once Claude Code, Codex, or others run,")
@@ -153,41 +153,41 @@ func launchConfiguredInterface(cfg burnbanConfig) error {
 	}
 }
 
-// scanSubsidyCard reprices a window of local agent logs, mirroring the default
-// sources of `burnban subsidy`, and returns the compact share card.
-func scanSubsidyCard(window string) (subsidy.ShareCard, error) {
+// scanUsageCard reprices a window of local agent logs, mirroring the default
+// sources of `burnban usage`, and returns the compact share card.
+func scanUsageCard(window string) (localusage.ShareCard, error) {
 	from, label, err := parseSince(window)
 	if err != nil {
-		return subsidy.ShareCard{}, err
+		return localusage.ShareCard{}, err
 	}
 	prices, err := pricing.Load()
 	if err != nil {
-		return subsidy.ShareCard{}, err
+		return localusage.ShareCard{}, err
 	}
 	home, _ := os.UserHomeDir()
-	report, err := subsidy.BuildReport(prices, subsidy.ReportOptions{
+	report, err := localusage.BuildReport(prices, localusage.ReportOptions{
 		Since:       from,
 		Until:       time.Now(),
 		ClaudeDir:   filepath.Join(home, ".claude", "projects"),
 		CodexDir:    filepath.Join(home, ".codex", "sessions"),
-		GeminiDir:   subsidy.DefaultGeminiDir(home),
-		OpenCodeDB:  subsidy.DefaultOpenCodeDB(home),
+		GeminiDir:   localusage.DefaultGeminiDir(home),
+		OpenCodeDB:  localusage.DefaultOpenCodeDB(home),
 		HermesDB:    defaultHermesDB(home),
 		OpenClawDir: defaultOpenClawDir(home),
-		GooseDB:     subsidy.DefaultGooseDB(home),
-		ScanLimits: subsidy.ScanLimits{
+		GooseDB:     localusage.DefaultGooseDB(home),
+		ScanLimits: localusage.ScanLimits{
 			MaxFiles:     5_000,
 			MaxBytes:     512 << 20,
 			MaxLineBytes: 32 << 20,
 			MaxRecords:   1_000_000,
-			// Keep first-run snappy; a deep audit is `burnban subsidy`.
+			// Keep first-run snappy; a deep audit is `burnban usage`.
 			MaxDuration: 6 * time.Second,
 		},
 	})
 	if err != nil {
-		return subsidy.ShareCard{}, err
+		return localusage.ShareCard{}, err
 	}
-	return subsidy.NewShareCard(report, label, 0), nil
+	return localusage.NewShareCard(report, label, 0), nil
 }
 
 func printSetupWelcome(color bool) {
@@ -199,7 +199,7 @@ func printSetupWelcome(color bool) {
 	fmt.Println()
 }
 
-func printSetupNumber(card subsidy.ShareCard, color bool) {
+func printSetupNumber(card localusage.ShareCard, color bool) {
 	line := func(label, value string) {
 		fmt.Printf("  %-32s %s\n", label, colorize(value, shareEmber, color))
 	}
@@ -358,7 +358,7 @@ func printSetupDone(cfg burnbanConfig, willLaunch, color bool) {
 	fmt.Println("  " + colorize("You're set.", shareEmber, color) + " Run " + colorize("burnban", shareEmber, color) + " to open this view again.")
 	fmt.Println()
 	fmt.Printf("  Watch your spend     %s\n", colorize(launch, shareEmber, color))
-	fmt.Printf("  Price your usage     %s\n", colorize("burnban subsidy", shareEmber, color))
+	fmt.Printf("  Price your usage     %s\n", colorize("burnban usage", shareEmber, color))
 	fmt.Printf("  Full walkthrough     %s\n", colorize("burnban guide", shareEmber, color))
 	if cfg.Goal == "enforce" {
 		fmt.Printf("  Verify agent route   %s\n", colorize("burnban doctor", shareEmber, color))

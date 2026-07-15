@@ -108,7 +108,7 @@ Burnban stopped so its SQLite WAL and shared-memory files are handled together.
 
 ## Local agent usage
 
-The subsidy report and dashboard read supported Claude Code, Codex, Gemini CLI,
+The usage report and dashboard read supported Claude Code, Codex, Gemini CLI,
 GitHub Copilot CLI, Cursor, OpenCode, Hermes, OpenClaw, and Goose usage stores in place.
 Their validated adapter manifests require read-only, offline scanning and
 metadata-only output. Burnban extracts token/model/session metadata needed for
@@ -137,12 +137,12 @@ binary; Burnban does not fetch or execute third-party adapter code at runtime.
 
 Host-local usage scanning is available only on a local meter (and as synthetic
 fixtures in demo mode). A team/network gateway advertises
-`local_usage_enabled: false`, returns HTTP 403 from `/api/subsidy`, and does not
+`local_usage_enabled: false`, returns HTTP 403 from `/api/local-usage`, and does not
 poll or display the server operator's local-agent usage panel. This prevents a
 remote dashboard user from reading host-user agent history through the gateway.
 This host-local scan is disabled whenever Burnban is exposed as a team/network
 gateway, so shared-token users cannot inspect the gateway operator's local agent
-history. The `burnban subsidy` command remains a local, read-only CLI workflow.
+history. The `burnban usage` command remains a local, read-only CLI workflow.
 
 ## Network traffic
 

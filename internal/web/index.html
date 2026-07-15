@@ -596,7 +596,7 @@
 
     const subMetered = $("subMetered");
     if (meteredUSD > 0) {
-      subMetered.textContent = "Real API spend: " + fmt$(meteredUSD) + " already billed per token (not a subsidy).";
+      subMetered.textContent = "Real API spend: " + fmt$(meteredUSD) + " already billed per token.";
       subMetered.classList.remove("hidden");
     } else {
       subMetered.classList.add("hidden");
@@ -647,7 +647,7 @@
     $("subLoading").classList.remove("hidden");
     $("subError").classList.add("hidden");
     try {
-      const response = await fetch("/api/subsidy?window=" + encodeURIComponent(subWindow), requestOptions(subController.signal));
+      const response = await fetch("/api/local-usage?window=" + encodeURIComponent(subWindow), requestOptions(subController.signal));
       if (!response.ok) throw new Error(response.status === 401 ? "authentication required" : `scan returned HTTP ${response.status}`);
       const data = await response.json();
       if (sequence === subSequence) renderSubscription(data);

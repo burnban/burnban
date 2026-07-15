@@ -17,9 +17,9 @@ import (
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/localusage"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
-	"github.com/burnban/burnban/internal/subsidy"
 	"github.com/burnban/burnban/internal/web"
 )
 
@@ -584,7 +584,7 @@ func TestDemoSubscriptionNeverScansRealHome(t *testing.T) {
 	web.RegisterWithConfig(mux, s, web.Config{Version: "test", Prices: prices, Demo: true, Exposure: "localhost"})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	resp, err := http.Get(srv.URL + "/api/local-usage?window=today")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -635,14 +635,14 @@ func TestTeamGatewayDisablesHostLocalUsageScanning(t *testing.T) {
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
 
-	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	resp, err := http.Get(srv.URL + "/api/local-usage?window=today")
 	if err != nil {
 		t.Fatal(err)
 	}
 	body, _ := io.ReadAll(resp.Body)
 	resp.Body.Close()
 	if resp.StatusCode != http.StatusForbidden || strings.Contains(string(body), "private") {
-		t.Fatalf("team subsidy route status=%d body=%q", resp.StatusCode, body)
+		t.Fatalf("team usage route status=%d body=%q", resp.StatusCode, body)
 	}
 	resp, err = http.Get(srv.URL + "/api/summary")
 	if err != nil {
@@ -660,7 +660,7 @@ func TestTeamGatewayDisablesHostLocalUsageScanning(t *testing.T) {
 	}
 }
 
-func TestSubsidyAPIAutoDetectsLocalLogs(t *testing.T) {
+func TestLocalUsageAPIAutoDetectsLocalLogs(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	dir := filepath.Join(home, ".claude", "projects", "demo")
@@ -672,7 +672,7 @@ func TestSubsidyAPIAutoDetectsLocalLogs(t *testing.T) {
 		t.Fatal(err)
 	}
 	srv, _ := newServer(t)
-	resp, err := http.Get(srv.URL + "/api/subsidy?window=today")
+	resp, err := http.Get(srv.URL + "/api/local-usage?window=today")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -700,7 +700,7 @@ func TestSubsidyAPIAutoDetectsLocalLogs(t *testing.T) {
 	}
 }
 
-func TestSubsidyAPIHonorsConfiguredScanLimits(t *testing.T) {
+func TestLocalUsageAPIHonorsConfiguredScanLimits(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
 	t.Setenv("USERPROFILE", home)
@@ -734,14 +734,14 @@ func TestSubsidyAPIHonorsConfiguredScanLimits(t *testing.T) {
 	mux := http.NewServeMux()
 	web.RegisterWithConfig(mux, s, web.Config{
 		Version: "test", Prices: prices, Exposure: "localhost",
-		LocalUsageScanLimits: subsidy.ScanLimits{
+		LocalUsageScanLimits: localusage.ScanLimits{
 			MaxFiles: 10, MaxBytes: int64(len(line)) + 16, MaxLineBytes: 1 << 20,
 			MaxRecords: 10, MaxDuration: time.Second,
 		},
 	})
 	srv := httptest.NewServer(mux)
 	t.Cleanup(srv.Close)
-	resp, err := http.Get(srv.URL + "/api/subsidy?window=30d")
+	resp, err := http.Get(srv.URL + "/api/local-usage?window=30d")
 	if err != nil {
 		t.Fatal(err)
 	}

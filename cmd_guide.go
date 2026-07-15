@@ -28,8 +28,8 @@ func cmdGuide(args []string) error {
 	fmt.Println("  Claude Code, Codex, and friends keep local logs of what they ran.")
 	fmt.Println("  burnban reads those and prices them at API rates, so you can see")
 	fmt.Println("  what a flat-rate plan would have cost on metered keys.")
-	fmt.Println("    " + colorize("burnban subsidy", shareEmber, color) + "            today's usage, priced")
-	fmt.Println("    " + colorize("burnban subsidy --since 30d", shareEmber, color) + " a month of it")
+	fmt.Println("    " + colorize("burnban usage", shareEmber, color) + "             today's usage, priced")
+	fmt.Println("    " + colorize("burnban usage --since 30d", shareEmber, color) + " a month of it")
 
 	h("  2. Live proxy meter  (opt in, and it can enforce)")
 	fmt.Println("  Point an agent at burnban and every call flows through it. Now the")

@@ -104,7 +104,7 @@ test("team dashboard authenticates by header or tab prompt, never by URL", async
   expect(correctJSON.exposure).toBe("team/network");
   expect(correctJSON.local_usage_enabled).toBe(false);
   expect(correctBody).not.toContain(teamToken);
-  const forbiddenLocalUsage = await request.get(`${teamBaseURL}/api/subsidy?window=today`, {
+  const forbiddenLocalUsage = await request.get(`${teamBaseURL}/api/local-usage?window=today`, {
     headers: { "x-burnban-token": teamToken }
   });
   expect(forbiddenLocalUsage.status()).toBe(403);
@@ -113,7 +113,7 @@ test("team dashboard authenticates by header or tab prompt, never by URL", async
   const promptPage = await promptContext.newPage();
   const localUsageRequests = [];
   promptPage.on("request", req => {
-    if (req.url().includes("/api/subsidy")) localUsageRequests.push(req.url());
+    if (req.url().includes("/api/local-usage")) localUsageRequests.push(req.url());
   });
   await promptPage.goto(teamBaseURL);
   await expect(promptPage).toHaveTitle("burnban — the meter is running");

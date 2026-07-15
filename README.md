@@ -4,9 +4,9 @@
 
 **A local meter that prices subscription-agent usage and caps API-key spend before the next dollar leaves.**
 
-One maintainer machine produced **$4,173.49 of API-equivalent work in 30 days** on a $200/month plan: a **20.9× subsidy**. Burnban reads the local usage logs your agents already keep and gives you the same number without an account, proxy, or upload.
+One maintainer machine recorded **$4,173.49 of API-equivalent usage in 30 days** on a $200/month plan, or **20.9× the plan price at API rates**. Burnban reads the local usage logs your agents already keep and gives you the same number without an account, proxy, or upload.
 
-![Animated terminal recording of Burnban subsidy share showing $4,173.49 of API-equivalent usage](docs/subsidy-share.gif)
+![Animated Burnban local usage report showing $4,173.49 of API-equivalent usage](docs/usage-share.gif)
 
 Install on macOS or Linux:
 
@@ -17,10 +17,10 @@ curl -fsSL https://burnban.sh/install | sh
 Then get your number:
 
 ```sh
-burnban subsidy --share
+burnban usage --share
 ```
 
-The card includes the time window, monthly-plan multiple, install command, and `burnban.dev`, ready to screenshot. Use `--plan-cost 100` for your actual monthly price, `--since 7d` for another window, or `--share --json` for the same fields as structured data.
+The card includes the time window, the multiple of the plan price, install command, and `burnban.dev`, ready to screenshot. Use `--plan-cost 100` for your actual monthly price, `--since 7d` for another window, or `--share --json` for the same fields as structured data.
 
 Windows PowerShell:
 
@@ -35,9 +35,9 @@ Release installers verify the archive against published SHA-256 checksums. For a
 Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose retain local usage metadata. Burnban reads those stores in place, read-only, and prices the input, output, cache-read, and cache-write dimensions each source actually exposes with its dated API table:
 
 ```sh
-burnban subsidy                 # auto-detect all nine sources; last 30 days
-burnban subsidy --since 7d      # another window
-burnban subsidy --daily --json  # daily detail or machine-readable output
+burnban usage                 # auto-detect all nine sources; last 30 days
+burnban usage --since 7d      # another window
+burnban usage --daily --json  # daily detail or machine-readable output
 ```
 
 The $4,173.49 result is a real machine's last 30 days, not a provider invoice. The calculation is cache-aware, prices Anthropic's 1-hour cache-write tier at its real 2× rate, and deduplicates repeated message IDs instead of inflating the result.
@@ -111,7 +111,7 @@ burnban whatif --since 7d
 
 Which door is yours?
 
-- **Flat-rate or agent-managed plan** — run `burnban subsidy` with no proxy to price supported local logs.
+- **Flat-rate or agent-managed plan** — run `burnban usage` with no proxy to price supported local logs.
 - **Per-token keys** — run `burnban serve` to meter and cap spend in the request path.
 
 ## Trust, by construction
@@ -133,7 +133,7 @@ What it sees: request metadata and provider usage frames needed to meter live tr
 - **OpenTelemetry + warehouse export** — opt-in, content-free OTLP/HTTP traces and GenAI metrics with bounded asynchronous delivery, plus atomic date/hour-partitioned NDJSON batches, SHA-256 manifests, a typed schema, and dbt staging contract. See [TELEMETRY.md](TELEMETRY.md).
 - **Local policy engine v2** — typed/versioned provider, model, route, tier, and geo allow/deny rules; rolling/fixed request and token windows; concurrency and maximum-call-cost bounds; observe/warn/enforce rollout; durable explanations, historical simulation, six workload templates, and metadata-only enforcement/identity/bypass coverage health. See [POLICY_ENGINE.md](POLICY_ENGINE.md).
 - **Explicit budget-aware downshift** — after Policy v2, exact operator-allowlisted equivalent model families can warn and then move compatible bounded requests to a cheaper provider or local Ollama/vLLM route. Dialect, tool schema, modality, context, structured-output, identity, and actual target-price gates fail closed; historical dry-run or an audited force reason is required before activation. See [DOWNSHIFT_ROUTING.md](DOWNSHIFT_ROUTING.md).
-- **`burnban subsidy`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model usage confidence and API-equivalent prices.
+- **`burnban usage`** — no proxy needed: read the local usage stores Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose already keep, with per-model usage confidence and API-equivalent prices.
 - **Bounded local scans** — the dashboard applies a 512 MiB per-source preflight envelope and 10-second scan deadline by default, labeling oversized, growing, or otherwise incomplete sources `partial`; operators with larger local histories can raise those bounds explicitly with `burnban serve --local-usage-max-scan-mb 2048 --local-usage-scan-timeout 30s`.
 - **Budget guardrails** — daily, weekly, and monthly caps plus rolling hourly/burst spend, same-slot historical-baseline, and request fan-out fuses enforced during admission with in-flight reservations, per-agent daily caps, automatic fuse cooldowns, retried webhooks, and a manual **burn ban** kill switch.
 - **Honest confidence states** — usage and pricing are tracked independently as exact, estimated, partial, missing, priced, unknown, or unmetered. Unknown-price traffic is never guessed, and active dollar guardrails fail safe around accounting gaps.
@@ -342,7 +342,7 @@ Three deployment shapes:
    that cannot send a custom Burnban header are not compatible with team mode.
    Host-local Claude/Codex/etc. log scanning is disabled on a team/network
    gateway so the operator account's local usage is not exposed to token users;
-   `burnban subsidy` remains available as a local CLI workflow on that host.
+   `burnban usage` remains available as a local CLI workflow on that host.
    Agent/session labels are self-asserted by any client holding the shared token:
    they are useful cooperative attribution and cap labels, not authenticated
    user identity. Optional Personal/Teams enrollment adds a separate
@@ -460,7 +460,7 @@ See [data and privacy](DATA_AND_PRIVACY.md), [OpenTelemetry and warehouse export
 
 ## Free forever vs. paid
 
-Everything in this README — the proxy, dashboard, caps, velocity fuse, compatibility-gated downshift, `subsidy`, `whatif`, MCP, exports, and the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and optional operator-configured webhook or OTLP collector. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
+Everything in this README — the proxy, dashboard, caps, velocity fuse, compatibility-gated downshift, `usage`, `whatif`, MCP, exports, and the single-box team gateway — is MIT and free, permanently. The binary has no unsolicited telemetry, account, license checks, or code path to a Burnban-operated service. Its only outbound paths are the provider/custom upstream selected by the operator and optional operator-configured webhook or OTLP collector. Any future Burnban-hosted feature ships as a separate opt-in product, never hidden in the meter.
 
 Burnban's separately maintained product ladder is:
 
