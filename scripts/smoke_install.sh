@@ -1,6 +1,12 @@
 #!/bin/sh
 set -eu
 
+# Every install below sandboxes HOME, but install.sh honors XDG dirs first;
+# an inherited XDG_CONFIG_HOME (GitHub's ubuntu runners export one) would
+# send the autostart entry to the real config dir and fail the sandbox
+# assertions. Drop them so each invocation falls back to its own HOME.
+unset XDG_CONFIG_HOME XDG_DATA_HOME
+
 ROOT=$(CDPATH='' cd -- "$(dirname "$0")/.." && pwd)
 if [ -n "${BURNBAN_RELEASE_DIR:-}" ]; then
   RELEASE=$(CDPATH='' cd -- "$BURNBAN_RELEASE_DIR" && pwd)
