@@ -13,6 +13,7 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -665,6 +666,17 @@ func (s *fileScanner) walkJSONLMatching(dir string, since time.Time, accept func
 	} else if err != nil {
 		return fmt.Errorf("source unavailable: %w", err)
 	}
+	// Collect candidates first, then visit newest-first. When a byte, file,
+	// or time budget runs out mid-scan the dropped files are then the oldest
+	// ones, so a partial report understates history rather than today —
+	// several sources (Codex especially) lay files out so a lexical walk is
+	// chronological and a mid-walk abort would drop the newest days instead.
+	type logFile struct {
+		path string
+		size int64
+		mod  time.Time
+	}
+	var files []logFile
 	err := filepath.WalkDir(dir, func(path string, d fs.DirEntry, walkErr error) error {
 		if time.Now().After(s.deadline) {
 			s.stats.Warn("scan time limit reached")
@@ -703,29 +715,42 @@ func (s *fileScanner) walkJSONLMatching(dir string, since time.Time, accept func
 		if info.ModTime().Before(since) {
 			return nil
 		}
+		files = append(files, logFile{path: path, size: info.Size(), mod: info.ModTime()})
+		return nil
+	})
+	if err != nil && !errors.Is(err, errScanLimit) {
+		return err
+	}
+	sort.Slice(files, func(i, j int) bool {
+		if !files[i].mod.Equal(files[j].mod) {
+			return files[i].mod.After(files[j].mod)
+		}
+		return files[i].path > files[j].path
+	})
+	for _, f := range files {
+		if time.Now().After(s.deadline) {
+			s.stats.Warn("scan time limit reached")
+			return nil
+		}
 		if s.stats.FilesScanned >= s.limits.MaxFiles {
 			s.stats.Warn("file scan limit reached")
-			return errScanLimit
+			return nil
 		}
-		if info.Size() > s.limits.MaxBytes-s.stats.BytesScanned {
+		if f.size > s.limits.MaxBytes-s.stats.BytesScanned {
 			s.stats.FilesSkipped++
 			s.stats.Warn("byte scan limit reached")
-			return errScanLimit
+			return nil
 		}
 		s.stats.FilesScanned++
-		if err := visit(path); err != nil {
+		if err := visit(f.path); err != nil {
 			if errors.Is(err, errScanLimit) {
-				return err
+				return nil
 			}
 			s.stats.FilesSkipped++
 			s.stats.Warn("one or more log files could not be read completely")
 		}
-		return nil
-	})
-	if errors.Is(err, errScanLimit) {
-		return nil
 	}
-	return err
+	return nil
 }
 
 type countingReader struct {

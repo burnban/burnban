@@ -115,6 +115,7 @@ func cmdUsage(args []string) error {
 		}
 		if report.Partial {
 			fmt.Println("PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
+			fmt.Println("Newest logs are scanned first, so anything dropped is the oldest history. Scan more with --max-scan-mb and --scan-timeout.")
 		}
 		printPricingDiagnostics(prices)
 		return nil
@@ -255,6 +256,7 @@ func cmdUsage(args []string) error {
 	}
 	if report.Partial {
 		fmt.Println("\n  PARTIAL REPORT: one or more local sources hit a scan limit or could not be read completely.")
+		fmt.Println("  Newest logs are scanned first, so anything dropped is the oldest history. Scan more with --max-scan-mb and --scan-timeout.")
 	}
 	printPricingDiagnostics(prices)
 	fmt.Println("\n  source logs are read-only · no traffic or usage leaves this machine")

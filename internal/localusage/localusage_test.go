@@ -50,6 +50,17 @@ func TestScanClaude(t *testing.T) {
 	writeLog(t, filepath.Join(root, "proj-b"), "s2.jsonl", `{"type":"assistant","requestId":"req_1","timestamp":"2026-07-05T10:00:01.123Z","message":{"id":"msg_1","model":"claude-sonnet-4-6","usage":{"input_tokens":100,"output_tokens":200,"cache_creation_input_tokens":30,"cache_read_input_tokens":50,"cache_creation":{"ephemeral_5m_input_tokens":0,"ephemeral_1h_input_tokens":30}}}}
 {"type":"assistant","requestId":"req_4","timestamp":"2026-07-07T12:00:00.000Z","message":{"id":"msg_4","model":"claude-opus-4-8","usage":{"input_tokens":5,"output_tokens":5,"cache_creation_input_tokens":0,"cache_read_input_tokens":0}}}
 `)
+	// Files are scanned newest-first, so the winner of the msg_1 dedup is the
+	// copy in the most recently modified file. Pin mod times so the original
+	// session (still being appended to) beats the resume's sparser re-list.
+	resumeTime := time.Date(2026, 7, 7, 12, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(root, "proj-b", "s2.jsonl"), resumeTime, resumeTime); err != nil {
+		t.Fatal(err)
+	}
+	originalTime := resumeTime.Add(time.Hour)
+	if err := os.Chtimes(filepath.Join(root, "proj-a", "s1.jsonl"), originalTime, originalTime); err != nil {
+		t.Fatal(err)
+	}
 
 	sessions, got := collect(t, ScanClaude, root)
 	if sessions != 2 {
@@ -96,6 +107,45 @@ func TestBoundedScanReportsPartial(t *testing.T) {
 	}
 	if len(result.Stats.Warnings) == 0 || strings.Contains(strings.Join(result.Stats.Warnings, " "), root) {
 		t.Fatalf("unsafe or missing scan warning: %+v", result.Stats)
+	}
+}
+
+func TestBoundedScanDropsOldestFilesFirst(t *testing.T) {
+	root := t.TempDir()
+	line := func(id, ts string) string {
+		return fmt.Sprintf(`{"type":"assistant","requestId":"r-%s","timestamp":%q,"message":{"id":"m-%s","model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`+"\n", id, ts, id)
+	}
+	// Named so a lexical walk would visit the old file first; only mod time
+	// may decide what a truncated scan keeps.
+	writeLog(t, root, "a-old.jsonl", line("old", "2026-07-02T10:00:00Z"))
+	writeLog(t, root, "z-new.jsonl", line("new", "2026-07-06T10:00:00Z"))
+	oldTime := time.Date(2026, 7, 2, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(root, "a-old.jsonl"), oldTime, oldTime); err != nil {
+		t.Fatal(err)
+	}
+	newTime := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	if err := os.Chtimes(filepath.Join(root, "z-new.jsonl"), newTime, newTime); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, "z-new.jsonl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	// A byte budget that fits exactly one file must spend it on the newest
+	// one: a partial spend report may understate history, never today.
+	var events []Event
+	result, err := scanClaude(root, since, ScanLimits{MaxFiles: 100, MaxBytes: info.Size(), MaxLineBytes: 1 << 20, MaxRecords: 100}, func(event Event) {
+		events = append(events, event)
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !result.Stats.Partial || len(events) != 1 {
+		t.Fatalf("bounded result = %+v events=%d", result, len(events))
+	}
+	want := time.Date(2026, 7, 6, 10, 0, 0, 0, time.UTC)
+	if !events[0].Time.Equal(want) {
+		t.Fatalf("scan kept %v, want the newest file's event at %v", events[0].Time, want)
 	}
 }
 
