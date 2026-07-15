@@ -191,6 +191,24 @@ remove_desktop_path() {
   esac
 }
 
+# launchd keys services by label and every Burnban install under this user
+# shares dev.burnban.meter, so booting out by plist path would remove
+# whichever install's meter currently holds the label. Boot the service out
+# only when it runs the binary named in this plist; otherwise a sandboxed or
+# secondary uninstall kills another install's live meter.
+launchctl_bootout_owned() {
+  path=$1
+  [ -x /bin/launchctl ] || return 0
+  service_info=$(/bin/launchctl print "gui/$(id -u)/dev.burnban.meter" 2>/dev/null) || return 0
+  plist_binary=$(sed -n 's/.*<string>\(\/[^<]*\)<\/string>.*/\1/p' "$path" 2>/dev/null | head -n 1)
+  [ -n "$plist_binary" ] || return 0
+  case "$service_info" in
+    *"$plist_binary"*)
+      /bin/launchctl bootout "gui/$(id -u)" "$path" >/dev/null 2>&1 || true
+      ;;
+  esac
+}
+
 remove_startup_path() {
   kind=$1
   path=$2
@@ -199,9 +217,7 @@ remove_startup_path() {
   case "$kind" in
     mac-agent)
       if is_managed_macos_startup "$path"; then
-        if [ -x /bin/launchctl ]; then
-          /bin/launchctl bootout "gui/$(id -u)" "$path" >/dev/null 2>&1 || true
-        fi
+        launchctl_bootout_owned "$path"
         rm -f "$path"
       elif [ -e "$path" ]; then
         echo "burnban: leaving unmarked login-start agent: $path" >&2
@@ -222,7 +238,7 @@ deactivate_startup_path() {
   path=$2
   [ -n "$path" ] || return 0
   if [ "$kind" = mac-agent ] && is_managed_macos_startup "$path" && [ -x /bin/launchctl ]; then
-    /bin/launchctl bootout "gui/$(id -u)" "$path" >/dev/null 2>&1 || true
+    launchctl_bootout_owned "$path"
   fi
 }
 
@@ -736,7 +752,7 @@ start_meter_now() {
   started_by_supervisor=0
   if [ "$STARTUP_KIND" = mac-agent ] && is_managed_macos_startup "$STARTUP_PATH" &&
      [ -x /bin/launchctl ]; then
-    /bin/launchctl bootout "gui/$(id -u)" "$STARTUP_PATH" >/dev/null 2>&1 || true
+    launchctl_bootout_owned "$STARTUP_PATH"
     if /bin/launchctl bootstrap "gui/$(id -u)" "$STARTUP_PATH" >/dev/null 2>&1; then
       started_by_supervisor=1
     fi
