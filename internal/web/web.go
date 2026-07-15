@@ -20,9 +20,9 @@ import (
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/localusage"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/store"
-	"github.com/burnban/burnban/internal/subsidy"
 	"github.com/burnban/burnban/sourceadapter"
 )
 
@@ -48,7 +48,7 @@ type Config struct {
 	DisableLocalUsage bool
 	// LocalUsageScanLimits optionally overrides the bounded scanner envelope
 	// used by the localhost dashboard. Zero values retain the safe defaults.
-	LocalUsageScanLimits subsidy.ScanLimits
+	LocalUsageScanLimits localusage.ScanLimits
 	Health               func() HealthStatus
 }
 
@@ -134,7 +134,7 @@ func RegisterWithConfig(mux *http.ServeMux, s *store.Store, cfg Config) {
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(out)
 	})
-	mux.HandleFunc("GET /api/subsidy", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /api/local-usage", func(w http.ResponseWriter, r *http.Request) {
 		secureHeaders(w)
 		if cfg.DisableLocalUsage {
 			http.Error(w, "burnban: host-local usage scanning is disabled on a team/network gateway", http.StatusForbidden)
@@ -316,7 +316,7 @@ func sameAuthority(a, b, scheme string) bool {
 type subscriptionResponse struct {
 	Window string `json:"window"`
 	Label  string `json:"label"`
-	subsidy.Report
+	localusage.Report
 }
 
 type cachedSubscription struct {
@@ -328,12 +328,12 @@ type cachedSubscription struct {
 type subscriptionFeed struct {
 	mu      sync.Mutex
 	prices  *pricing.Table
-	limits  subsidy.ScanLimits
+	limits  localusage.ScanLimits
 	entries map[string]cachedSubscription
 	ttl     time.Duration
 }
 
-func newSubscriptionFeed(prices *pricing.Table, limits subsidy.ScanLimits) *subscriptionFeed {
+func newSubscriptionFeed(prices *pricing.Table, limits localusage.ScanLimits) *subscriptionFeed {
 	return &subscriptionFeed{prices: prices, limits: limits, entries: map[string]cachedSubscription{}, ttl: time.Minute}
 }
 
@@ -360,9 +360,9 @@ func (f *subscriptionFeed) get(window string, now time.Time) (*subscriptionRespo
 		return cached.value, nil
 	}
 	home, _ := os.UserHomeDir()
-	report, err := subsidy.BuildReport(f.prices, subsidy.ReportOptions{
+	report, err := localusage.BuildReport(f.prices, localusage.ReportOptions{
 		Since: since, Until: now,
-		MeteredProviders: subsidy.DetectMeteredProviders(home),
+		MeteredProviders: localusage.DetectMeteredProviders(home),
 		ScanLimits:       f.limits,
 	})
 	if err != nil {
@@ -391,34 +391,34 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 	default:
 		return nil, fmt.Errorf("bad window %q: use today, 7d, or 30d", window)
 	}
-	claude := subsidy.ModelUsage{Model: "claude-sonnet-5", Priced: true, PricingSource: "table", Totals: subsidy.Totals{
+	claude := localusage.ModelUsage{Model: "claude-sonnet-5", Priced: true, PricingSource: "table", Totals: localusage.Totals{
 		Calls: 47 * multiplier, In: 38200 * multiplier, Out: 12400 * multiplier,
 		CacheRead: 680000 * multiplier, CacheWrite: 42000 * multiplier,
 		CacheWrite5m: 42000 * multiplier, APIUSD: 1.284 * float64(multiplier),
 	}}
-	codex := subsidy.ModelUsage{Model: "gpt-5.6-luna", Priced: true, PricingSource: "table", Totals: subsidy.Totals{
+	codex := localusage.ModelUsage{Model: "gpt-5.6-luna", Priced: true, PricingSource: "table", Totals: localusage.Totals{
 		Calls: 31 * multiplier, In: 26400 * multiplier, Out: 8900 * multiplier,
 		CacheRead: 240000 * multiplier, APIUSD: 0.736 * float64(multiplier),
 	}}
 	adapterVersion := sourceadapter.APIVersion
 	privacy := sourceadapter.Privacy{ReadOnly: true}
-	providers := []subsidy.ProviderUsage{
-		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []subsidy.ModelUsage{claude}, Days: []subsidy.DayUsage{}, Totals: claude.Totals},
-		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []subsidy.ModelUsage{codex}, Days: []subsidy.DayUsage{}, Totals: codex.Totals},
-		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "github-copilot-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "cursor", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "opencode", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "hermes", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "openclaw", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
-		{Provider: "goose", AdapterVersion: adapterVersion, Privacy: privacy, Models: []subsidy.ModelUsage{}, Days: []subsidy.DayUsage{}},
+	providers := []localusage.ProviderUsage{
+		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []localusage.ModelUsage{claude}, Days: []localusage.DayUsage{}, Totals: claude.Totals},
+		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []localusage.ModelUsage{codex}, Days: []localusage.DayUsage{}, Totals: codex.Totals},
+		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "github-copilot-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "cursor", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "opencode", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "hermes", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "openclaw", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
+		{Provider: "goose", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
 	}
-	totals := subsidy.Totals{
+	totals := localusage.Totals{
 		Calls: claude.Calls + codex.Calls, In: claude.In + codex.In, Out: claude.Out + codex.Out,
 		CacheRead: claude.CacheRead + codex.CacheRead, CacheWrite: claude.CacheWrite + codex.CacheWrite,
 		CacheWrite5m: claude.CacheWrite5m + codex.CacheWrite5m, APIUSD: claude.APIUSD + codex.APIUSD,
 	}
-	return &subscriptionResponse{Window: window, Label: label, Report: subsidy.Report{
+	return &subscriptionResponse{Window: window, Label: label, Report: localusage.Report{
 		Since: since, Until: now, HasUsage: true, UnpricedModels: []string{}, Providers: providers, Totals: totals,
 	}}, nil
 }

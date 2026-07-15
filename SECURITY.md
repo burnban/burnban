@@ -40,7 +40,7 @@ The MIT meter is one local binary with an embedded dashboard and a loopback-only
 listener by default. It has no account, telemetry, license check, update beacon,
 or network path to a Burnban-operated service. Provider keys are forwarded only
 to the upstream selected by the operator and are never persisted; request and
-response bodies are not stored. Local-agent subsidy scans read supported usage
+response bodies are not stored. Local-agent usage scans read supported usage
 logs in place and never upload or modify them.
 
 Source adapters are compiled in, validated as read-only/offline, and emit

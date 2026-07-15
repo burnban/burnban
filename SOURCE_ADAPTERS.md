@@ -90,7 +90,7 @@ func (Adapter) Scan(
 
 The v1 registry is compile-time: Burnban does not download or execute adapter
 binaries. A first-party or community adapter is reviewed in this repository and
-added to `internal/subsidy/BuiltinAdapters`. This keeps one native binary and
+added to `internal/localusage/BuiltinAdapters`. This keeps one native binary and
 avoids turning log discovery into a plugin-execution surface.
 
 ## Compatibility fixtures
@@ -109,7 +109,7 @@ Each adapter contribution must include synthetic fixtures that cover:
 Never commit a real source log. Run:
 
 ```sh
-go test ./sourceadapter ./internal/subsidy
+go test ./sourceadapter ./internal/localusage
 ```
 
 The built-in manifests and Gemini CLI, GitHub Copilot CLI, Cursor, and OpenCode
@@ -160,7 +160,7 @@ earlier copy.
 Gemini CLI's session record does not identify whether API-key or Vertex traffic
 was on a free or paid tier. Its adapter deliberately leaves `BillingProvider`
 empty; a user who knows the window was billed can opt in with
-`burnban subsidy --metered gemini-cli`.
+`burnban usage --metered gemini-cli`.
 
 ## GitHub Copilot CLI compatibility
 
@@ -245,7 +245,7 @@ OpenCode support was checked on 2026-07-12 against upstream commit
 Released builds select `opencode.db` in the `opencode` XDG data directory
 (`~/.local/share/opencode/opencode.db` without an XDG override); Burnban honors
 OpenCode's absolute or XDG-relative `OPENCODE_DB` override and also exposes
-`burnban subsidy --opencode-db`.
+`burnban usage --opencode-db`.
 
 The adapter opens the database read-only and supports both upstream message
 projections. Its SQLite query extracts only role, provider/model, timestamp,
@@ -257,4 +257,4 @@ cost estimate only as a fallback for models missing from Burnban's dated table.
 The stored provider and estimated cost do not prove whether a call used a
 subscription/OAuth allowance, a free tier, or a billed API key. The adapter
 therefore leaves `BillingProvider` empty. Users who can classify the selected
-window may opt in with `burnban subsidy --metered opencode`.
+window may opt in with `burnban usage --metered opencode`.

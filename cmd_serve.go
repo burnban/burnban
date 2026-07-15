@@ -22,10 +22,10 @@ import (
 	"time"
 
 	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/localusage"
 	"github.com/burnban/burnban/internal/pricing"
 	"github.com/burnban/burnban/internal/proxy"
 	"github.com/burnban/burnban/internal/store"
-	"github.com/burnban/burnban/internal/subsidy"
 	"github.com/burnban/burnban/internal/telemetry"
 	"github.com/burnban/burnban/internal/web"
 )
@@ -370,7 +370,7 @@ func cmdServeWithOptions(args []string, launchDashboard, demoMode bool) error {
 		Exposure:          map[bool]string{true: "team/network", false: "localhost"}[exposed],
 		AuthRequired:      token != "",
 		DisableLocalUsage: exposed,
-		LocalUsageScanLimits: subsidy.ScanLimits{
+		LocalUsageScanLimits: localusage.ScanLimits{
 			MaxBytes:    *localUsageMaxScanMB << 20,
 			MaxDuration: *localUsageScanTimeout,
 		},
