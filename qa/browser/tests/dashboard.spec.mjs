@@ -243,6 +243,29 @@ test("keyboard focus reaches controls and activates a usage window", async ({ pa
   expect(focusState.outline).not.toBe("none");
 });
 
+test("gauge view toggles the hero meter and survives a reload", async ({ page }) => {
+  await waitForLiveDashboard(page);
+  await expect(page.locator("#total")).toBeVisible();
+  await expect(page.locator("#gaugeWrap")).toBeHidden();
+
+  const gaugeButton = page.getByRole("button", { name: "gauge" });
+  await gaugeButton.click();
+  await expect(gaugeButton).toHaveAttribute("aria-pressed", "true");
+  await expect(page.locator("#gaugeWrap")).toBeVisible();
+  await expect(page.locator("#total")).toBeHidden();
+  await expect(page.locator("#gaugeText")).toContainText("$");
+
+  await page.reload();
+  await expect(page.locator("#statusText")).toHaveText("LIVE");
+  await expect(page.locator("#gaugeWrap")).toBeVisible();
+  await expect(page.locator("#total")).toBeHidden();
+
+  const digitsButton = page.getByRole("button", { name: "digits" });
+  await digitsButton.click();
+  await expect(page.locator("#total")).toBeVisible();
+  await expect(page.locator("#gaugeWrap")).toBeHidden();
+});
+
 test("has no serious or critical axe violations", async ({ page }) => {
   const summary = [];
   for (const viewport of viewports) {
