@@ -5,6 +5,8 @@ umask 077
 
 REPO="burnban/burnban"
 CREATE_DESKTOP="${BURNBAN_CREATE_DESKTOP:-1}"
+CREATE_AUTOSTART="${BURNBAN_CREATE_AUTOSTART:-1}"
+LAUNCH_AFTER_INSTALL="${BURNBAN_LAUNCH_AFTER_INSTALL:-1}"
 UPDATE_PATH="${BURNBAN_UPDATE_PATH:-1}"
 UNINSTALL=0
 PURGE=0
@@ -18,16 +20,20 @@ PATH_END="# <<< burnban installer managed PATH <<<"
 
 usage() {
   cat <<'EOF'
-usage: install.sh [--no-desktop] [--no-path] [--bin-dir DIR]
+usage: install.sh [--no-desktop] [--no-autostart] [--no-launch]
+                  [--no-path] [--bin-dir DIR]
                   [--uninstall [--purge]]
 
-Installs the Burnban CLI plus a one-click desktop launcher. Uninstall removes
-only files recorded in Burnban's install manifest. User data is retained unless
---purge is explicitly supplied.
+Installs the Burnban CLI, a one-click desktop launcher, and a per-user login
+start entry. A successful interactive install starts the meter immediately.
+Uninstall removes only files recorded in Burnban's install manifest. User data
+is retained unless --purge is explicitly supplied.
 
 Environment:
   BIN_DIR                       binary destination override
   BURNBAN_CREATE_DESKTOP=0      skip desktop/application launchers
+  BURNBAN_CREATE_AUTOSTART=0    skip the per-user login start entry
+  BURNBAN_LAUNCH_AFTER_INSTALL=0 do not start the meter after guided setup
   BURNBAN_UPDATE_PATH=0         do not update the shell PATH
   BURNBAN_DOWNLOAD_BASE_URL=... release download override (testing/mirrors)
   BURNBAN_INSTALL_STATE_DIR=... install-manifest directory override
@@ -37,6 +43,8 @@ EOF
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --no-desktop) CREATE_DESKTOP=0 ;;
+    --no-autostart) CREATE_AUTOSTART=0 ;;
+    --no-launch) LAUNCH_AFTER_INSTALL=0 ;;
     --no-path) UPDATE_PATH=0 ;;
     --bin-dir)
       shift
@@ -111,6 +119,22 @@ is_legacy_linux_entry() {
     grep -E '^Exec="?[^[:space:]"]*/burnban"?[[:space:]]+desktop([[:space:]]|$)' "$1" >/dev/null 2>&1
 }
 
+is_managed_macos_startup() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    grep -Fq '<!-- burnban-installer-v1 -->' "$1" 2>/dev/null &&
+    grep -Fq '<string>dev.burnban.meter</string>' "$1" 2>/dev/null
+}
+
+is_managed_linux_startup() {
+  [ -f "$1" ] && [ ! -L "$1" ] &&
+    grep -Fqx 'X-Burnban-Managed=true' "$1" 2>/dev/null &&
+    grep -Fqx 'X-Burnban-Autostart=true' "$1" 2>/dev/null
+}
+
+xml_escape() {
+  printf '%s' "$1" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g'
+}
+
 remove_profile_block() {
   profile=$1
   [ -f "$profile" ] || return 0
@@ -167,6 +191,47 @@ remove_desktop_path() {
   esac
 }
 
+remove_startup_path() {
+  kind=$1
+  path=$2
+  [ -n "$path" ] || return 0
+  reject_newline "$path"
+  case "$kind" in
+    mac-agent)
+      if is_managed_macos_startup "$path"; then
+        if [ -x /bin/launchctl ]; then
+          /bin/launchctl bootout "gui/$(id -u)" "$path" >/dev/null 2>&1 || true
+        fi
+        rm -f "$path"
+      elif [ -e "$path" ]; then
+        echo "burnban: leaving unmarked login-start agent: $path" >&2
+      fi
+      ;;
+    linux-autostart)
+      if is_managed_linux_startup "$path"; then
+        rm -f "$path"
+      elif [ -e "$path" ]; then
+        echo "burnban: leaving unmarked login-start entry: $path" >&2
+      fi
+      ;;
+  esac
+}
+
+deactivate_startup_path() {
+  kind=$1
+  path=$2
+  [ -n "$path" ] || return 0
+  if [ "$kind" = mac-agent ] && is_managed_macos_startup "$path" && [ -x /bin/launchctl ]; then
+    /bin/launchctl bootout "gui/$(id -u)" "$path" >/dev/null 2>&1 || true
+  fi
+}
+
+stop_default_meter() {
+  binary=$1
+  [ -x "$binary" ] || return 0
+  "$binary" stop >/dev/null 2>&1 || true
+}
+
 require_meter_stopped_for_purge() {
   if command -v pgrep >/dev/null 2>&1; then
     if pgrep -f '[b]urnban (serve|desktop|demo)( |$)' >/dev/null 2>&1; then
@@ -215,9 +280,6 @@ purge_data() {
 }
 
 uninstall() {
-  if [ "$PURGE" -eq 1 ]; then
-    require_meter_stopped_for_purge || return 1
-  fi
   incomplete=0
   recorded_binary=$(manifest_get binary)
   recorded_profile=$(manifest_get profile)
@@ -226,6 +288,8 @@ uninstall() {
   desktop_path_1=$(manifest_get desktop_path_1)
   desktop_kind_2=$(manifest_get desktop_kind_2)
   desktop_path_2=$(manifest_get desktop_path_2)
+  startup_kind=$(manifest_get startup_kind)
+  startup_path=$(manifest_get startup_path)
 
   if [ -n "$recorded_binary" ]; then
     if [ "$BIN_DIR_EXPLICIT" -eq 1 ] && [ "$recorded_binary" != "$BIN_PATH" ]; then
@@ -239,11 +303,41 @@ uninstall() {
   fi
   reject_newline "$target"
 
+  target_is_burnban=0
   if [ -e "$target" ]; then
     if ! is_burnban_binary "$target"; then
       echo "burnban: refusing to remove a file that is not a Burnban binary: $target" >&2
       incomplete=1
-    elif rm -f "$target" 2>/dev/null; then
+    else
+      target_is_burnban=1
+    fi
+  fi
+
+  deactivate_startup_path "$startup_kind" "$startup_path"
+  if [ ! -f "$MANIFEST" ]; then
+    if [ "$OS" = darwin ]; then
+      legacy_startup_kind=mac-agent
+      legacy_startup_path="$HOME/Library/LaunchAgents/dev.burnban.meter.plist"
+    else
+      legacy_startup_kind=linux-autostart
+      legacy_startup_path="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/burnban-meter.desktop"
+    fi
+    deactivate_startup_path "$legacy_startup_kind" "$legacy_startup_path"
+  fi
+  if [ "$target_is_burnban" -eq 1 ]; then
+    stop_default_meter "$target"
+  fi
+  if [ "$PURGE" -eq 1 ]; then
+    require_meter_stopped_for_purge || return 1
+  fi
+
+  remove_startup_path "$startup_kind" "$startup_path"
+  if [ ! -f "$MANIFEST" ]; then
+    remove_startup_path "$legacy_startup_kind" "$legacy_startup_path"
+  fi
+
+  if [ "$target_is_burnban" -eq 1 ]; then
+    if rm -f "$target" 2>/dev/null; then
       :
     elif command -v sudo >/dev/null 2>&1; then
       sudo rm -f "$target"
@@ -412,18 +506,21 @@ if ! is_burnban_binary "$BIN_PATH"; then
 fi
 
 # Preserve ownership metadata across upgrades. Otherwise a reinstall with
-# --no-path or --no-desktop could orphan the PATH block or launchers created by
-# an earlier installer run.
+# --no-path, --no-desktop, or --no-autostart could orphan integrations created
+# by an earlier installer run.
 PROFILE_PATH=$(manifest_get profile)
 PATH_ADDED=$(manifest_get path_added)
 DESKTOP_KIND_1=$(manifest_get desktop_kind_1)
 DESKTOP_PATH_1=$(manifest_get desktop_path_1)
 DESKTOP_KIND_2=$(manifest_get desktop_kind_2)
 DESKTOP_PATH_2=$(manifest_get desktop_path_2)
+STARTUP_KIND=$(manifest_get startup_kind)
+STARTUP_PATH=$(manifest_get startup_path)
 case "$PATH_ADDED" in 1) ;; *) PATH_ADDED=0 ;; esac
 case "$DESKTOP_KIND_1" in mac-app|linux-entry) ;; *) DESKTOP_KIND_1=""; DESKTOP_PATH_1="" ;; esac
 case "$DESKTOP_KIND_2" in mac-link|linux-entry) ;; *) DESKTOP_KIND_2=""; DESKTOP_PATH_2="" ;; esac
-for value in "$PROFILE_PATH" "$DESKTOP_PATH_1" "$DESKTOP_PATH_2"; do reject_newline "$value"; done
+case "$STARTUP_KIND" in mac-agent|linux-autostart) ;; *) STARTUP_KIND=""; STARTUP_PATH="" ;; esac
+for value in "$PROFILE_PATH" "$DESKTOP_PATH_1" "$DESKTOP_PATH_2" "$STARTUP_PATH"; do reject_newline "$value"; done
 
 write_manifest() {
   mkdir -p "$STATE_DIR" "$DATA_DIR"
@@ -439,6 +536,8 @@ write_manifest() {
     printf 'desktop_path_1=%s\n' "$DESKTOP_PATH_1"
     printf 'desktop_kind_2=%s\n' "$DESKTOP_KIND_2"
     printf 'desktop_path_2=%s\n' "$DESKTOP_PATH_2"
+    printf 'startup_kind=%s\n' "$STARTUP_KIND"
+    printf 'startup_path=%s\n' "$STARTUP_PATH"
   } > "$manifest_tmp"
   chmod 600 "$manifest_tmp"
   mv "$manifest_tmp" "$MANIFEST"
@@ -559,10 +658,124 @@ EOF
   echo "   application: $entry"
 }
 
+create_macos_startup() {
+  agent="$HOME/Library/LaunchAgents/dev.burnban.meter.plist"
+  if [ -e "$agent" ] && ! is_managed_macos_startup "$agent"; then
+    echo "burnban: leaving unrecognized login-start agent: $agent" >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$agent")"
+  escaped_bin=$(xml_escape "$BIN_PATH")
+  escaped_log=$(xml_escape "$STATE_DIR/startup.log")
+  cat > "$agent" <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- burnban-installer-v1 -->
+<plist version="1.0"><dict>
+  <key>Label</key><string>dev.burnban.meter</string>
+  <key>ProgramArguments</key><array>
+    <string>$escaped_bin</string>
+    <string>serve</string>
+  </array>
+  <key>RunAtLoad</key><true/>
+  <key>ProcessType</key><string>Background</string>
+  <key>ThrottleInterval</key><integer>10</integer>
+  <key>StandardOutPath</key><string>$escaped_log</string>
+  <key>StandardErrorPath</key><string>$escaped_log</string>
+</dict></plist>
+EOF
+  chmod 600 "$agent"
+  STARTUP_KIND=mac-agent
+  STARTUP_PATH=$agent
+  echo "   starts at login: $agent"
+}
+
+create_linux_startup() {
+  config_home="${XDG_CONFIG_HOME:-$HOME/.config}"
+  entry="$config_home/autostart/burnban-meter.desktop"
+  if [ -e "$entry" ] && ! is_managed_linux_startup "$entry"; then
+    echo "burnban: leaving unrecognized login-start entry: $entry" >&2
+    return 0
+  fi
+  mkdir -p "$(dirname "$entry")"
+  cat > "$entry" <<EOF
+[Desktop Entry]
+Type=Application
+Name=Burnban Meter
+Comment=Keep the local AI spend meter available
+Exec="$BIN_PATH" serve
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true
+X-Burnban-Autostart=true
+X-Burnban-Managed=true
+EOF
+  chmod 600 "$entry"
+  STARTUP_KIND=linux-autostart
+  STARTUP_PATH=$entry
+  echo "   starts at login: $entry"
+}
+
+wait_for_meter() {
+  attempt=0
+  while [ "$attempt" -lt 50 ]; do
+    if "$BIN_PATH" status >/dev/null 2>&1; then
+      return 0
+    fi
+    sleep 0.1
+    attempt=$((attempt + 1))
+  done
+  return 1
+}
+
+start_meter_now() {
+  if "$BIN_PATH" status >/dev/null 2>&1; then
+    return 0
+  fi
+
+  started_by_supervisor=0
+  if [ "$STARTUP_KIND" = mac-agent ] && is_managed_macos_startup "$STARTUP_PATH" &&
+     [ -x /bin/launchctl ]; then
+    /bin/launchctl bootout "gui/$(id -u)" "$STARTUP_PATH" >/dev/null 2>&1 || true
+    if /bin/launchctl bootstrap "gui/$(id -u)" "$STARTUP_PATH" >/dev/null 2>&1; then
+      started_by_supervisor=1
+    fi
+  fi
+
+  if [ "$started_by_supervisor" -eq 0 ]; then
+    mkdir -p "$STATE_DIR"
+    if command -v nohup >/dev/null 2>&1; then
+      nohup "$BIN_PATH" serve >> "$STATE_DIR/startup.log" 2>&1 &
+    else
+      "$BIN_PATH" serve >> "$STATE_DIR/startup.log" 2>&1 &
+    fi
+  fi
+
+  if wait_for_meter; then
+    echo "   meter running: http://localhost:4141"
+    return 0
+  fi
+  echo "burnban: the meter did not become healthy; inspect $STATE_DIR/startup.log" >&2
+  return 1
+}
+
+open_configured_interface() {
+  mkdir -p "$STATE_DIR"
+  if command -v nohup >/dev/null 2>&1; then
+    nohup "$BIN_PATH" >> "$STATE_DIR/launch.log" 2>&1 &
+  else
+    "$BIN_PATH" >> "$STATE_DIR/launch.log" 2>&1 &
+  fi
+}
+
 add_user_path
 write_manifest
 if [ "$CREATE_DESKTOP" = 1 ]; then
   if [ "$OS" = darwin ]; then create_macos_app; else create_linux_desktop; fi
+fi
+write_manifest
+if [ "$CREATE_AUTOSTART" = 1 ]; then
+  if [ "$OS" = darwin ]; then create_macos_startup; else create_linux_startup; fi
 fi
 write_manifest
 
@@ -573,7 +786,14 @@ echo
 # as the pipe, so read the terminal from /dev/tty when one is attached; if
 # there is none (CI, no TTY), just point them at the command.
 if [ -r /dev/tty ] && [ -t 1 ]; then
-  if ! "$BIN_PATH" setup --if-needed --no-launch </dev/tty; then
+  if "$BIN_PATH" setup --if-needed --no-launch </dev/tty; then
+    if [ "$LAUNCH_AFTER_INSTALL" = 1 ]; then
+      echo "Starting Burnban..."
+      if start_meter_now; then
+        open_configured_interface
+      fi
+    fi
+  else
     echo "burnban: guided setup paused; finish later with: burnban setup" >&2
   fi
 else

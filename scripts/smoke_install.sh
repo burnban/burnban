@@ -61,6 +61,7 @@ tar -tzf "$RELEASE/$ARCHIVE" | grep -Eq '(^|/)third_party_licenses/.+/LICENSE'
 run_install() {
   HOME="$HOME_DIR" SHELL=/bin/zsh BIN_DIR="$BIN_DIR" \
     BURNBAN_DOWNLOAD_BASE_URL="$RELEASE" BURNBAN_CREATE_DESKTOP=1 \
+    BURNBAN_LAUNCH_AFTER_INSTALL=0 \
     sh "$ROOT/install.sh" "$@"
 }
 
@@ -69,23 +70,31 @@ test -x "$BIN_DIR/burnban"
 "$BIN_DIR/burnban" version | grep -q '^burnban '
 test -f "$HOME_DIR/.burnban/install-manifest"
 test -f "$HOME_DIR/.burnban/.burnban-installer-data"
+grep -Eq '^startup_kind=(mac-agent|linux-autostart)$' "$HOME_DIR/.burnban/install-manifest"
 grep -Fq '# >>> burnban installer managed PATH >>>' "$HOME_DIR/.zprofile"
 case "$OS" in
   darwin)
     test -x "$HOME_DIR/Applications/Burnban.app/Contents/MacOS/burnban-launcher"
     test -f "$HOME_DIR/Applications/Burnban.app/Contents/Resources/burnban-managed"
     test -L "$HOME_DIR/Desktop/Burnban.app"
+    test -f "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist"
+    grep -Fq '<!-- burnban-installer-v1 -->' "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist"
+    grep -Fq "$BIN_DIR/burnban" "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist"
+    plutil -lint "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist" >/dev/null
     ;;
   linux)
     test -x "$HOME_DIR/.local/share/applications/burnban.desktop"
     test -x "$HOME_DIR/Desktop/Burnban.desktop"
     grep -Fq 'X-Burnban-Managed=true' "$HOME_DIR/.local/share/applications/burnban.desktop"
+    test -f "$HOME_DIR/.config/autostart/burnban-meter.desktop"
+    grep -Fq 'X-Burnban-Autostart=true' "$HOME_DIR/.config/autostart/burnban-meter.desktop"
+    grep -Fq "Exec=\"$BIN_DIR/burnban\" serve" "$HOME_DIR/.config/autostart/burnban-meter.desktop"
     ;;
 esac
 
 # Reinstalling with optional integrations disabled must retain ownership of the
 # PATH and launchers from the previous run so the next uninstall can clean up.
-run_install --no-desktop --no-path
+run_install --no-desktop --no-autostart --no-path
 test "$(grep -Fc '# >>> burnban installer managed PATH >>>' "$HOME_DIR/.zprofile")" -eq 1
 grep -Fq 'path_added=1' "$HOME_DIR/.burnban/install-manifest"
 for staged_binary in "$BIN_DIR"/.burnban.install.*; do
@@ -95,8 +104,14 @@ for staged_binary in "$BIN_DIR"/.burnban.install.*; do
   }
 done
 case "$OS" in
-  darwin) test -x "$HOME_DIR/Applications/Burnban.app/Contents/MacOS/burnban-launcher" ;;
-  linux) test -x "$HOME_DIR/.local/share/applications/burnban.desktop" ;;
+  darwin)
+    test -x "$HOME_DIR/Applications/Burnban.app/Contents/MacOS/burnban-launcher"
+    test -f "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist"
+    ;;
+  linux)
+    test -x "$HOME_DIR/.local/share/applications/burnban.desktop"
+    test -f "$HOME_DIR/.config/autostart/burnban-meter.desktop"
+    ;;
 esac
 
 # A checksum-valid but invalid replacement must fail while preserving the
@@ -174,8 +189,16 @@ if grep -Fq '# >>> burnban installer managed PATH >>>' "$HOME_DIR/.zprofile"; th
   exit 1
 fi
 case "$OS" in
-  darwin) test ! -e "$HOME_DIR/Applications/Burnban.app"; test ! -L "$HOME_DIR/Desktop/Burnban.app" ;;
-  linux) test ! -e "$HOME_DIR/.local/share/applications/burnban.desktop"; test ! -e "$HOME_DIR/Desktop/Burnban.desktop" ;;
+  darwin)
+    test ! -e "$HOME_DIR/Applications/Burnban.app"
+    test ! -L "$HOME_DIR/Desktop/Burnban.app"
+    test ! -e "$HOME_DIR/Library/LaunchAgents/dev.burnban.meter.plist"
+    ;;
+  linux)
+    test ! -e "$HOME_DIR/.local/share/applications/burnban.desktop"
+    test ! -e "$HOME_DIR/Desktop/Burnban.desktop"
+    test ! -e "$HOME_DIR/.config/autostart/burnban-meter.desktop"
+    ;;
 esac
 
 run_install --no-desktop

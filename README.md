@@ -14,6 +14,15 @@ Install on macOS or Linux:
 curl -fsSL https://burnban.sh/install | sh
 ```
 
+The interactive installer runs guided setup, starts the local meter, opens the
+interface you choose, and installs a per-user login-start entry so the dashboard
+remains available after a restart. Use `--no-autostart` to skip login start or
+`--no-launch` to install without starting it immediately:
+
+```sh
+curl -fsSL https://burnban.sh/install | sh -s -- --no-autostart --no-launch
+```
+
 Then get your number:
 
 ```sh
@@ -27,6 +36,9 @@ Windows PowerShell:
 ```powershell
 irm https://raw.githubusercontent.com/burnban/burnban/main/install.ps1 | iex
 ```
+
+When saving the PowerShell installer for a customized install, pass
+`-NoAutostart` and/or `-NoLaunch` for the equivalent Windows opt-outs.
 
 Release installers verify the archive against published SHA-256 checksums. For a reviewable install, download the script first, inspect it, then run it. Releases also publish SPDX SBOMs, third-party notices, and GitHub provenance attestations.
 
@@ -74,7 +86,7 @@ burnban top
 open http://localhost:4141
 ```
 
-Or launch **Burnban** from the desktop/application menu (`burnban desktop`). The installer adds the launcher without Electron, an account, or a cloud service. The dashboard keeps subscription-log usage separate from proxy-billed traffic, so a `$0` proxy ledger never hides the work your plans performed.
+Or launch **Burnban** from the desktop/application menu (`burnban desktop`). The installer adds the launcher and starts the same local meter at login without Electron, an account, or a cloud service. The dashboard keeps subscription-log usage separate from proxy-billed traffic, so a `$0` proxy ledger never hides the work your plans performed.
 
 Set hard local guardrails:
 
@@ -441,8 +453,9 @@ boundary: another process or user account on the same shared host may be able to
 read dashboard/metrics data or send provider requests through the listener. Set
 `BURNBAN_TOKEN` even on loopback when the machine is shared or untrusted.
 
-The installer records only files it owns. Normal uninstall removes the binary,
-managed launcher/shortcuts, and managed PATH block while retaining
+The installer records only files it owns. Normal uninstall stops the default
+meter and removes the binary, managed login-start entry, launcher/shortcuts,
+and managed PATH block while retaining
 `~/.burnban`; purge is a separate explicit action and refuses to run while the
 meter is active:
 

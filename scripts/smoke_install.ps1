@@ -16,6 +16,7 @@ $Temp = Join-Path ([IO.Path]::GetTempPath()) ("burnban-smoke-" + [Guid]::NewGuid
 $Install = Join-Path $Temp "install"
 $Desktop = Join-Path $Temp "desktop"
 $StartMenu = Join-Path $Temp "start-menu"
+$Startup = Join-Path $Temp "startup"
 $LocalAppData = Join-Path $Temp "local-app-data"
 $DataDir = Join-Path (Join-Path $Temp "home") ".burnban"
 $OriginalUserPath = [Environment]::GetEnvironmentVariable("Path", "User")
@@ -25,7 +26,7 @@ $OriginalPurgeDir = $env:BURNBAN_PURGE_DIR
 $OriginalReleaseDir = $env:BURNBAN_RELEASE_DIR
 $ServeProcess = $null
 
-New-Item -ItemType Directory -Path $Install, $Desktop, $StartMenu, $LocalAppData, $DataDir -Force | Out-Null
+New-Item -ItemType Directory -Path $Install, $Desktop, $StartMenu, $Startup, $LocalAppData, $DataDir -Force | Out-Null
 "keep" | Set-Content (Join-Path $Install "unrelated.keep") -Encoding ascii
 
 $InstallerSource = Get-Content (Join-Path $Root "install.ps1") -Raw
@@ -62,20 +63,22 @@ try {
     $env:BURNBAN_PURGE_DIR = $DataDir
     $env:BURNBAN_DOWNLOAD_BASE_URL = $Release
 
-    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu
+    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -NoLaunch
     $Binary = Join-Path $Install "burnban.exe"
     if (-not (Test-Path $Binary)) { throw "Binary was not installed" }
     if (-not (Test-Path (Join-Path $Desktop "Burnban.lnk"))) { throw "Desktop shortcut was not created" }
     if (-not (Test-Path (Join-Path $StartMenu "Burnban.lnk"))) { throw "Start Menu shortcut was not created" }
+    if (-not (Test-Path (Join-Path $Startup "Burnban Meter.lnk"))) { throw "Login-start shortcut was not created" }
     if (-not (Test-Path (Join-Path $env:BURNBAN_INSTALL_STATE_DIR "install-manifest.json"))) { throw "Install manifest was not created" }
     if (-not (Test-Path (Join-Path $DataDir ".burnban-installer-data"))) { throw "Data marker was not created" }
     if ((& $Binary version) -notmatch '^burnban ') { throw "Installed binary did not run" }
 
     # An upgrade with integrations disabled must not orphan integrations from
     # the preceding install; the manifest must continue to own them.
-    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -NoDesktop -NoPath
+    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -NoDesktop -NoAutostart -NoPath -NoLaunch
     if (-not (Test-Path (Join-Path $Desktop "Burnban.lnk"))) { throw "Reinstall orphaned the Desktop shortcut" }
     if (-not (Test-Path (Join-Path $StartMenu "Burnban.lnk"))) { throw "Reinstall orphaned the Start Menu shortcut" }
+    if (-not (Test-Path (Join-Path $Startup "Burnban Meter.lnk"))) { throw "Reinstall orphaned the login-start shortcut" }
     $ManagedPathEntries = @([Environment]::GetEnvironmentVariable("Path", "User") -split ';' | Where-Object {
         [StringComparer]::OrdinalIgnoreCase.Equals($_.TrimEnd('\'), $Install.TrimEnd('\'))
     })
@@ -98,7 +101,7 @@ try {
     $env:BURNBAN_DOWNLOAD_BASE_URL = $InvalidUpgrade
     $InvalidUpgradeRefused = $false
     try {
-        & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -NoDesktop -NoPath
+        & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -NoDesktop -NoAutostart -NoPath -NoLaunch
     } catch {
         if ($_.Exception.Message -notmatch 'existing install was retained') { throw }
         $InvalidUpgradeRefused = $true
@@ -144,7 +147,7 @@ try {
     }
     $RunningPurgeRefused = $false
     try {
-        & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -Uninstall -Purge
+        & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -Uninstall -Purge
     } catch {
         if ($_.Exception.Message -notmatch 'Stop the running Burnban meter') { throw }
         $RunningPurgeRefused = $true
@@ -161,14 +164,15 @@ try {
     if (-not (Test-Path $RuntimeSentinel)) { throw "Lifecycle commands removed an unrelated sentinel" }
 
     "ledger" | Set-Content (Join-Path $DataDir "unrelated-data.keep") -Encoding ascii
-    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -Uninstall
+    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -Uninstall
     if (Test-Path $Binary) { throw "Uninstall left the binary" }
     if (-not (Test-Path (Join-Path $Install "unrelated.keep"))) { throw "Uninstall removed an unrelated sentinel" }
     if (-not (Test-Path (Join-Path $DataDir "unrelated-data.keep"))) { throw "Normal uninstall removed user data" }
     if (([Environment]::GetEnvironmentVariable("Path", "User") -split ';') -contains $Install) { throw "Uninstall left the managed PATH entry" }
+    if (Test-Path (Join-Path $Startup "Burnban Meter.lnk")) { throw "Uninstall left the login-start shortcut" }
 
-    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -NoDesktop
-    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -Uninstall -Purge
+    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -NoDesktop -NoLaunch
+    & (Join-Path $Root "install.ps1") -InstallDir $Install -DesktopDir $Desktop -StartMenuDir $StartMenu -StartupDir $Startup -Uninstall -Purge
     if (Test-Path $DataDir) { throw "Purge left the Burnban data directory" }
     if (-not (Test-Path (Join-Path $Install "unrelated.keep"))) { throw "Purge removed an unrelated install sentinel" }
 
@@ -181,7 +185,7 @@ try {
     $env:BURNBAN_DOWNLOAD_BASE_URL = $Corrupt
     $Failed = $false
     try {
-        & (Join-Path $Root "install.ps1") -InstallDir $CorruptInstall -NoDesktop -NoPath
+        & (Join-Path $Root "install.ps1") -InstallDir $CorruptInstall -NoDesktop -NoAutostart -NoPath -NoLaunch
     } catch {
         $Failed = $true
     }

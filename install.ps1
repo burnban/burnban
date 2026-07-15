@@ -2,7 +2,10 @@ param(
     [string]$InstallDir = $env:BURNBAN_INSTALL_DIR,
     [string]$DesktopDir = "",
     [string]$StartMenuDir = "",
+    [string]$StartupDir = "",
     [switch]$NoDesktop,
+    [switch]$NoAutostart,
+    [switch]$NoLaunch,
     [switch]$NoPath,
     [switch]$Uninstall,
     [switch]$Purge
@@ -13,6 +16,9 @@ $Repo = "burnban/burnban"
 $Temp = $null
 $StagedBinary = $null
 $BackupBinary = $null
+
+if ($env:BURNBAN_CREATE_AUTOSTART -eq "0") { $NoAutostart = $true }
+if ($env:BURNBAN_LAUNCH_AFTER_INSTALL -eq "0") { $NoLaunch = $true }
 
 if ($Purge -and -not $Uninstall) {
     throw "-Purge is only valid with -Uninstall"
@@ -25,6 +31,9 @@ if ([string]::IsNullOrWhiteSpace($DesktopDir)) {
 }
 if ([string]::IsNullOrWhiteSpace($StartMenuDir)) {
     $StartMenuDir = Join-Path ([Environment]::GetFolderPath("ApplicationData")) "Microsoft\Windows\Start Menu\Programs"
+}
+if ([string]::IsNullOrWhiteSpace($StartupDir)) {
+    $StartupDir = Join-Path ([Environment]::GetFolderPath("ApplicationData")) "Microsoft\Windows\Start Menu\Programs\Startup"
 }
 
 $StateDir = $env:BURNBAN_INSTALL_STATE_DIR
@@ -41,6 +50,7 @@ $DataMarker = Join-Path $DataDir ".burnban-installer-data"
 $Binary = Join-Path $InstallDir "burnban.exe"
 $DesktopShortcut = Join-Path $DesktopDir "Burnban.lnk"
 $StartShortcut = Join-Path $StartMenuDir "Burnban.lnk"
+$StartupShortcut = Join-Path $StartupDir "Burnban Meter.lnk"
 
 function Test-BurnbanBinary([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) { return $false }
@@ -134,6 +144,7 @@ function Write-InstallManifest(
     [string]$OwnedInstallDir,
     [string]$OwnedDesktopShortcut,
     [string]$OwnedStartShortcut,
+    [string]$OwnedStartupShortcut,
     [bool]$OwnedPathAdded
 ) {
     New-Item -ItemType Directory -Path $StateDir, $DataDir -Force | Out-Null
@@ -144,20 +155,19 @@ function Write-InstallManifest(
         install_dir = $OwnedInstallDir
         desktop_shortcut = $OwnedDesktopShortcut
         start_shortcut = $OwnedStartShortcut
+        startup_shortcut = $OwnedStartupShortcut
         path_added = $OwnedPathAdded
     }
     $Manifest | ConvertTo-Json | Set-Content -LiteralPath $ManifestPath -Encoding utf8
 }
 
 if ($Uninstall) {
-    if ($Purge -and (Get-Process -Name "burnban" -ErrorAction SilentlyContinue)) {
-        throw "Stop the running Burnban meter before using -Purge"
-    }
     $Manifest = Read-InstallManifest
     $RecordedBinary = $Binary
     $RecordedInstallDir = $InstallDir
     $RecordedDesktop = $DesktopShortcut
     $RecordedStart = $StartShortcut
+    $RecordedStartup = $StartupShortcut
     $PathWasAdded = $false
 
     if ($null -ne $Manifest) {
@@ -165,22 +175,36 @@ if ($Uninstall) {
         $RecordedInstallDir = [string]$Manifest.install_dir
         $RecordedDesktop = [string]$Manifest.desktop_shortcut
         $RecordedStart = [string]$Manifest.start_shortcut
+        $RecordedStartup = [string]$Manifest.startup_shortcut
         $PathWasAdded = [bool]$Manifest.path_added
     } else {
         Write-Warning "No install manifest found; using conservative legacy cleanup."
     }
 
     $Incomplete = $false
+    $ValidBinary = $false
     if (Test-Path -LiteralPath $RecordedBinary) {
         if (Test-BurnbanBinary $RecordedBinary) {
-            try {
-                Remove-Item -LiteralPath $RecordedBinary -Force
-            } catch {
-                Write-Warning "Could not remove ${RecordedBinary}: $($_.Exception.Message)"
-                $Incomplete = $true
-            }
+            $ValidBinary = $true
         } else {
             Write-Warning "Refusing to remove a file that is not a Burnban binary: $RecordedBinary"
+            $Incomplete = $true
+        }
+    }
+
+    if ($ValidBinary) {
+        & $RecordedBinary stop *> $null
+    }
+    if ($Purge -and (Get-Process -Name "burnban" -ErrorAction SilentlyContinue)) {
+        throw "Stop the running Burnban meter before using -Purge"
+    }
+    Remove-ManagedShortcut $RecordedStartup $RecordedBinary
+
+    if ($ValidBinary) {
+        try {
+            Remove-Item -LiteralPath $RecordedBinary -Force
+        } catch {
+            Write-Warning "Could not remove ${RecordedBinary}: $($_.Exception.Message)"
             $Incomplete = $true
         }
     }
@@ -216,6 +240,9 @@ if ($null -ne $ExistingManifest) {
     if (-not [string]::IsNullOrWhiteSpace([string]$ExistingManifest.start_shortcut)) {
         $StartShortcut = [string]$ExistingManifest.start_shortcut
     }
+    if (-not [string]::IsNullOrWhiteSpace([string]$ExistingManifest.startup_shortcut)) {
+        $StartupShortcut = [string]$ExistingManifest.startup_shortcut
+    }
 }
 if ((Test-Path -LiteralPath $Binary) -and -not (Test-BurnbanBinary $Binary)) {
     throw "Refusing to overwrite a non-Burnban file: $Binary"
@@ -228,6 +255,12 @@ if (-not $NoDesktop) {
                 throw "Refusing to overwrite an unrecognized shortcut: $ShortcutPath"
             }
         }
+    }
+}
+if (-not $NoAutostart -and (Test-Path -LiteralPath $StartupShortcut)) {
+    $ExistingTarget = Get-ShortcutTarget $StartupShortcut
+    if (-not (Test-SamePath $ExistingTarget $Binary)) {
+        throw "Refusing to overwrite an unrecognized login-start shortcut: $StartupShortcut"
     }
 }
 
@@ -327,11 +360,13 @@ try {
     if ($null -ne $ExistingManifest) { $PathAdded = [bool]$ExistingManifest.path_added }
     $CreatedDesktop = ""
     $CreatedStart = ""
+    $CreatedStartup = ""
     if ($null -ne $ExistingManifest) {
         $CreatedDesktop = [string]$ExistingManifest.desktop_shortcut
         $CreatedStart = [string]$ExistingManifest.start_shortcut
+        $CreatedStartup = [string]$ExistingManifest.startup_shortcut
     }
-    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $PathAdded
+    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $CreatedStartup $PathAdded
     if (-not $NoPath) {
         $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
         $Parts = @($UserPath -split ';' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
@@ -344,7 +379,7 @@ try {
             $env:Path += ";$InstallDir"
         }
     }
-    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $PathAdded
+    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $CreatedStartup $PathAdded
 
     if (-not $NoDesktop) {
         New-Item -ItemType Directory -Path (Split-Path -Parent $DesktopShortcut) -Force | Out-Null
@@ -352,7 +387,7 @@ try {
         $Shell = New-Object -ComObject WScript.Shell
         $CreatedDesktop = $DesktopShortcut
         $CreatedStart = $StartShortcut
-        Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $PathAdded
+        Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $CreatedStartup $PathAdded
         foreach ($ShortcutPath in @($DesktopShortcut, $StartShortcut)) {
             $Shortcut = $Shell.CreateShortcut($ShortcutPath)
             $Shortcut.TargetPath = $Binary
@@ -364,7 +399,23 @@ try {
         }
     }
 
-    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $PathAdded
+    if (-not $NoAutostart) {
+        New-Item -ItemType Directory -Path (Split-Path -Parent $StartupShortcut) -Force | Out-Null
+        $Shell = New-Object -ComObject WScript.Shell
+        $CreatedStartup = $StartupShortcut
+        Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $CreatedStartup $PathAdded
+        $Shortcut = $Shell.CreateShortcut($StartupShortcut)
+        $Shortcut.TargetPath = $Binary
+        $Shortcut.Arguments = "serve"
+        $Shortcut.WorkingDirectory = $InstallDir
+        $Shortcut.IconLocation = "$Binary,0"
+        $Shortcut.Description = "Start the Burnban meter at login"
+        $Shortcut.WindowStyle = 7
+        $Shortcut.Save()
+        Write-Host "Starts at login: $StartupShortcut"
+    }
+
+    Write-InstallManifest $Binary $InstallDir $CreatedDesktop $CreatedStart $CreatedStartup $PathAdded
 
     $Version = & $Binary version
     Write-Host "Installed: $Version" -ForegroundColor Green
@@ -372,8 +423,30 @@ try {
     $InteractiveSetup = -not [Console]::IsInputRedirected -and -not [Console]::IsOutputRedirected
     if ($InteractiveSetup) {
         & $Binary setup --if-needed --no-launch
-        if ($LASTEXITCODE -ne 0) {
+        $SetupExitCode = $LASTEXITCODE
+        if ($SetupExitCode -ne 0) {
             Write-Warning "Guided setup paused; finish later with: burnban setup"
+        } elseif (-not $NoLaunch) {
+            Write-Host "Starting Burnban..."
+            & $Binary status *> $null
+            $MeterReady = $LASTEXITCODE -eq 0
+            if (-not $MeterReady) {
+                $StartupOut = Join-Path $StateDir "startup.out.log"
+                $StartupErr = Join-Path $StateDir "startup.err.log"
+                Start-Process -FilePath $Binary -ArgumentList @("serve") -WindowStyle Hidden `
+                    -RedirectStandardOutput $StartupOut -RedirectStandardError $StartupErr | Out-Null
+                for ($Attempt = 0; $Attempt -lt 50 -and -not $MeterReady; $Attempt++) {
+                    Start-Sleep -Milliseconds 100
+                    & $Binary status *> $null
+                    $MeterReady = $LASTEXITCODE -eq 0
+                }
+            }
+            if ($MeterReady) {
+                Write-Host "Meter running: http://localhost:4141"
+                Start-Process -FilePath $Binary -WindowStyle Hidden | Out-Null
+            } else {
+                Write-Warning "The meter did not become healthy; inspect $StateDir\startup.err.log"
+            }
         }
     } else {
         Write-Host "Get started:"
