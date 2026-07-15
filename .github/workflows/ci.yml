@@ -43,6 +43,12 @@ jobs:
         run: |
           go mod tidy -diff
           go mod verify
+      - name: Windows resource integrity
+        shell: bash
+        run: |
+          set -euo pipefail
+          go generate
+          git diff --exit-code -- rsrc_windows_amd64.syso rsrc_windows_arm64.syso
       - name: Vet, race tests, and static build
         shell: bash
         run: |
@@ -166,6 +172,9 @@ jobs:
           for arch in amd64 arm64; do
             test -f "dist/burnban_windows_${arch}.zip"
           done
+          go run ./scripts/verify_windows_manifest.go \
+            dist/burnban_windows_amd64.zip \
+            dist/burnban_windows_arm64.zip
           test -f dist/checksums.txt
           compgen -G 'dist/*.sbom.spdx.json' >/dev/null
           (cd dist && sha256sum --check checksums.txt)

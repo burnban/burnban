@@ -48,6 +48,7 @@ function Test-BurnbanBinary([string]$Path) {
         $Output = & $Path version 2>$null
         return ($LASTEXITCODE -eq 0 -and "$Output" -match '^burnban\s')
     } catch {
+        Write-Warning "Could not launch Burnban binary at ${Path}: $($_.Exception.Message)"
         return $false
     }
 }
@@ -283,7 +284,7 @@ try {
     $Extracted = Join-Path $Temp "extracted"
     Expand-Archive -Path $Zip -DestinationPath $Extracted -Force
     New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
-    $StagedBinary = Join-Path $InstallDir (".burnban-install-" + [Guid]::NewGuid().ToString("N") + ".exe")
+    $StagedBinary = Join-Path $InstallDir (".burnban-stage-" + [Guid]::NewGuid().ToString("N") + ".exe")
     Copy-Item (Join-Path $Extracted "burnban.exe") $StagedBinary
     # This happens only after the archive matches the published SHA-256.
     Unblock-File $StagedBinary -ErrorAction SilentlyContinue
