@@ -403,8 +403,8 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 	adapterVersion := sourceadapter.APIVersion
 	privacy := sourceadapter.Privacy{ReadOnly: true}
 	providers := []localusage.ProviderUsage{
-		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), Models: []localusage.ModelUsage{claude}, Days: []localusage.DayUsage{}, Totals: claude.Totals},
-		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), Models: []localusage.ModelUsage{codex}, Days: []localusage.DayUsage{}, Totals: codex.Totals},
+		{Provider: "claude-code", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(4 * multiplier), SubscriptionUSD: claude.APIUSD, Models: []localusage.ModelUsage{claude}, Days: []localusage.DayUsage{}, Totals: claude.Totals},
+		{Provider: "codex", AdapterVersion: adapterVersion, Privacy: privacy, Detected: true, Sessions: int(3 * multiplier), SubscriptionUSD: codex.APIUSD, Models: []localusage.ModelUsage{codex}, Days: []localusage.DayUsage{}, Totals: codex.Totals},
 		{Provider: "gemini-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
 		{Provider: "github-copilot-cli", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
 		{Provider: "cursor", AdapterVersion: adapterVersion, Privacy: privacy, Models: []localusage.ModelUsage{}, Days: []localusage.DayUsage{}},
@@ -418,8 +418,12 @@ func demoSubscription(window string, now time.Time) (*subscriptionResponse, erro
 		CacheRead: claude.CacheRead + codex.CacheRead, CacheWrite: claude.CacheWrite + codex.CacheWrite,
 		CacheWrite5m: claude.CacheWrite5m + codex.CacheWrite5m, APIUSD: claude.APIUSD + codex.APIUSD,
 	}
+	// Demo fixtures model flat-rate plan usage, so the whole total is the
+	// subscription bucket; leaving both buckets zero renders the headline
+	// stat as $0.00 while the table below it shows real rows.
 	return &subscriptionResponse{Window: window, Label: label, Report: localusage.Report{
-		Since: since, Until: now, HasUsage: true, UnpricedModels: []string{}, Providers: providers, Totals: totals,
+		Since: since, Until: now, HasUsage: true, SubscriptionUSD: totals.APIUSD,
+		UnpricedModels: []string{}, Providers: providers, Totals: totals,
 	}}, nil
 }
 

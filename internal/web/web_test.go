@@ -609,6 +609,54 @@ func TestDemoSubscriptionNeverScansRealHome(t *testing.T) {
 	}
 }
 
+func TestDemoSubscriptionHeadlineMatchesTable(t *testing.T) {
+	s, err := store.Open(filepath.Join(t.TempDir(), "demo.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s.Close() })
+	prices, err := pricing.Load()
+	if err != nil {
+		t.Fatal(err)
+	}
+	mux := http.NewServeMux()
+	web.RegisterWithConfig(mux, s, web.Config{Version: "test", Prices: prices, Demo: true, Exposure: "localhost"})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	// The demo fixtures model flat-rate plan usage, so the subscription
+	// headline must carry the same dollars as the per-provider table; a
+	// zero bucket renders a $0.00 stat above nonzero rows.
+	for _, window := range []string{"today", "7d", "30d"} {
+		resp, err := http.Get(srv.URL + "/api/local-usage?window=" + window)
+		if err != nil {
+			t.Fatal(err)
+		}
+		var data struct {
+			SubscriptionUSD float64 `json:"subscription_usd"`
+			MeteredUSD      float64 `json:"metered_usd"`
+			APIUSD          float64 `json:"api_usd"`
+			Providers       []struct {
+				Provider        string  `json:"provider"`
+				SubscriptionUSD float64 `json:"subscription_usd"`
+				APIUSD          float64 `json:"api_usd"`
+			} `json:"providers"`
+		}
+		err = json.NewDecoder(resp.Body).Decode(&data)
+		resp.Body.Close()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if data.APIUSD <= 0 || data.SubscriptionUSD != data.APIUSD || data.MeteredUSD != 0 {
+			t.Fatalf("window %s: subscription_usd=%v metered_usd=%v api_usd=%v, want subscription bucket to carry the whole total", window, data.SubscriptionUSD, data.MeteredUSD, data.APIUSD)
+		}
+		for _, provider := range data.Providers {
+			if provider.SubscriptionUSD != provider.APIUSD {
+				t.Fatalf("window %s: provider %s subscription_usd=%v api_usd=%v", window, provider.Provider, provider.SubscriptionUSD, provider.APIUSD)
+			}
+		}
+	}
+}
+
 func TestTeamGatewayDisablesHostLocalUsageScanning(t *testing.T) {
 	home := t.TempDir()
 	t.Setenv("HOME", home)
