@@ -1081,6 +1081,40 @@ func BanStatus(s settingsReader) (local, external bool, err error) {
 	return vals[KeyBanActive] == "1", vals[KeyExternalBanActive] == "1", nil
 }
 
+// OverrideActive reports whether a `lift --today` override is suppressing
+// local caps for the current calendar day.
+func OverrideActive(s settingsReader, now time.Time) (bool, error) {
+	vals, err := s.GetSettings(KeyOverrideDay)
+	if err != nil {
+		return false, err
+	}
+	return vals[KeyOverrideDay] == now.Format("2006-01-02"), nil
+}
+
+type settingsStore interface {
+	settingsReader
+	DeleteSetting(key string) error
+}
+
+// ClearOverride removes any `lift --today` cap override so local caps enforce
+// again. Setting or banning implies the user wants enforcement back; without
+// this, an override would silently defeat caps configured after it until
+// midnight. It reports whether an override covering now was actually active
+// so callers can tell the user enforcement was re-armed.
+func ClearOverride(s settingsStore, now time.Time) (bool, error) {
+	vals, err := s.GetSettings(KeyOverrideDay)
+	if err != nil {
+		return false, err
+	}
+	if vals[KeyOverrideDay] == "" {
+		return false, nil
+	}
+	if err := s.DeleteSetting(KeyOverrideDay); err != nil {
+		return false, err
+	}
+	return vals[KeyOverrideDay] == now.Format("2006-01-02"), nil
+}
+
 func selectEffectiveState(st *WindowState, local float64, localSet bool, external float64, externalSet bool, localStart, externalStartAt time.Time) {
 	switch {
 	case localSet && externalSet:

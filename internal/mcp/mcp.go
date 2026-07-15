@@ -339,7 +339,15 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 				return "", err
 			}
 		}
-		return fmt.Sprintf("%s set to $%.2f — new requests get a 402 after recorded spend reaches it", scope, usd), nil
+		msg := fmt.Sprintf("%s set to $%.2f — new requests get a 402 after recorded spend reaches it", scope, usd)
+		// A freshly set cap must actually enforce: drop any `lift --today`
+		// override, which would otherwise suspend it until midnight.
+		if cleared, err := budget.ClearOverride(s.S, time.Now()); err != nil {
+			return "", err
+		} else if cleared {
+			msg += "; today's cap override cleared"
+		}
+		return msg, nil
 	case "burn_ban":
 		if err := s.requireBudgetAdmin(); err != nil {
 			return "", err
@@ -350,7 +358,15 @@ func (s *Server) call(name string, args json.RawMessage) (string, error) {
 		if err := s.S.SetSetting(budget.KeyBanActive, "1"); err != nil {
 			return "", err
 		}
-		return "local burn ban in effect — all agent spend is paused until lifted", nil
+		msg := "local burn ban in effect — all agent spend is paused until lifted"
+		// The emergency stop also re-arms caps, so ban then lift returns to
+		// enforced budgets instead of resurrecting an earlier today-override.
+		if cleared, err := budget.ClearOverride(s.S, time.Now()); err != nil {
+			return "", err
+		} else if cleared {
+			msg += "; today's cap override cleared"
+		}
+		return msg, nil
 	case "lift_burn_ban":
 		if err := s.requireBudgetAdmin(); err != nil {
 			return "", err

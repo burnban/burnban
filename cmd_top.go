@@ -97,6 +97,11 @@ func renderTop(s *store.Store, color bool) (string, error) {
 		}
 		b.WriteString(colorize(message, cRed, color) + "\n\n")
 	}
+	if override, err := budget.OverrideActive(s, now); err != nil {
+		return "", err
+	} else if override {
+		b.WriteString(colorize("CAPS OVERRIDDEN until midnight (lift --today) · re-arm with burnban cap", cYellow, color) + "\n\n")
+	}
 	fuses, err := budget.FuseStatus(s, now)
 	if err != nil {
 		return "", err

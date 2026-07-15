@@ -48,6 +48,69 @@ func TestCapExplicitZeroRemovesOneWindow(t *testing.T) {
 	}
 }
 
+func TestCapSetAndBanClearTodayOverride(t *testing.T) {
+	db := filepath.Join(t.TempDir(), "t.db")
+	overrideActive := func() bool {
+		t.Helper()
+		s, err := store.Open(db)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer s.Close()
+		v, err := s.GetSetting(budget.KeyOverrideDay)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return v != ""
+	}
+	lift := func() {
+		t.Helper()
+		if err := cmdLift([]string{"--today", "--db", db}); err != nil {
+			t.Fatal(err)
+		}
+		if !overrideActive() {
+			t.Fatal("lift --today did not record an override")
+		}
+	}
+
+	// A cap set after `lift --today` must enforce, not stay silently
+	// suspended until midnight.
+	lift()
+	if err := cmdCap([]string{"--daily", "5", "--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if overrideActive() {
+		t.Fatal("setting a cap did not clear the today override")
+	}
+
+	lift()
+	if err := cmdCap([]string{"--agent", "claude-cli", "--daily", "3", "--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if overrideActive() {
+		t.Fatal("setting a per-agent cap did not clear the today override")
+	}
+
+	// Ban then lift must return to enforced budgets, not resurrect the
+	// earlier override.
+	lift()
+	if err := cmdBan([]string{"--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if overrideActive() {
+		t.Fatal("ban did not clear the today override")
+	}
+
+	// Removing a cap is not a request for enforcement; the override stays.
+	lift()
+	if err := cmdCap([]string{"--daily", "0", "--db", db}); err != nil {
+		t.Fatal(err)
+	}
+	if !overrideActive() {
+		t.Fatal("removing a cap should not clear the today override")
+	}
+}
+
 func TestCapBareAgentShowsStatusNotError(t *testing.T) {
 	db := filepath.Join(t.TempDir(), "t.db")
 	// v0.3 printed status here; erroring broke scripts.

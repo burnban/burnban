@@ -69,6 +69,7 @@ func cmdCap(args []string) error {
 
 	byName := map[string]float64{"daily": *daily, "weekly": *weekly, "monthly": *monthly}
 	set := false
+	armed := false
 	for _, w := range budget.Windows() {
 		usd := byName[w.Name]
 		if usd <= 0 {
@@ -94,6 +95,16 @@ func cmdCap(args []string) error {
 		}
 		fmt.Printf("local %s cap set: $%.2f — the proxy returns 402 once it is reached\n", w.Name, usd)
 		set = true
+		armed = true
+	}
+	// A freshly set cap must actually enforce: drop any `lift --today`
+	// override, which would otherwise silently suspend it until midnight.
+	if armed {
+		if cleared, err := budget.ClearOverride(s, time.Now()); err != nil {
+			return err
+		} else if cleared {
+			fmt.Println("today's cap override (lift --today) cleared: caps enforce again")
+		}
 	}
 	if *warn >= 0 {
 		if *warn > 100 {
@@ -136,6 +147,11 @@ func capAgent(s *store.Store, agent string, daily, weekly, monthly, warn float64
 			return err
 		}
 		fmt.Printf("%s set: $%.2f — the proxy returns 402 once it is reached\n", scope, daily)
+		if cleared, err := budget.ClearOverride(s, time.Now()); err != nil {
+			return err
+		} else if cleared {
+			fmt.Println("today's cap override (lift --today) cleared: caps enforce again")
+		}
 	default:
 		v, err := s.GetSetting(key)
 		if err != nil {
@@ -157,6 +173,11 @@ func capAgent(s *store.Store, agent string, daily, weekly, monthly, warn float64
 // printCapStatus shows every window's live position, the warn threshold,
 // and per-agent caps.
 func printCapStatus(s *store.Store) error {
+	if override, err := budget.OverrideActive(s, time.Now()); err != nil {
+		return err
+	} else if override {
+		fmt.Println("caps OVERRIDDEN until midnight (lift --today). Re-arm by setting any cap, e.g. burnban cap --daily 10")
+	}
 	states, err := budget.Status(s, time.Now())
 	if err != nil {
 		return err
@@ -206,7 +227,15 @@ func cmdBan(args []string) error {
 	if err := s.SetSetting(budget.KeyBanActive, "1"); err != nil {
 		return err
 	}
-	fmt.Println("local burn ban in effect — all agent spend is paused until `burnban lift`")
+	msg := "local burn ban in effect — all agent spend is paused until `burnban lift`"
+	// The emergency stop also re-arms caps, so `ban` then `lift` returns to
+	// enforced budgets instead of resurrecting an earlier `lift --today`.
+	if cleared, err := budget.ClearOverride(s, time.Now()); err != nil {
+		return err
+	} else if cleared {
+		msg += "; today's cap override cleared"
+	}
+	fmt.Println(msg)
 	return nil
 }
 

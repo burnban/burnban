@@ -20,6 +20,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/burnban/burnban/internal/budget"
+	"github.com/burnban/burnban/internal/store"
 )
 
 type serverState struct {
@@ -78,7 +81,10 @@ type statusResult struct {
 	Database  string              `json:"database,omitempty"`
 	Health    *lifecycleHealth    `json:"health,omitempty"`
 	Telemetry *lifecycleTelemetry `json:"telemetry,omitempty"`
-	Issue     string              `json:"issue,omitempty"`
+	// OverrideToday mirrors the dashboard's override_today: local caps are
+	// suspended by `lift --today` until midnight.
+	OverrideToday bool   `json:"override_today,omitempty"`
+	Issue         string `json:"issue,omitempty"`
 }
 
 func serverStatePath(dbPath string) string {
@@ -274,6 +280,16 @@ func cmdStatusTo(args []string, out io.Writer) error {
 	result.Telemetry = status.Telemetry
 	result.Healthy = status.Health.OK && status.Health.PersistenceOK
 	result.OK = result.Active && result.Healthy
+	// Surface a `lift --today` override next to the health line: a meter that
+	// looks healthy while caps are silently suspended is the worse failure.
+	if db, err := store.Open(state.DBPath); err == nil {
+		override, oerr := budget.OverrideActive(db, time.Now())
+		db.Close()
+		if oerr != nil {
+			return oerr
+		}
+		result.OverrideToday = override
+	}
 	health := terminalText(status.Health.State, 80)
 	if health == "" {
 		health = "unknown"
@@ -290,6 +306,9 @@ func cmdStatusTo(args []string, out io.Writer) error {
 		}
 	} else {
 		fmt.Fprintf(out, "burnban %s is running\npid      %d\nstarted  %s\nurl      %s\ndb       %s\nhealth   %s · %d in flight · $%.4f reserved\n", terminalText(state.Version, 80), state.PID, state.StartedAt.Local().Format(time.RFC3339), terminalText(state.URL, 200), terminalText(state.DBPath, 200), health, status.Health.InFlight, status.Health.ReservedUSD)
+		if result.OverrideToday {
+			fmt.Fprintln(out, "caps     OVERRIDDEN until midnight (lift --today) · re-arm with burnban cap")
+		}
 		if status.Telemetry != nil {
 			fmt.Fprintf(out, "otlp     %s · %d pending · %d dropped\n",
 				terminalText(status.Telemetry.State, 80), status.Telemetry.PendingRows, status.Telemetry.DroppedRows)
