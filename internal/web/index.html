@@ -574,7 +574,29 @@
   let subWindow = "today";
   let subController = null;
   let subSequence = 0;
+  let subRunning = false;
+  let subRetryOnReconnect = false;
   let localUsageEnabled = false;
+  let meterOnline = false;
+
+  const wait = milliseconds => new Promise(resolve => setTimeout(resolve, milliseconds));
+
+  async function fetchLocalUsage(sequence, signal) {
+    let lastError;
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        return await fetch("/api/local-usage?window=" + encodeURIComponent(subWindow), requestOptions(signal));
+      } catch (error) {
+        if (error.name === "AbortError" || signal.aborted || sequence !== subSequence) throw error;
+        lastError = error;
+        if (attempt === 0) {
+          $("subLoading").textContent = "scan connection interrupted · retrying…";
+          await wait(400);
+        }
+      }
+    }
+    throw lastError;
+  }
 
   function renderSubscription(d) {
     $("subLoading").classList.add("hidden");
@@ -638,24 +660,39 @@
     $("subNote").textContent = notes.join(" ");
   }
 
-  async function subscription() {
-    if (!localUsageEnabled) return;
+  async function subscription(force = false) {
+    if (!localUsageEnabled || (!meterOnline && !force) || (subRunning && !force)) return;
     const sequence = ++subSequence;
     if (subController) subController.abort();
     subController = new AbortController();
+    const controller = subController;
+    subRunning = true;
     $("subLoading").textContent = "scanning local agent logs…";
     $("subLoading").classList.remove("hidden");
     $("subError").classList.add("hidden");
     try {
-      const response = await fetch("/api/local-usage?window=" + encodeURIComponent(subWindow), requestOptions(subController.signal));
+      const response = await fetchLocalUsage(sequence, controller.signal);
       if (!response.ok) throw new Error(response.status === 401 ? "authentication required" : `scan returned HTTP ${response.status}`);
       const data = await response.json();
-      if (sequence === subSequence) renderSubscription(data);
+      if (sequence === subSequence) {
+        subRetryOnReconnect = false;
+        renderSubscription(data);
+      }
     } catch (error) {
       if (error.name === "AbortError" || sequence !== subSequence) return;
       $("subLoading").classList.add("hidden");
-      $("subErrorText").textContent = "Local log scan failed: " + error.message + ". Proxy metering continues independently.";
+      if (error instanceof TypeError) {
+        subRetryOnReconnect = true;
+        $("subErrorText").textContent = "Local meter connection was interrupted. Log scanning will retry automatically.";
+      } else {
+        $("subErrorText").textContent = "Local log scan failed: " + error.message + ". Proxy metering continues independently.";
+      }
       $("subError").classList.remove("hidden");
+    } finally {
+      if (sequence === subSequence) {
+        subRunning = false;
+        subController = null;
+      }
     }
   }
 
@@ -667,9 +704,9 @@
       other.setAttribute("aria-pressed", String(selected));
     });
     $("subContent").classList.add("hidden");
-    subscription();
+    subscription(true);
   }));
-  $("subRetry").addEventListener("click", subscription);
+  $("subRetry").addEventListener("click", () => subscription(true));
 
   let platform = "posix";
   let authRequired = false;
@@ -821,6 +858,8 @@
         throw error;
       }
       const d = await response.json();
+      const reconnected = !meterOnline;
+      meterOnline = true;
       connection(d.health && !d.health.ok ? "degraded" : "live", d.health ? d.health.detail : "");
       lastSuccess = new Date();
       setText("total", fmt$(d.total_cost));
@@ -839,7 +878,9 @@
       const localUsageWasEnabled = localUsageEnabled;
       localUsageEnabled = Boolean(d.local_usage_enabled);
       $("localUsagePanel").classList.toggle("hidden", !localUsageEnabled);
-      if (localUsageEnabled && !localUsageWasEnabled) subscription();
+      if (localUsageEnabled && (!localUsageWasEnabled || (reconnected && subRetryOnReconnect))) {
+        subscription(reconnected && subRetryOnReconnect);
+      }
       $("banBanner").classList.toggle("hidden", !d.ban_active && !d.fuse_tripped);
       $("banText").textContent = d.external_ban ? "External burn ban — all agent spend paused" : (d.ban_active ? "Burn ban in effect — all agent spend paused" : "Spend-velocity fuse tripped — new agent spend paused");
       const fuseProjection = Number(d.fuse_request_limit || 0) > 0 && Number(d.fuse_projected_requests || 0) > 0
@@ -856,6 +897,15 @@
       renderAgents(d.agents);
       renderReceipts(d);
     } catch (error) {
+      const disconnected = !error.status || error.status === 401;
+      meterOnline = !disconnected;
+      if (localUsageEnabled && disconnected) {
+        subRetryOnReconnect = true;
+        if (subController) subController.abort();
+        $("subLoading").classList.add("hidden");
+        $("subErrorText").textContent = "Local log scanning is paused. It will resume when the dashboard reconnects.";
+        $("subError").classList.remove("hidden");
+      }
       if (error.status === 401) {
         TOKEN = "";
         authRequired = true;
