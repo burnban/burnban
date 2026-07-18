@@ -512,6 +512,29 @@ The MIT meter only recognizes generic local `external_*` policy settings; it con
 - **State of Agent Spend** — opt-in anonymous aggregates, published monthly
 - **Burnban Teams** — the paid fleet control plane above; [early access](https://burnban.dev#teams)
 
+## FAQ
+
+**Does Burnban upload my prompts, keys, or usage anywhere?**
+No. The meter, ledger, and policy state stay on your machine in local SQLite. Provider keys are forwarded unchanged to the upstream you configure and are never persisted. The MIT binary carries no account, license check, or code path to a Burnban-operated service. The only outbound traffic is the model request to the provider you chose, plus an optional webhook or OTLP collector you point at yourself.
+
+**Do I need Postgres, Redis, or a cloud account to enforce budgets?**
+No. One static binary and one local SQLite ledger. Caps and velocity fuses enforce during admission on your own machine, with no external state store and nothing to stand up first.
+
+**How much latency does the proxy add?**
+Roughly half a millisecond at the median on an Apple M2 Pro, including the WAL-backed SQLite ledger insert and a live budget check on every request. Measure it on your own hardware with `burnban bench --requests 2000 --concurrency 4`.
+
+**How is Burnban different from ccusage or LiteLLM?**
+Log reporters price what your agents already spent and stop nothing. Platform gateways enforce budgets but expect Postgres, Redis, and their own virtual keys in the request path. Burnban prices your existing subscription logs and caps live API-key spend from a single local binary, with your provider keys passing straight through. See [Why not the big gateway?](#why-not-the-big-gateway).
+
+**Which agents and providers work?**
+`burnban usage` reads the local stores kept by Claude Code, Codex, Gemini CLI, GitHub Copilot CLI, Cursor, OpenCode, Hermes Agent, OpenClaw, and Goose. `burnban serve` meters Anthropic, OpenAI, Gemini, xAI, OpenRouter, Groq, Mistral, DeepSeek, Ollama, and vLLM out of the box, and any other endpoint through `--upstream`. See [Providers](#providers).
+
+**What happens when a request would cross a cap?**
+Burnban refuses to forward it and answers in the provider's native error dialect, so the client receives a clean 402-style denial instead of a broken stream. Recover with `burnban lift --today`, or clear a tripped velocity fuse with `burnban fuse --reset`.
+
+**Is it actually free?**
+Yes. Everything in this README is MIT and free permanently, including the single-box team gateway. Paid coordination products ship separately and never gate the meter or its extension point. See [Free forever vs. paid](#free-forever-vs-paid).
+
 ## Development
 
 The capabilities documented on this branch describe the current development
