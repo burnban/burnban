@@ -3,7 +3,7 @@ module github.com/burnban/burnban
 go 1.25.12
 
 require (
-	github.com/mattn/go-isatty v0.0.22
+	github.com/mattn/go-isatty v0.0.23
 	modernc.org/sqlite v1.53.0
 )
 
