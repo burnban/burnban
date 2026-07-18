@@ -21,7 +21,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - uses: zgosalvez/github-actions-ensure-sha-pinned-actions@3db98c0363e2fa5df3e1c4c471777a7c10b24cc9 # v5.0.5
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Source and tag preflight
@@ -152,7 +152,7 @@ jobs:
           default_ref="refs/remotes/origin/$DEFAULT_BRANCH"
           git show-ref --verify --quiet "$default_ref"
           git merge-base --is-ancestor HEAD "$default_ref"
-      - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
       - name: Install repository tooling
