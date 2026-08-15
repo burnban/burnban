@@ -14,7 +14,7 @@ RUN CGO_ENABLED=0 go build -trimpath -ldflags "-s -w -X main.version=${VERSION}"
 RUN sh scripts/collect_licenses.sh /licenses
 RUN mkdir -p /data && chmod 0700 /data
 
-FROM gcr.io/distroless/static-debian12@sha256:22fd79fd75eab2372585b44517f8a094349938919dc613aafc37e4bdc9967c82
+FROM gcr.io/distroless/static-debian12@sha256:6447365a6337c3732f412d1b74357b30a633831955b2bc45552b0086be907687
 
 ARG VERSION=dev
 ARG VCS_REF=unknown
